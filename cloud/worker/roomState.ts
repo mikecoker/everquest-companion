@@ -36,12 +36,18 @@ export interface StoredRoomState {
   revision: number
   checkpointAt: number
   participants: Record<string, ParticipantRecord>
-  active?: ActiveEncounter
+  active: ActiveEncounter[]
   history: CloudRoomEncounter[]
 }
 
 export function createStoredRoom(roomId: string, name: string, ownerParticipantId: string): StoredRoomState {
-  return { roomId, name, ownerParticipantId, revision: 0, checkpointAt: 0, participants: {}, history: [] }
+  return { roomId, name, ownerParticipantId, revision: 0, checkpointAt: 0, participants: {}, active: [], history: [] }
+}
+
+/** Upgrade the singular active encounter written by pre-0.13 Durable Objects. */
+export function normalizeStoredRoomState(stored: StoredRoomState): StoredRoomState {
+  const legacy = (stored as unknown as { active?: ActiveEncounter | ActiveEncounter[] }).active
+  return { ...stored, active: legacy === undefined ? [] : Array.isArray(legacy) ? legacy : [legacy] }
 }
 
 function ownContribution(participantId: string, state: CloudSyncState): CloudRoomEncounterContribution {
@@ -68,6 +74,7 @@ function participantView(record: ParticipantRecord): CloudRoomParticipant {
 function encounterView(active: ActiveEncounter, now: number, isActive: boolean): CloudRoomEncounter {
   const participants = Object.values(active.participants).sort((left, right) => right.totalDamage - left.totalDamage)
   const totalDamage = participants.reduce((total, participant) => total + participant.totalDamage, 0)
+  const dps = participants.reduce((total, participant) => total + participant.dps, 0)
   const endedAt = isActive ? undefined : Math.max(active.startedAt, now)
   const durationSec = Math.max(1, ((endedAt ?? now) - active.startedAt) / 1_000)
   return {
@@ -78,7 +85,7 @@ function encounterView(active: ActiveEncounter, now: number, isActive: boolean):
     ...(endedAt === undefined ? {} : { endedAt }),
     durationSec,
     totalDamage,
-    dps: totalDamage / durationSec,
+    dps,
     active: isActive,
     participants
   }
@@ -91,35 +98,69 @@ function chooseEncounterLabel(active: ActiveEncounter, state: CloudSyncState, co
   if (state.character.zone !== undefined) active.zone = state.character.zone
 }
 
-function updateActiveEncounter(
-  stored: StoredRoomState,
-  participantId: string,
-  state: CloudSyncState,
-  encounterId: string
-): void {
-  stored.active ??= {
+const ENCOUNTER_OVERLAP_GRACE_MS = 60_000
+
+function sameEncounter(active: ActiveEncounter, state: CloudSyncState, now: number): boolean {
+  const zone = state.character.zone
+  if (now - active.lastUpdateAt > ENCOUNTER_OVERLAP_GRACE_MS) return false
+  if (active.zone !== undefined && zone !== undefined) return active.zone === zone
+  return active.target === (state.combat.target ?? 'Shared encounter')
+}
+
+function createActiveEncounter(state: CloudSyncState, encounterId: string, now: number): ActiveEncounter {
+  return {
     id: encounterId,
     target: state.combat.target ?? 'Shared encounter',
     ...(state.character.zone === undefined ? {} : { zone: state.character.zone }),
     startedAt: state.combat.startedAt ?? state.publishedAt,
-    lastUpdateAt: state.publishedAt,
+    lastUpdateAt: now,
     participants: {},
     fighting: {}
   }
+}
+
+interface ActiveUpdate {
+  participantId: string
+  state: CloudSyncState
+  encounterId: string
+  now: number
+}
+
+function updateActiveEncounter(stored: StoredRoomState, update: ActiveUpdate): void {
+  const { participantId, state, encounterId, now } = update
+  let active = stored.active.find((candidate) => sameEncounter(candidate, state, now))
+  if (active === undefined) {
+    active = createActiveEncounter(state, encounterId, now)
+    stored.active.unshift(active)
+  }
   const contribution = ownContribution(participantId, state)
-  chooseEncounterLabel(stored.active, state, contribution)
-  stored.active.startedAt = Math.min(stored.active.startedAt, state.combat.startedAt ?? state.publishedAt)
-  stored.active.lastUpdateAt = Math.max(stored.active.lastUpdateAt, state.publishedAt)
-  stored.active.participants[participantId] = contribution
-  stored.active.fighting[participantId] = true
+  chooseEncounterLabel(active, state, contribution)
+  active.startedAt = Math.min(active.startedAt, state.combat.startedAt ?? state.publishedAt)
+  active.lastUpdateAt = Math.max(active.lastUpdateAt, now)
+  active.participants[participantId] = contribution
+  active.fighting[participantId] = true
 }
 
 function finalizeIfSettled(stored: StoredRoomState, now: number): void {
-  const active = stored.active
-  if (active === undefined || Object.values(active.fighting).some(Boolean)) return
-  stored.history.unshift(encounterView(active, now, false))
+  const settled = stored.active.filter((active) => !Object.values(active.fighting).some(Boolean))
+  if (settled.length === 0) return
+  stored.active = stored.active.filter((active) => Object.values(active.fighting).some(Boolean))
+  stored.history.unshift(...settled.map((active) => encounterView(active, now, false)))
   stored.history = stored.history.slice(0, CLOUD_ROOM_LIMITS.maxEncounters)
-  delete stored.active
+}
+
+function settleParticipant(active: ActiveEncounter, participantId: string, state: CloudSyncState, now: number): void {
+  if (!active.fighting[participantId]) return
+  const contribution = ownContribution(participantId, state)
+  active.participants[participantId] = contribution
+  active.lastUpdateAt = Math.max(active.lastUpdateAt, now)
+  chooseEncounterLabel(active, state, contribution)
+  active.fighting[participantId] = false
+}
+
+function changedDesktopEncounter(previous: CloudSyncState | undefined, next: CloudSyncState): boolean {
+  return previous?.combat.inCombat === true && next.combat.inCombat &&
+    (previous.combat.startedAt !== next.combat.startedAt || previous.character.zone !== next.character.zone)
 }
 
 export function addRoomMember(stored: StoredRoomState, member: RoomMemberIdentity): StoredRoomState {
@@ -138,7 +179,7 @@ export function removeRoomMember(stored: StoredRoomState, participantId: string,
   stored.participants = Object.fromEntries(
     Object.entries(stored.participants).filter(([id]) => id !== participantId)
   )
-  if (stored.active !== undefined) stored.active.fighting[participantId] = false
+  for (const active of stored.active) active.fighting[participantId] = false
   finalizeIfSettled(stored, now)
   stored.revision += 1
   return stored
@@ -154,21 +195,21 @@ export interface RoomContributionUpdate {
 
 export function applyRoomContribution(stored: StoredRoomState, update: RoomContributionUpdate): StoredRoomState {
   const { member, state, online, now, encounterId } = update
+  const previous = stored.participants[member.participantId]?.state
   stored.participants[member.participantId] = {
     ...member,
     online,
     lastSeenAt: now,
     state
   }
-  if (online && state.combat.inCombat) updateActiveEncounter(stored, member.participantId, state, encounterId)
-  else if (stored.active !== undefined) {
-    if (stored.active.fighting[member.participantId]) {
-      const contribution = ownContribution(member.participantId, state)
-      stored.active.participants[member.participantId] = contribution
-      stored.active.lastUpdateAt = Math.max(stored.active.lastUpdateAt, now)
-      chooseEncounterLabel(stored.active, state, contribution)
-    }
-    stored.active.fighting[member.participantId] = false
+  if (changedDesktopEncounter(previous, state) && previous !== undefined) {
+    for (const active of stored.active) settleParticipant(active, member.participantId, previous, now)
+    finalizeIfSettled(stored, now)
+  }
+  if (online && state.combat.inCombat) {
+    updateActiveEncounter(stored, { participantId: member.participantId, state, encounterId, now })
+  } else {
+    for (const active of stored.active) settleParticipant(active, member.participantId, state, now)
   }
   finalizeIfSettled(stored, now)
   stored.revision += 1
@@ -181,7 +222,7 @@ export function markRoomParticipantOffline(stored: StoredRoomState, participantI
     participant.online = false
     participant.lastSeenAt = now
   }
-  if (stored.active !== undefined) stored.active.fighting[participantId] = false
+  for (const active of stored.active) active.fighting[participantId] = false
   finalizeIfSettled(stored, now)
   stored.revision += 1
   return stored
@@ -198,7 +239,11 @@ export function roomSnapshot(stored: StoredRoomState, now: number): CloudRoomSna
     ownerParticipantId: stored.ownerParticipantId,
     revision: stored.revision,
     participants,
-    encounters: [...(stored.active === undefined ? [] : [encounterView(stored.active, now, true)]), ...stored.history]
+    encounters: [
+      ...[...stored.active].sort((left, right) => right.lastUpdateAt - left.lastUpdateAt)
+        .map((active) => encounterView(active, now, true)),
+      ...stored.history
+    ]
       .slice(0, CLOUD_ROOM_LIMITS.maxEncounters)
   }
 }

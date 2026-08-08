@@ -12,6 +12,7 @@ import {
   addRoomMember,
   applyRoomContribution,
   createStoredRoom,
+  normalizeStoredRoomState,
   removeRoomMember,
   roomSnapshot,
   type RoomMemberIdentity,
@@ -117,7 +118,9 @@ export class SyncRoom extends DurableObject<Env> {
   private async storedSharedRoom(): Promise<StoredRoomState | undefined> {
     if (this.sharedCache === undefined) {
       const stored = await this.ctx.storage.get<StoredRoomState>('sharedRoom')
-      if (stored !== undefined) this.sharedCache = { ...stored, checkpointAt: stored.checkpointAt ?? 0 }
+      if (stored !== undefined) {
+        this.sharedCache = normalizeStoredRoomState({ ...stored, checkpointAt: stored.checkpointAt ?? 0 })
+      }
     }
     return this.sharedCache
   }

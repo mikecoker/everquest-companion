@@ -5,6 +5,7 @@ import {
   applyRoomContribution,
   createStoredRoom,
   markRoomParticipantOffline,
+  normalizeStoredRoomState,
   roomSnapshot
 } from '../../worker/roomState'
 
@@ -44,7 +45,42 @@ describe('shared room aggregation', () => {
 
     const encounter = roomSnapshot(stored, 10_000).encounters[0]
     expect(encounter?.totalDamage).toBe(1_100)
+    expect(encounter?.dps).toBe(220)
     expect(encounter?.participants.map((row) => row.totalDamage)).toEqual([650, 450])
+  })
+
+  it('keeps simultaneous fights in different zones as independent encounters', () => {
+    const stored = createStoredRoom('room-1', 'Raid', 'one')
+    const elsewhere = state('Two', 600)
+    elsewhere.character.zone = 'Permafrost'
+    elsewhere.combat.target = 'an ice giant'
+    applyRoomContribution(stored, {
+      member: { participantId: 'one', displayName: 'One' }, state: state('One', 400),
+      online: true, now: 10_000, encounterId: 'hole-fight'
+    })
+    applyRoomContribution(stored, {
+      member: { participantId: 'two', displayName: 'Two' }, state: elsewhere,
+      online: true, now: 10_000, encounterId: 'permafrost-fight'
+    })
+
+    const encounters = roomSnapshot(stored, 10_000).encounters
+    expect(encounters).toHaveLength(2)
+    expect(encounters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'hole-fight', zone: 'The Hole', totalDamage: 450, dps: 90 }),
+      expect.objectContaining({ id: 'permafrost-fight', zone: 'Permafrost', totalDamage: 650, dps: 130 })
+    ]))
+    expect(encounters.every((encounter) => encounter.participants.length === 1)).toBe(true)
+  })
+
+  it('upgrades the singular active encounter stored by the previous Worker', () => {
+    const stored = createStoredRoom('room-1', 'Raid', 'one')
+    applyRoomContribution(stored, {
+      member: { participantId: 'one', displayName: 'One' }, state: state('One', 400),
+      online: true, now: 10_000, encounterId: 'legacy-fight'
+    })
+    const legacy = { ...stored, active: stored.active[0] } as unknown as typeof stored
+    expect(normalizeStoredRoomState(legacy).active).toHaveLength(1)
+    expect(roomSnapshot(normalizeStoredRoomState(legacy), 10_000).encounters[0]?.id).toBe('legacy-fight')
   })
 
   it('finalizes an encounter when every contributor settles or disconnects', () => {

@@ -85,10 +85,10 @@ async function viewer(accountId: string): Promise<WebSocket> {
   return ws
 }
 
-function publishedState(name: string, damage: number): CloudSyncState {
+function publishedState(name: string, damage: number, zone = 'The Hole'): CloudSyncState {
   return {
     ...TEST_STATE,
-    character: { ...TEST_STATE.character, id: `${name}@freeport`, name },
+    character: { ...TEST_STATE.character, id: `${name}@freeport`, name, zone },
     combat: {
       ...TEST_STATE.combat,
       startedAt: 500,
@@ -134,14 +134,31 @@ describe('shared room control plane and fanout', () => {
     const [combined] = await combinedMessages
     const combinedRoom = combined.room as {
       participants: { participantId: string; online: boolean }[]
-      encounters: { totalDamage: number; active: boolean }[]
+      encounters: { totalDamage: number; dps: number; active: boolean }[]
     }
     expect(combined.type).toBe('room')
     expect(combinedRoom.participants).toEqual(expect.arrayContaining([
       expect.objectContaining({ participantId: ACCOUNT_ID, online: true }),
       expect.objectContaining({ participantId: OTHER_ACCOUNT_ID, online: true })
     ]))
-    expect(combinedRoom.encounters).toEqual([expect.objectContaining({ totalDamage: 1_000, active: true })])
+    expect(combinedRoom.encounters).toEqual([
+      expect.objectContaining({ totalDamage: 1_000, dps: 250, active: true })
+    ])
+
+    const separatedMessages = Promise.all([
+      roomMessage(ownerViewer, 'cross-zone contribution'),
+      roomMessage(otherViewer, 'cross-zone contribution')
+    ])
+    const elsewhere = publishedState('Partner', 700, 'Permafrost')
+    elsewhere.combat.startedAt = 50_000
+    elsewhere.combat.target = 'an ice giant'
+    otherPublisher.send(JSON.stringify({ version: 1, type: 'publish', state: elsewhere }))
+    const [separated] = await separatedMessages
+    const separatedRoom = separated.room as { encounters: { zone?: string; totalDamage: number; dps: number }[] }
+    expect(separatedRoom.encounters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ zone: 'The Hole', dps: 250 }),
+      expect.objectContaining({ zone: 'Permafrost', totalDamage: 700, dps: 175 })
+    ]))
     ownerPublisher.close()
     otherPublisher.close()
     ownerViewer.close()
