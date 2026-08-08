@@ -11,5 +11,8 @@ describe.each([360, 1024])('live layout at %ipx', (width) => {
     expect(screen.getByRole('heading', { name: 'Primitive' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'A fierce cockatrice' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent' })).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Latest kills and loot' })).toBeInTheDocument()
+    expect(screen.getByText('2× Cockatrice beak')).toBeInTheDocument()
+    expect(screen.getAllByText(/^(Kill|Loot)$/u)).toHaveLength(2)
   })
 })
