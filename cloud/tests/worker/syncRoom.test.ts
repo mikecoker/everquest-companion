@@ -1,11 +1,10 @@
-import { env } from 'cloudflare:workers'
+import { env, exports } from 'cloudflare:workers'
 import {
   applyD1Migrations,
   evictDurableObject,
   reset,
   runDurableObjectAlarm,
-  runInDurableObject,
-  SELF
+  runInDurableObject
 } from 'cloudflare:test'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { SyncRoom } from '../../worker/SyncRoom'
@@ -17,17 +16,17 @@ beforeEach(async () => {
 })
 
 async function publisherTicket(device: { deviceId: string; deviceSecret: string }): Promise<string> {
-  const response = await SELF.fetch(jsonRequest('/api/devices/session', device))
-  return ((await response.json()) as { ticket: string }).ticket
+  const response = await exports.default.fetch(jsonRequest('/api/devices/session', device))
+  return (await response.json<{ ticket: string }>()).ticket
 }
 
 async function viewerTicket(): Promise<string> {
-  const response = await SELF.fetch(jsonRequest('/api/viewer/session', {}, await sessionCookie()))
-  return ((await response.json()) as { ticket: string }).ticket
+  const response = await exports.default.fetch(jsonRequest('/api/viewer/session', {}, await sessionCookie()))
+  return (await response.json<{ ticket: string }>()).ticket
 }
 
 async function openSocket(ticket: string): Promise<WebSocket> {
-  const response = await SELF.fetch(`https://worker.test/api/sync?ticket=${ticket}`, {
+  const response = await exports.default.fetch(`https://worker.test/api/sync?ticket=${ticket}`, {
     headers: { upgrade: 'websocket' }
   })
   expect(response.status).toBe(101)
@@ -55,7 +54,7 @@ function publish(socket: WebSocket, state = TEST_STATE): void {
 
 describe('SyncRoom authorization and protocol', () => {
   it('rejects missing tickets and direct unsigned room access', async () => {
-    expect((await SELF.fetch('https://worker.test/api/sync', { headers: { upgrade: 'websocket' } })).status).toBe(401)
+    expect((await exports.default.fetch('https://worker.test/api/sync', { headers: { upgrade: 'websocket' } })).status).toBe(401)
     const stub = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName('unsigned-room'))
     expect((await stub.fetch('https://room.test', { headers: { upgrade: 'websocket' } })).status).toBe(401)
   })
@@ -116,7 +115,7 @@ describe('SyncRoom authorization and protocol', () => {
     const closed = new Promise<CloseEvent>((resolve) => publisher.addEventListener('close', resolve, { once: true }))
     const presence = message(viewer)
 
-    const response = await SELF.fetch(
+    const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${device.deviceId}`, {
         method: 'DELETE',
         headers: { cookie: await sessionCookie() }
@@ -126,9 +125,9 @@ describe('SyncRoom authorization and protocol', () => {
     expect(await closed).toMatchObject({ code: 4003, reason: 'Device revoked' })
     expect(await presence).toMatchObject({ type: 'presence', online: false })
     expect(publisher.readyState).toBe(WebSocket.CLOSED)
-    expect((await SELF.fetch(jsonRequest('/api/devices/session', device))).status).toBe(401)
+    expect((await exports.default.fetch(jsonRequest('/api/devices/session', device))).status).toBe(401)
     expect(
-      (await SELF.fetch(`https://worker.test/api/sync?ticket=${reconnectTicket}`, { headers: { upgrade: 'websocket' } })).status
+      (await exports.default.fetch(`https://worker.test/api/sync?ticket=${reconnectTicket}`, { headers: { upgrade: 'websocket' } })).status
     ).toBe(401)
     viewer.close()
   })
@@ -143,7 +142,7 @@ describe('SyncRoom authorization and protocol', () => {
     await message(viewer)
     const closed = new Promise<CloseEvent>((resolve) => revokedPublisher.addEventListener('close', resolve, { once: true }))
 
-    const response = await SELF.fetch(
+    const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${revokedDevice.deviceId}`, {
         method: 'DELETE',
         headers: { cookie: await sessionCookie() }
@@ -174,7 +173,9 @@ describe('hibernation and retention', () => {
       state.getWebSockets().map((socket) => socket.deserializeAttachment() as Record<string, unknown>)
     )
     expect(attachments).toHaveLength(2)
-    expect(Object.keys(attachments[0]!).sort()).toEqual([
+    const firstAttachment = attachments[0]
+    if (firstAttachment === undefined) throw new Error('Durable Object attachment was missing')
+    expect(Object.keys(firstAttachment).sort()).toEqual([
       'bytes',
       'connectedAt',
       'messages',

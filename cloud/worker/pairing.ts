@@ -1,4 +1,4 @@
-import { randomToken, sha256 } from './crypto'
+import { sha256 } from './crypto'
 import { enforceRateLimit } from './rateLimit'
 import type { Env } from './types'
 import { clientIp, HttpError } from './validation'

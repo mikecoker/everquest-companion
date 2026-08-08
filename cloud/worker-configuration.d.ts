@@ -2,6 +2,11 @@ import type { SyncRoom } from './worker/SyncRoom'
 
 declare global {
   namespace Cloudflare {
+    interface GlobalProps {
+      mainModule: typeof import('./worker/index')
+      durableNamespaces: 'SyncRoom'
+    }
+
     interface Env {
       DB: D1Database
       SYNC_ROOM: DurableObjectNamespace<SyncRoom>
@@ -11,7 +16,7 @@ declare global {
       TICKET_SIGNING_KEY: string
       DEVICE_PEPPER: string
       DISCORD_API_ORIGIN: string
-      TEST_MIGRATIONS: D1Migration[]
+      TEST_MIGRATIONS: import('cloudflare:test').D1Migration[]
     }
   }
 }

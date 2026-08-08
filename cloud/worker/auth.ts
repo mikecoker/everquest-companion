@@ -5,25 +5,40 @@ import { HttpError, readJsonObject, requiredString } from './validation'
 const COOKIE_NAME = 'eq_activity_session'
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
 
-interface DiscordUser {
-  id: string
-  username: string
-  global_name?: string | null
-  avatar?: string | null
-}
-
 function discordOrigin(env: Env): string {
   return (env.DISCORD_API_ORIGIN ?? 'https://discord.com/api/v10').replace(/\/$/u, '')
 }
 
-function accountFromDiscord(user: DiscordUser): CloudAccount {
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+async function responseRecord(response: Response, message: string): Promise<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw new HttpError(502, 'oauth_failed', message)
+  }
+  const source = record(value)
+  if (source === null) throw new HttpError(502, 'oauth_failed', message)
+  return source
+}
+
+function accountFromDiscord(user: Record<string, unknown>): CloudAccount {
+  if (typeof user.id !== 'string' || typeof user.username !== 'string') {
+    throw new HttpError(502, 'oauth_failed', 'Discord returned an invalid user response')
+  }
+  const displayName = typeof user.global_name === 'string' ? user.global_name : user.username
   return {
     id: user.id,
     username: user.username,
-    displayName: user.global_name ?? user.username,
-    ...(user.avatar == null
-      ? {}
-      : { avatarUrl: `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` })
+    displayName,
+    ...(typeof user.avatar === 'string'
+      ? { avatarUrl: `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` }
+      : {})
   }
 }
 
@@ -40,7 +55,7 @@ async function exchangeCode(code: string, env: Env): Promise<string> {
     body
   })
   if (!response.ok) throw new HttpError(401, 'oauth_failed', 'Discord authorization failed')
-  const result = (await response.json()) as { access_token?: unknown }
+  const result = await responseRecord(response, 'Discord returned an invalid token response')
   if (typeof result.access_token !== 'string' || result.access_token.length === 0) {
     throw new HttpError(502, 'oauth_failed', 'Discord returned an invalid token response')
   }
@@ -52,11 +67,7 @@ async function fetchDiscordUser(accessToken: string, env: Env): Promise<CloudAcc
     headers: { authorization: `Bearer ${accessToken}` }
   })
   if (!response.ok) throw new HttpError(401, 'oauth_failed', 'Discord identity verification failed')
-  const user = (await response.json()) as Partial<DiscordUser>
-  if (typeof user.id !== 'string' || typeof user.username !== 'string') {
-    throw new HttpError(502, 'oauth_failed', 'Discord returned an invalid user response')
-  }
-  return accountFromDiscord(user as DiscordUser)
+  return accountFromDiscord(await responseRecord(response, 'Discord returned an invalid user response'))
 }
 
 function cookieDomain(env: Env): string {
@@ -114,7 +125,9 @@ export async function requireSession(request: Request, env: Env): Promise<string
   const value = await verifySignedValue(cookie, env.COOKIE_SIGNING_KEY)
   if (value === null) throw new HttpError(401, 'unauthorized', 'Session is invalid')
   try {
-    const payload = JSON.parse(atob(value.replaceAll('-', '+').replaceAll('_', '/'))) as { sub?: unknown; exp?: unknown }
+    const decoded: unknown = JSON.parse(atob(value.replaceAll('-', '+').replaceAll('_', '/')))
+    const payload = record(decoded)
+    if (payload === null) throw new Error('invalid')
     if (typeof payload.sub !== 'string' || typeof payload.exp !== 'number' || payload.exp <= Date.now()) {
       throw new Error('expired')
     }
