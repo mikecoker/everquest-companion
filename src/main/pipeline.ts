@@ -61,6 +61,19 @@ export const epoch = new EpochDetector()
 // before the Welcome (a measured reconnect preamble makes that read a 13-hour absence as 6s).
 export const sessionDetector = new SessionDetector()
 
+const CLOUD_SYNC_MODULES = new Set(['character', 'combo', 'loot', 'progression'])
+let cloudSyncStateObserver: (() => void) | null = null
+
+/** Install the optional cloud publisher observer without making the pipeline import policy/store. */
+export function setCloudSyncStateObserver(observer: (() => void) | null): void {
+  cloudSyncStateObserver = observer
+}
+
+/** Character switches and combat events use the same synchronous dirty seam as module flushes. */
+export function notifyCloudSyncStateChanged(): void {
+  cloudSyncStateObserver?.()
+}
+
 // The extension framework. Modules own their slice of log-derived state and push
 // deltas to the renderer over the generic `module:delta` channel. Registration
 // order = bus delivery order.
@@ -75,6 +88,7 @@ export const registry = new ModuleRegistry({
     // eventFeed module and rides its deltas), so deltas must reach that window too.
     const evOverlay = getOverlayWindow('events')
     if (evOverlay && !evOverlay.isDestroyed()) evOverlay.webContents.send(IPC.onModuleDelta, delta)
+    if (CLOUD_SYNC_MODULES.has(delta.moduleId)) notifyCloudSyncStateChanged()
   }
 })
 /**

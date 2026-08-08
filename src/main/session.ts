@@ -42,6 +42,7 @@ import {
   registry,
   rosterModule,
   sessionDetector,
+  notifyCloudSyncStateChanged,
   turnInsModule
 } from './pipeline'
 import {
@@ -503,6 +504,9 @@ export async function tailCharacter(ref: CharacterRef): Promise<TailResult> {
   // renderer the character's state was fully rebuilt so views remount/re-hydrate.
   registry.flushNow()
   sendToMain(IPC.onCharacter, character)
+  // A character switch is a full replacement at the cloud boundary, never a cross-character
+  // delta. This fires after replay disposal and hydration, when every snapshot names one owner.
+  notifyCloudSyncStateChanged()
   return {
     eventsReplayed: scan.seq,
     replay: { slices: slicer.slices, workMs: slicer.workMs, restMs: slicer.restMs },

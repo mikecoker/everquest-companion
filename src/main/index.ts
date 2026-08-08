@@ -41,11 +41,30 @@ import { applyGraphicsSafeMode } from './graphics'
 import { installImageCacheProtocol } from './imageCache'
 import { installSpeechCacheProtocol } from './speech/cache'
 import { registerIpc } from './ipc'
-import { DATA_READY_MS, bus, buffsModule, epoch, sessionDetector } from './pipeline'
+import {
+  DATA_READY_MS,
+  bus,
+  buffsModule,
+  characterModule,
+  combat,
+  comboModule,
+  epoch,
+  lootModule,
+  notifyCloudSyncStateChanged,
+  progressionModule,
+  sessionDetector,
+  setCloudSyncStateObserver
+} from './pipeline'
 import { markStartupPhase, startPerfSampler, stopPerf } from './perf'
 import { initPresenceEffects, stopPresenceEffects } from './presenceEffects'
 import { provisionDefaultPacks } from './provisionPacks'
-import { getActiveCharacter, startTailing, stopSession } from './session'
+import { activeCharId, getActiveCharacter, startTailing, stopSession } from './session'
+import { buildCloudSyncState } from './cloudSync/state'
+import {
+  notifyCloudSyncDirty,
+  startCloudSyncRuntime,
+  stopCloudSyncRuntime
+} from './cloudSync/runtime'
 import { runSmokeFeedback } from './smokeFeedback'
 import { STORE_READY_MS, getOverlayConfig, getPerfHudPrefs } from './store'
 import { initUpdater } from './updater'
@@ -136,6 +155,34 @@ bus.subscribe((ev, live) => {
   const gap = sessionDetector.observe(ev)
   if (gap) bus.emitDerived(gap, live)
 })
+
+// The public combat slice is not a registry module. Subscribe AFTER the combat engine so a dirty
+// notification always observes the event already folded. Heartbeat refreshes cover time-only
+// encounter closure when no later line arrives.
+const CLOUD_COMBAT_EVENTS = new Set([
+  'damage',
+  'miss',
+  'death',
+  'cc',
+  'zone',
+  'epoch',
+  'playerDeath'
+])
+bus.subscribe((ev, live) => {
+  if (live && CLOUD_COMBAT_EVENTS.has(ev.kind)) notifyCloudSyncStateChanged()
+})
+
+function currentCloudSyncState(): ReturnType<typeof buildCloudSyncState> {
+  const now = Date.now()
+  return buildCloudSyncState({
+    characterId: activeCharId(),
+    character: characterModule.snapshot().state,
+    combo: comboModule.snapshot().state,
+    combat: combat.snapshot(now, { maxSegments: 1 }),
+    progression: progressionModule.snapshot().state,
+    loot: lootModule.snapshot().state
+  }, now)
+}
 
 // ---------------------------------------------------------------------------------------
 // DEV-ONLY: the feedback-triage IPC surface (src/main/triage/**).
@@ -260,6 +307,10 @@ if (!gotSingleInstanceLock) {
       // slice. `.finally` rather than `.then` so a scan that failed still leaves the harness a
       // verdict instead of a VM that hangs until the host's timeout.
       .finally(() => {
+        // The historical fold is intentionally network-silent. Start only once its promise has
+        // settled; a reconnect receives one full state from the authoritative snapshots above.
+        setCloudSyncStateObserver(notifyCloudSyncDirty)
+        startCloudSyncRuntime(currentCloudSyncState)
         void runSmokeFeedback()
       })
     markStartupPhase('tailAttached')
@@ -337,7 +388,10 @@ if (!gotSingleInstanceLock) {
  * (The child also self-reaps when this pid disappears — see presence.ts — which is what covers
  * the kill -9 case that no in-process handler can.)
  */
-app.on('before-quit', () => teardownStep('main:stopPresence', stopPresenceEffects))
+app.on('before-quit', () => {
+  teardownStep('main:stopCloudSync', stopCloudSyncRuntime)
+  teardownStep('main:stopPresence', stopPresenceEffects)
+})
 
 /**
  * One teardown step, isolated. `window-all-closed` runs a LIST of these before `app.quit()`,
@@ -358,6 +412,7 @@ function teardownStep(label: string, fn: () => void): void {
 
 app.on('window-all-closed', () => {
   teardownStep('main:stopSession', stopSession)
+  teardownStep('main:stopCloudSync', stopCloudSyncRuntime)
   // Kill the presence watcher child + the cursor stream. Both already unref their timers, but a
   // child process is not a timer: nothing else would reap it.
   teardownStep('main:stopPresence', stopPresenceEffects)
