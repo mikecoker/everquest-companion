@@ -14,13 +14,16 @@ class TestSocket implements SocketLike {
   message(value: unknown): void { this.emit('message', new MessageEvent('message', { data: JSON.stringify(value) })) }
 }
 
-function testDeps(paired: boolean) {
-  const discord: DiscordAdapter = { ready: vi.fn().mockResolvedValue(undefined), authorize: vi.fn().mockResolvedValue('oauth-code'), authenticate: vi.fn().mockResolvedValue(undefined) }
+function testDeps(paired: boolean, ready = vi.fn().mockResolvedValue(undefined)) {
+  const authorize = vi.fn().mockResolvedValue('oauth-code')
+  const authenticate = vi.fn().mockResolvedValue(undefined)
+  const exchangeOAuthCode = vi.fn().mockResolvedValue('sdk-access-token')
+  const loadMe = vi.fn().mockResolvedValue({ user: { id: '1', username: 'josh', displayName: 'Josh' }, paired })
+  const createPairing = vi.fn().mockResolvedValue({ code: '7QK2MP', expiresAt: 300_000 })
+  const createViewerSession = vi.fn().mockResolvedValue('viewer-ticket')
+  const discord: DiscordAdapter = { ready, authorize, authenticate }
   const api: ActivityApi = {
-    exchangeOAuthCode: vi.fn().mockResolvedValue('sdk-access-token'),
-    loadMe: vi.fn().mockResolvedValue({ user: { id: '1', username: 'josh', displayName: 'Josh' }, paired }),
-    createPairing: vi.fn().mockResolvedValue({ code: '7QK2MP', expiresAt: 300_000 }),
-    createViewerSession: vi.fn().mockResolvedValue('viewer-ticket')
+    exchangeOAuthCode, loadMe, createPairing, createViewerSession
   }
   const sockets: TestSocket[] = []
   const deps: AppDeps = {
@@ -29,7 +32,7 @@ function testDeps(paired: boolean) {
     now: () => 1_800_000, random: () => 0.5,
     delay: (_ms, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
   }
-  return { deps, discord, api, sockets }
+  return { deps, calls: { ready, authorize, authenticate, exchangeOAuthCode, createPairing, createViewerSession }, sockets }
 }
 
 async function renderReady(paired: boolean) {
@@ -50,8 +53,7 @@ describe('Activity UI states', () => {
   })
 
   it('times out into offline help when Discord never becomes ready', async () => {
-    const fixture = testDeps(false)
-    fixture.discord.ready = vi.fn(() => new Promise<void>(() => undefined))
+    const fixture = testDeps(false, vi.fn(() => new Promise<void>(() => undefined)))
     fixture.deps.delay = vi.fn().mockResolvedValue(undefined)
     render(<App deps={fixture.deps} />)
     expect(await screen.findByText('You’re offline')).toBeInTheDocument()
@@ -59,15 +61,15 @@ describe('Activity UI states', () => {
   })
 
   it('authenticates in order and renders unpaired instructions plus one pairing action', async () => {
-    const { discord, api } = await renderReady(false)
-    expect(discord.ready).toHaveBeenCalledOnce()
-    expect(discord.authorize).toHaveBeenCalledWith('client-id')
-    expect(api.exchangeOAuthCode).toHaveBeenCalledWith('oauth-code')
-    expect(discord.authenticate).toHaveBeenCalledWith('sdk-access-token')
+    const { calls } = await renderReady(false)
+    expect(calls.ready).toHaveBeenCalledOnce()
+    expect(calls.authorize).toHaveBeenCalledWith('client-id')
+    expect(calls.exchangeOAuthCode).toHaveBeenCalledWith('oauth-code')
+    expect(calls.authenticate).toHaveBeenCalledWith('sdk-access-token')
     expect(screen.getByText(/Preferences → Discord Live/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Create pairing code' }))
     expect(await screen.findByLabelText('Pairing code')).toHaveTextContent('7QK2MP')
-    expect(api.createPairing).toHaveBeenCalledOnce()
+    expect(calls.createPairing).toHaveBeenCalledOnce()
   })
 
   it('renders paired waiting, then the responsive live dashboard as server text', async () => {
@@ -95,11 +97,11 @@ describe('Activity UI states', () => {
   })
 
   it('renders incompatible protocol as a terminal explicit state', async () => {
-    const { sockets, api } = await renderReady(true)
+    const { sockets, calls } = await renderReady(true)
     await vi.waitFor(() => expect(sockets).toHaveLength(1))
     act(() => sockets[0].message({ version: 999, type: 'ready', sessionId: 'x', serverTime: 0 }))
     expect(await screen.findByText('Update required')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
-    expect(api.createViewerSession).toHaveBeenCalledOnce()
+    expect(calls.createViewerSession).toHaveBeenCalledOnce()
   })
 })

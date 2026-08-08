@@ -62,7 +62,7 @@ export async function runViewerTransport(deps: TransportDeps, signal: AbortSigna
       if (terminal) return
       if (signal.aborted) return
       deps.dispatch({ type: 'disconnected', at: deps.now() })
-    } catch (error) {
+    } catch {
       if (signal.aborted) return
       deps.dispatch({ type: 'disconnected', at: deps.now() })
     }

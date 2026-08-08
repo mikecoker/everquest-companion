@@ -23,20 +23,28 @@ export type ActivityAction =
   | { type: 'error'; message: string }
   | { type: 'incompatible'; message: string }
 
+type ServerMessage<T extends ServerCloudSyncMessage['type']> = Extract<ServerCloudSyncMessage, { type: T }>
+
+function applyPublishedState(state: ActivityState, message: ServerMessage<'state'>): ActivityState {
+  if (message.revision <= state.revision) return state
+  return { ...state, phase: state.phase === 'stale' ? 'stale' : 'live', state: message.state, revision: message.revision }
+}
+
+function applyPresence(state: ActivityState, message: ServerMessage<'presence'>): ActivityState {
+  if (!state.state && state.account?.paired === false) return state
+  if (message.online) return { ...state, phase: state.state ? 'live' : 'waiting', lastSeenAt: message.lastSeenAt }
+  return { ...state, phase: state.state ? 'stale' : 'waiting', lastSeenAt: message.lastSeenAt }
+}
+
+function applyServerError(state: ActivityState, message: ServerMessage<'error'>): ActivityState {
+  const phase = message.code === 'version_mismatch' ? 'incompatible' : 'error'
+  return { ...state, phase, message: message.message }
+}
+
 function socketState(state: ActivityState, message: ServerCloudSyncMessage): ActivityState {
-  if (message.type === 'state') {
-    if (message.revision <= state.revision) return state
-    return { ...state, phase: state.phase === 'stale' ? 'stale' : 'live', state: message.state, revision: message.revision }
-  }
-  if (message.type === 'presence') {
-    if (!state.state && state.account?.paired === false) return state
-    if (message.online) return { ...state, phase: state.state ? 'live' : 'waiting', lastSeenAt: message.lastSeenAt }
-    return { ...state, phase: state.state ? 'stale' : 'waiting', lastSeenAt: message.lastSeenAt }
-  }
-  if (message.type === 'error' && message.code === 'version_mismatch') {
-    return { ...state, phase: 'incompatible', message: message.message }
-  }
-  if (message.type === 'error') return { ...state, phase: 'error', message: message.message }
+  if (message.type === 'state') return applyPublishedState(state, message)
+  if (message.type === 'presence') return applyPresence(state, message)
+  if (message.type === 'error') return applyServerError(state, message)
   return state
 }
 
