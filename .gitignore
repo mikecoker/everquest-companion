@@ -83,3 +83,4 @@ crash.*.log
 
 # Wrangler local runtime state and generated development bundles.
 cloud/.wrangler/
+cloud/wrangler.production.jsonc
