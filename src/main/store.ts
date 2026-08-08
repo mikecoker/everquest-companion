@@ -27,6 +27,7 @@ import { DEFAULT_TOAST_CONFIG, normalizeToastConfig } from '../shared/toast'
 import { normalizePerfHudPrefs, type PerfHudPrefs } from '../shared/perf'
 import { normalizeGraphicsPrefs, type GraphicsPrefs } from '../shared/graphicsPrefs'
 import type { ComboCorrection } from '../shared/classCombo'
+import { normalizeStoredCloudSyncPrefs, type StoredCloudSyncPrefs } from './cloudSync/settingsControl'
 // The exaltation planner's sets. The validator is main-side and pure; it runs on the way OUT as
 // well as in (see the accessors below), so a hand-edited store cannot poison the renderer.
 import { sanitizeExaltPlans } from './planner/validate'
@@ -148,6 +149,14 @@ interface StoreShape {
    * here still opens in a build that predates the feature.
    */
   lastSeenNotesVersion?: string
+  /**
+   * Discord cloud sync is additive, optional and closed by default. Like `exaltPlans` and
+   * `lastSeenNotesVersion`, every reader supplies the absent-key default, so this does not
+   * change the meaning of an older store and deliberately needs no schema bump/migration.
+   * It is also private-by-construction: settings sharing reads an explicit whitelist and never
+   * reads this key. The secret representation is main-only and never crosses IPC.
+   */
+  cloudSync?: StoredCloudSyncPrefs
 }
 
 /**
@@ -804,4 +813,13 @@ export function setLastSeenNotesVersion(version: string | null): string | null {
   if (version !== null && /^\d+\.\d+\.\d+$/.test(version)) store.set('lastSeenNotesVersion', version)
   else store.delete('lastSeenNotesVersion')
   return getLastSeenNotesVersion()
+}
+
+/** Main-only cloud settings. Missing/malformed values always collapse to disabled. */
+export function getStoredCloudSyncPrefs(): StoredCloudSyncPrefs {
+  return normalizeStoredCloudSyncPrefs(store.get('cloudSync'))
+}
+
+export function setStoredCloudSyncPrefs(prefs: StoredCloudSyncPrefs): void {
+  store.set('cloudSync', prefs)
 }

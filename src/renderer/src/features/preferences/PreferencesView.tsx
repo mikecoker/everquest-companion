@@ -102,6 +102,7 @@ import { graphicsSection } from './GraphicsSetting'
 // Same arrangement again (JOS-73): the release-notes panel names its own section beside the card
 // that renders it. See features/whatsnew/WhatsNewPanel.tsx for why the notes are a SECTION.
 import { whatsNewSection } from '../whatsnew/WhatsNewPanel'
+import { cloudSyncSection } from './CloudSyncSettings'
 // The section CARD and the arrival pulse live together in their own file — same ceiling, same
 // answer as PerfSetting's descriptor: split, don't widen the threshold.
 import PrefSectionBlock, { FILL_COLUMN_SX, FILL_ROOT_SX, FILL_ROW_SX, paneFills, useLandedSection } from './PrefSectionBlock'
@@ -308,6 +309,7 @@ function buildSections({ version, status, onSendFeedback, onWhatsNew }: SectionI
     graphicsSection(),
     cursorRingSection(),
     voiceSection(),
+    cloudSyncSection,
     {
       id: 'profiles',
       label: 'Profiles',

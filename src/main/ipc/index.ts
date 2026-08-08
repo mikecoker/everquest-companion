@@ -17,6 +17,7 @@ import { registerAlertsIpc } from './alerts'
 import { registerCharacterIpc } from './character'
 import { registerCharacterSheetIpc } from './characterSheet'
 import { registerClipboardIpc } from './clipboard'
+import { registerCloudSyncIpc } from './cloudSync'
 import { registerComboIpc } from './combo'
 import { registerDevIpc } from './dev'
 import { registerFeedbackIpc } from './feedback'
@@ -61,6 +62,7 @@ export function registerIpc(): void {
   registerWindowIpc()
   registerToastIpc()
   registerClipboardIpc()
+  registerCloudSyncIpc()
   registerFeedbackIpc()
   registerTelemetryIpc()
   registerPerfIpc()

@@ -47,6 +47,8 @@
     // …and `sounds.ts` (packs, the registry browser, the user's own imports — JOS-68), likewise.
     "src/preload/sounds.ts",
     // …and `releaseNotes.ts` (the one what's-new store key, JOS-73), likewise.
-    "src/preload/releaseNotes.ts"
+    "src/preload/releaseNotes.ts",
+    // …and `cloudSync.ts` (sanitized Discord cloud settings/status), likewise.
+    "src/preload/cloudSync.ts"
   ]
 }
