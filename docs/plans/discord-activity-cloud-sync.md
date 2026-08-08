@@ -1,8 +1,23 @@
 # Discord Activity + Cloudflare live sync
 
-Status: approved direction; implementation started but not integrated  
+Status: Waves A-B integrated; Wave C (desktop core) is next  
 Written: 2026-08-07  
-Resume point: `main` at `951a77b`
+Resume point: current `main` after this update (implementation tip: `1c03f2b`)
+
+## 0. Implementation progress
+
+- Wave A is integrated: `src/shared/cloudSync.ts` is the bounded protocol-v1 allowlist, desktop
+  publish messages carry no revision, and the server alone assigns broadcast revisions.
+- Wave B is integrated: `cloud/worker/**` implements the authenticated D1 + SQLite Durable Object
+  relay, and `cloud/activity/**` implements the Discord Activity live view. The Worker suite runs
+  in the real Cloudflare Vitest pool (16 tests); the Activity has 18 jsdom component/transport
+  tests and a production Vite build.
+- Cloudflare's current declarative Durable Object `exports` configuration is used instead of the
+  legacy migration array. D1 still uses `cloud/migrations/0001_initial.sql`.
+- Root CI installs the isolated `cloud/package-lock.json` and gates cloud typecheck, strict lint,
+  both test runtimes, the Activity build, and Wrangler deployment dry-run.
+- A real Chromium Activity + local Worker end-to-end pass remains Wave E work. No Cloudflare or
+  Discord resources have been deployed, and no production secrets or physical IDs are committed.
 
 ## 1. Outcome
 
@@ -101,20 +116,12 @@ and list sizes, and copy only named keys into a fresh object.
 
 Do not put access tokens in this protocol. Authentication belongs to HTTP/WebSocket setup.
 
-### Existing WIP
+### Integrated contract
 
-An interrupted worker left an uncommitted draft in this isolated worktree:
-
-- worktree: `D:\projects\eqc-worktrees\cloud-sync-contract`
-- branch: `codex/cloud-sync-contract`
-- files: `src/shared/cloudSync.ts`, `tests/cloudSync.test.mts`
-- observed size: 351 and 150 lines respectively
-- no commit exists; no changes are present on `main`
-
-The next session should review rather than blindly trust it. In particular, confirm it stays
-under lint factoring limits, that list overflow behavior is intentional (reject versus clamp),
-and that client-supplied `revision` is either removed or explicitly treated as a desktop-local
-diagnostic rather than the broadcast authority. Run the contract test before integrating.
+The reviewed contract is now on `main` in `src/shared/cloudSync.ts`, with coverage in
+`tests/cloudSync.test.mts`. List overflow is rejected at the wire boundary; producers select and
+cap their bounded rows before serialization. Desktop `publish` carries no revision. Only server
+`state` messages carry the Durable Object's monotonically increasing revision.
 
 ## 4. Cloudflare + Discord application
 
@@ -419,23 +426,21 @@ main. Add an e2e assertion that sync is off and network-silent by default, plus 
 
 ## 10. Resume commands
 
-Start the next session from a clean `main`, inspect the existing contract worktree, and proceed
-with Wave A:
+Start the next session from a clean `main` and proceed with Wave C. Re-read the authoritative
+desktop snapshot shapes before briefing the state-builder and publisher branches:
 
 ```powershell
 cd D:\projects\everquest-companion
 git status --short
 git worktree list
-cd D:\projects\eqc-worktrees\cloud-sync-contract
-git status --short
-npm test -- --test-name-pattern cloud
+npm ci --prefix cloud
 npm run typecheck
 npm run lint
+npm test
+npm run test:cloud
+npm run build:cloud
+npm run deploy:cloud:dry
 ```
-
-The test-name command may need to be replaced with the repo's direct node:test invocation if the
-root script does not forward that flag cleanly. Do not delete the worktree until its two files
-are either committed and merged or explicitly abandoned.
 
 ## 11. Primary platform references
 
