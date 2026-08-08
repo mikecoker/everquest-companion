@@ -193,16 +193,48 @@ test('ready publishes a validated full state and dirty changes coalesce at 500ms
   assert.equal(run.sockets[0]!.sent.length, 3)
 })
 
-test('heartbeat pings every 20 seconds while ready', async () => {
+test('heartbeat pings and refreshes the full state after an idle interval', async () => {
   const run = harness()
   run.publisher.start()
   await settle()
   ready(run.sockets[0]!)
   run.clock.advance(20_000)
-  const message = JSON.parse(run.sockets[0]!.sent[1]!) as { type: string; sentAt: number }
-  assert.deepEqual(message, { version: CLOUD_SYNC_PROTOCOL_VERSION, type: 'ping', sentAt: 21_000 })
+  const messages = run.sockets[0]!.sent.map((entry) => JSON.parse(entry) as { type: string; sentAt?: number; state?: CloudSyncState })
+  assert.deepEqual(messages.map((message) => message.type), ['publish', 'ping', 'publish'])
+  assert.equal(messages[1]?.sentAt, 21_000)
+  assert.equal(messages[2]?.state?.publishedAt, 21_000)
   run.clock.advance(20_000)
+  assert.equal(run.sockets[0]!.sent.length, 5)
+})
+
+test('heartbeat refresh waits out the 500ms ceiling after a recent event publish', async () => {
+  const run = harness()
+  run.publisher.start()
+  await settle()
+  ready(run.sockets[0]!)
+  run.clock.advance(19_900)
+  run.publisher.notifyDirty()
+  run.clock.advance(0)
+  assert.equal(run.sockets[0]!.sent.length, 2)
+
+  run.clock.advance(100)
   assert.equal(run.sockets[0]!.sent.length, 3)
+  assert.equal((JSON.parse(run.sockets[0]!.sent[2]!) as { type: string }).type, 'ping')
+  run.clock.advance(399)
+  assert.equal(run.sockets[0]!.sent.length, 3)
+  run.clock.advance(1)
+  assert.equal(run.sockets[0]!.sent.length, 4)
+  assert.equal((JSON.parse(run.sockets[0]!.sent[3]!) as { type: string }).type, 'publish')
+})
+
+test('stop cancels idle heartbeat refreshes', async () => {
+  const run = harness()
+  run.publisher.start()
+  await settle()
+  ready(run.sockets[0]!)
+  run.publisher.stop()
+  run.clock.advance(60_000)
+  assert.equal(run.sockets[0]!.sent.length, 1)
 })
 
 test('disconnect reconnects with jitter, a fresh ticket, and no device secret in the URL', async () => {
@@ -276,6 +308,9 @@ test('invalid state is never sent', async () => {
   ready(run.sockets[0]!)
   assert.deepEqual(run.sockets[0]!.sent, [])
   assert.deepEqual(run.statuses.at(-1), { state: 'error', message: 'Cloud sync state was invalid' })
+  run.clock.advance(20_000)
+  const types = run.sockets[0]!.sent.map((entry) => (JSON.parse(entry) as { type: string }).type)
+  assert.deepEqual(types, ['ping'])
 })
 
 test('server rate limit delays the next full publish by at least its retry interval', async () => {

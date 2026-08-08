@@ -258,6 +258,7 @@ export class CloudSyncPublisher {
         sentAt: this.clock.now()
       }
       if (!this.send(message)) return
+      this.notifyDirty()
       this.scheduleHeartbeat()
     }, HEARTBEAT_INTERVAL_MS)
   }
