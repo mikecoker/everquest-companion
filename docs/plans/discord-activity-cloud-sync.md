@@ -1,6 +1,6 @@
 # Discord Activity + Cloudflare live sync
 
-Status: Waves A-E implemented locally; owner-authorized deployment validation is next
+Status: Private vertical slice deployed; shared-room multiplayer extension implemented and in validation
 
 Written: 2026-08-07
 
@@ -31,8 +31,9 @@ Resume point: `feature/discord-cloud-sync` on the `mikecoker` fork
   race guard, exact configured-origin checks for browser mutations, Activity device/account
   controls, and a serial real-Chromium Activity-to-local-Worker test. Current focused counts are
   22 Worker tests, 19 Activity tests, and one real-browser vertical slice.
-- No Cloudflare or Discord resources have been deployed, and no production secrets or physical
-  IDs are committed. Final Discord iframe/proxy verification requires owner-supplied resources.
+- The private vertical slice was deployed and verified through Discord. The follow-up multiplayer
+  design adds authenticated, code-invited shared rooms, bounded encounter history, an Encounters-first
+  Activity, and per-player drill-down. Production secrets and physical IDs remain uncommitted.
 
 ## 1. Outcome
 
@@ -69,12 +70,14 @@ EverQuest log
    reinterpret EQ events.
 3. **Server owns revisions.** A Durable Object assigns the broadcast revision. A reconnect gets
    a full snapshot, so clients never need to repair an unbounded delta history.
-4. **One Durable Object per Discord user for MVP.** Channel/raid rooms are a later additive
-   capability. This keeps authorization and deletion semantics obvious.
+4. **Account relays feed explicit shared-room Durable Objects.** A Discord-authenticated user joins
+   one active room with a hashed high-entropy invite code. Owners can rotate or close it; members
+   can leave. A signed one-use ticket binds each Activity viewer to current D1 membership.
 5. **D1 stores control-plane data only.** Discord identities, device hashes, pairing codes,
    revocation, and session metadata belong in D1. High-frequency combat frames do not.
-6. **No history in MVP.** The latest state lives in Durable Object storage and expires. R2 or
-   summarized D1 encounter rows can be added only after retention controls exist.
+6. **Bounded room-session encounter history.** The room Durable Object keeps at most 25 current or
+   completed encounter summaries. It never stores the combat event stream, and closing the room
+   wipes the summaries. Aggregation sums only each publisher's self and owned-pet rows.
 7. **Two transports, one renderer-facing seam.** Existing desktop views continue over Electron
    IPC. The Activity consumes the cloud transport. Do not teach browser code about Electron.
 8. **Opt-in and closed by default.** No endpoint or credentials means disabled. E2E mode never

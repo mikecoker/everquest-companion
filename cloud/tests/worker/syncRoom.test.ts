@@ -178,6 +178,7 @@ describe('hibernation and retention', () => {
     const firstAttachment = attachments[0]
     if (firstAttachment === undefined) throw new Error('Durable Object attachment was missing')
     expect(Object.keys(firstAttachment).sort()).toEqual([
+      'accountId',
       'bytes',
       'connectedAt',
       'messages',
