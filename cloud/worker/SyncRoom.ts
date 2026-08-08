@@ -51,6 +51,8 @@ function attachment(socket: WebSocket): SocketAttachment | null {
 }
 
 export class SyncRoom extends DurableObject<Env> {
+  private erased = false
+
   private publishers(except?: WebSocket): WebSocket[] {
     return this.ctx.getWebSockets().filter((socket) => socket !== except && attachment(socket)?.role === 'publisher')
   }
@@ -137,7 +139,11 @@ export class SyncRoom extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Upgrade required', { status: 426 })
     const handoff = await this.readHandoff(request)
-    if (handoff === null) return new Response('Unauthorized', { status: 401 })
+    if (handoff === null || this.erased) return new Response('Unauthorized', { status: 401 })
+    const account = await this.env.DB.prepare('SELECT 1 AS active FROM account WHERE discord_user_id = ?')
+      .bind(handoff.accountId)
+      .first<{ active: number }>()
+    if (account === null) return new Response('Unauthorized', { status: 401 })
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
     await this.initializeSocket(server, handoff)
@@ -206,7 +212,7 @@ export class SyncRoom extends DurableObject<Env> {
   }
 
   private async handlePublisherDeparture(socket: WebSocket): Promise<void> {
-    if (attachment(socket)?.role !== 'publisher' || this.publishers(socket).length > 0) return
+    if (this.erased || attachment(socket)?.role !== 'publisher' || this.publishers(socket).length > 0) return
     await this.markOffline()
   }
 
@@ -226,6 +232,13 @@ export class SyncRoom extends DurableObject<Env> {
     if (!hasOtherPublisher) await this.markOffline()
     for (const socket of matching) socket.close(4003, 'Device revoked')
     return true
+  }
+
+  async eraseAccount(): Promise<void> {
+    this.erased = true
+    for (const socket of this.ctx.getWebSockets()) socket.close(4004, 'Account deleted')
+    await this.ctx.storage.deleteAlarm()
+    await this.ctx.storage.deleteAll()
   }
 
   async webSocketClose(socket: WebSocket): Promise<void> {

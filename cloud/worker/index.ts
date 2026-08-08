@@ -1,4 +1,5 @@
 import { oauthToken, loadAccount, requireSession } from './auth'
+import { eraseAccount } from './accountErasure'
 import {
   consumeTicket,
   createDeviceSession,
@@ -7,6 +8,7 @@ import {
   revokeDevice
 } from './deviceAuth'
 import { createPairing } from './pairing'
+import { scheduleExpiredRowCleanup } from './retention'
 import { signValue } from './crypto'
 import type { Env, SyncHandoff } from './types'
 import { errorResponse, HttpError, json } from './validation'
@@ -60,6 +62,10 @@ async function authenticatedApi(request: Request, env: Env, path: string, accoun
     return json(await createViewerSession(accountId, env))
   }
   if (request.method === 'GET' && path === '/api/me') return me(accountId, env)
+  if (request.method === 'DELETE' && path === '/api/me') {
+    await eraseAccount(accountId, env)
+    return new Response(null, { status: 204 })
+  }
   const revokeMatch = request.method === 'DELETE' ? /^\/api\/devices\/([^/]+)$/u.exec(path) : null
   const encodedDeviceId = revokeMatch?.[1]
   if (encodedDeviceId !== undefined) {
@@ -77,7 +83,8 @@ async function routeApi(request: Request, env: Env, path: string): Promise<Respo
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    scheduleExpiredRowCleanup(env, ctx)
     const path = new URL(request.url).pathname
     try {
       if (path.startsWith('/api/')) return await routeApi(request, env, path)

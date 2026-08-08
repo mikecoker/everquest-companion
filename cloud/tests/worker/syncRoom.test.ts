@@ -8,7 +8,9 @@ import {
 } from 'cloudflare:test'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { SyncRoom } from '../../worker/SyncRoom'
-import { jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
+import { signValue } from '../../worker/crypto'
+import { consumeTicket } from '../../worker/deviceAuth'
+import { ACCOUNT_ID, jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
 
 beforeEach(async () => {
   await reset()
@@ -222,5 +224,91 @@ describe('hibernation and retention', () => {
     publisher.send(JSON.stringify({ version: 1, type: 'ping', sentAt: 33 }))
     expect(await message(publisher)).toMatchObject({ type: 'error', code: 'rate_limited' })
     expect((await closed).code).toBe(4008)
+  })
+})
+
+describe('account erasure', () => {
+  it('deletes only the authenticated account, its room state, and its live connections', async () => {
+    const otherAccountId = '987654321098765432'
+    await seedAccount()
+    await seedAccount(otherAccountId)
+    const publisher = await openPublisher(await seedDevice())
+    const viewer = await openViewer()
+    await message(viewer)
+    publish(publisher)
+    await message(viewer)
+
+    const accountRoom = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName('123456789012345678'))
+    const otherRoom = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName(otherAccountId))
+    await runInDurableObject(otherRoom, (_instance: SyncRoom, state) => state.storage.put('latest', { retained: true }))
+    await env.DB.prepare(
+      'INSERT INTO pairing (code_hash, discord_user_id, expires_at, consumed_at, created_at) VALUES (?, ?, 999999, NULL, 1)'
+    ).bind('owned-pairing', ACCOUNT_ID).run()
+    await env.DB.prepare(
+      'INSERT INTO pairing (code_hash, discord_user_id, expires_at, consumed_at, created_at) VALUES (?, ?, 999999, NULL, 1)'
+    ).bind('other-pairing', otherAccountId).run()
+    await seedDevice(otherAccountId)
+    await env.DB.prepare('INSERT INTO rate_limit (key, count, reset_at) VALUES (?, 1, 999999)')
+      .bind(`pairing-account:${ACCOUNT_ID}`).run()
+    await env.DB.prepare('INSERT INTO rate_limit (key, count, reset_at) VALUES (?, 1, 999999)')
+      .bind(`pairing-account:${otherAccountId}`).run()
+
+    const publisherClosed = new Promise<CloseEvent>((resolve) => publisher.addEventListener('close', resolve, { once: true }))
+    const viewerClosed = new Promise<CloseEvent>((resolve) => viewer.addEventListener('close', resolve, { once: true }))
+    const cookie = await sessionCookie()
+    const eraseRequest = (): Request => new Request('https://worker.test/api/me', {
+      method: 'DELETE',
+      headers: { cookie }
+    })
+    expect((await exports.default.fetch(eraseRequest())).status).toBe(204)
+    expect(await publisherClosed).toMatchObject({ code: 4004, reason: 'Account deleted' })
+    expect(await viewerClosed).toMatchObject({ code: 4004, reason: 'Account deleted' })
+    expect((await exports.default.fetch(eraseRequest())).status).toBe(204)
+
+    const accountRows = await env.DB.prepare('SELECT COUNT(*) AS count FROM account WHERE discord_user_id = ?')
+      .bind(ACCOUNT_ID).first<{ count: number }>()
+    const ownedRows = await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM device WHERE discord_user_id = ?) +
+         (SELECT COUNT(*) FROM pairing WHERE discord_user_id = ?) +
+         (SELECT COUNT(*) FROM session_ticket WHERE discord_user_id = ?) AS count`
+    ).bind(ACCOUNT_ID, ACCOUNT_ID, ACCOUNT_ID).first<{ count: number }>()
+    const erasedRate = await env.DB.prepare('SELECT 1 FROM rate_limit WHERE key = ?')
+      .bind(`pairing-account:${ACCOUNT_ID}`).first()
+    expect(accountRows?.count).toBe(0)
+    expect(ownedRows?.count).toBe(0)
+    expect(erasedRate).toBeNull()
+    expect(await runInDurableObject(accountRoom, (_instance: SyncRoom, state) => state.storage.list())).toEqual(new Map())
+
+    expect(await env.DB.prepare('SELECT 1 FROM account WHERE discord_user_id = ?').bind(otherAccountId).first()).not.toBeNull()
+    expect(await env.DB.prepare('SELECT 1 FROM device WHERE discord_user_id = ?').bind(otherAccountId).first()).not.toBeNull()
+    expect(await env.DB.prepare('SELECT 1 FROM pairing WHERE discord_user_id = ?').bind(otherAccountId).first()).not.toBeNull()
+    expect(await env.DB.prepare('SELECT 1 FROM rate_limit WHERE key = ?')
+      .bind(`pairing-account:${otherAccountId}`).first()).not.toBeNull()
+    expect(await runInDurableObject(otherRoom, (_instance: SyncRoom, state) => state.storage.get('latest')))
+      .toEqual({ retained: true })
+  })
+
+  it('rejects a consumed handoff that reaches a fresh room after account deletion', async () => {
+    await seedAccount()
+    const ticket = await viewerTicket()
+    const handoff = await consumeTicket(ticket, env)
+    const encoded = btoa(JSON.stringify(handoff)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
+    const signed = await signValue(encoded, env.TICKET_SIGNING_KEY)
+    const room = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName(ACCOUNT_ID))
+
+    const cookie = await sessionCookie()
+    const erased = await exports.default.fetch(new Request('https://worker.test/api/me', {
+      method: 'DELETE',
+      headers: { cookie }
+    }))
+    expect(erased.status).toBe(204)
+    await evictDurableObject(room)
+
+    const response = await room.fetch('https://room.test', {
+      headers: { upgrade: 'websocket', 'x-eq-sync-handoff': signed }
+    })
+    expect(response.status).toBe(401)
+    expect(response.webSocket).toBeNull()
   })
 })
