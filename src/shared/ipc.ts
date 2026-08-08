@@ -1,6 +1,15 @@
 // Central registry of IPC channel names so main/preload/renderer stay in sync.
 
 export const IPC = {
+  // ---- opt-in Discord cloud sync (sanitized settings/status; secret remains in main) ----
+  cloudSyncGet: 'cloudSync:get',
+  cloudSyncStatus: 'cloudSync:status',
+  cloudSyncSetEndpoint: 'cloudSync:setEndpoint',
+  cloudSyncPair: 'cloudSync:pair',
+  cloudSyncSetEnabled: 'cloudSync:setEnabled',
+  cloudSyncForget: 'cloudSync:forget',
+  onCloudSyncStatus: 'cloudSync:statusChanged',
+
   // ---- module transport (the one pattern for loot/turnins/kills/leveling/character) ----
   // renderer -> main
   getModuleSnapshot: 'module:getSnapshot',
