@@ -25,6 +25,7 @@ export type SyncRole = 'publisher' | 'viewer'
 
 export interface SyncHandoff {
   accountId: string
+  roomId?: string
   role: SyncRole
   subjectId: string
   expiresAt: number

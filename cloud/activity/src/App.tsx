@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useState } from 'react'
-import type { ActivityApi } from './api'
+import type { ActivityApi, ViewerAccount } from './api'
 import { createActivityApi } from './api'
-import { LiveDashboard } from './components/LiveDashboard'
+import { RoomDashboard } from './components/RoomDashboard'
 import { createDiscordAdapter, type DiscordAdapter } from './discord'
 import { activityReducer, initialState } from './model'
 import type { ActivityAction, ActivityState } from './model'
@@ -31,13 +31,6 @@ function ErrorPanel({ title, message, retry }: { title: string; message: string;
   return <main className="center-shell"><section className="state-card" role="alert"><span className="state-icon">!</span><h1>{title}</h1><p>{message}</p>{retry && <button onClick={retry}>Try again</button>}</section></main>
 }
 
-function lastSeen(at: number | undefined, now: number): string {
-  if (at === undefined) return 'recently'
-  const seconds = Math.max(0, Math.floor((now - at) / 1_000))
-  const age = seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`
-  return `${age} (${new Date(at).toLocaleTimeString()})`
-}
-
 async function awaitDiscord(discord: DiscordAdapter, deps: AppDeps, signal: AbortSignal): Promise<void> {
   await Promise.race([
     discord.ready(),
@@ -45,7 +38,7 @@ async function awaitDiscord(discord: DiscordAdapter, deps: AppDeps, signal: Abor
   ])
 }
 
-function useAuthenticatedActivity(deps: AppDeps, attempt: number, dispatch: React.Dispatch<ActivityAction>): void {
+function useAuthentication(deps: AppDeps, attempt: number, dispatch: React.Dispatch<ActivityAction>): void {
   useEffect(() => {
     const controller = new AbortController()
     const authenticate = async (): Promise<void> => {
@@ -56,9 +49,7 @@ function useAuthenticatedActivity(deps: AppDeps, attempt: number, dispatch: Reac
       const accessToken = await deps.api.exchangeOAuthCode(code)
       await discord.authenticate(accessToken)
       const account = await deps.api.loadMe()
-      if (controller.signal.aborted) return
-      dispatch({ type: 'account', account })
-      void runViewerTransport({ ...deps, dispatch }, controller.signal)
+      if (!controller.signal.aborted) dispatch({ type: 'account', account })
     }
     void authenticate().catch((error: unknown) => {
       if (!controller.signal.aborted) dispatch({ type: 'error', message: error instanceof Error ? error.message : 'Authentication failed.' })
@@ -67,100 +58,156 @@ function useAuthenticatedActivity(deps: AppDeps, attempt: number, dispatch: Reac
   }, [attempt, deps, dispatch])
 }
 
-function useCreatePairing(deps: AppDeps, dispatch: React.Dispatch<ActivityAction>): [boolean, () => void] {
-  const [busy, setBusy] = useState(false)
-  const createPairing = useCallback(async (): Promise<void> => {
-    setBusy(true)
-    try {
-      const pairing = await deps.api.createPairing()
-      dispatch({ type: 'pairing', ...pairing })
-    } catch (error) {
-      dispatch({ type: 'error', message: error instanceof Error ? error.message : 'Could not create a pairing code.' })
-    } finally { setBusy(false) }
-  }, [deps, dispatch])
-  return [busy, () => { void createPairing() }]
+function useRoomTransport(deps: AppDeps, roomId: string | undefined, dispatch: React.Dispatch<ActivityAction>): void {
+  useEffect(() => {
+    if (roomId === undefined) return
+    const controller = new AbortController()
+    void runViewerTransport({ ...deps, dispatch }, controller.signal)
+    return () => controller.abort()
+  }, [deps, dispatch, roomId])
 }
 
-interface AccountActions {
+function useAccountRefreshOnPublish(state: ActivityState, deps: AppDeps, dispatch: React.Dispatch<ActivityAction>): void {
+  const accountId = state.account?.user.id
+  const ownPublisherOnline = state.room?.participants.some(
+    (participant) => participant.participantId === accountId && participant.online
+  ) ?? false
+  useEffect(() => {
+    if (!ownPublisherOnline || state.account?.paired !== false) return
+    void deps.api.loadMe().then((account) => dispatch({ type: 'account', account })).catch(() => undefined)
+  }, [deps.api, dispatch, ownPublisherOnline, state.account?.paired])
+}
+
+interface AsyncActions {
   busy: boolean
   error?: string
-  revoke(deviceId: string): void
-  erase(): void
+  run(action: () => Promise<void>): void
 }
 
-function useAccountActions(deps: AppDeps, dispatch: React.Dispatch<ActivityAction>): AccountActions {
+function useAsyncActions(): AsyncActions {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const run = useCallback(async (action: () => Promise<void>, deleted = false): Promise<void> => {
+  const run = useCallback(async (action: () => Promise<void>): Promise<void> => {
     setBusy(true)
     setError(undefined)
-    try {
-      await action()
-      if (deleted) dispatch({ type: 'deleted' })
-      else dispatch({ type: 'account', account: await deps.api.loadMe() })
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The account change failed.')
-    } finally {
-      setBusy(false)
-    }
-  }, [deps.api, dispatch])
-  return {
-    busy,
-    ...(error === undefined ? {} : { error }),
-    revoke: (deviceId) => { void run(() => deps.api.revokeDevice(deviceId)) },
-    erase: () => { void run(() => deps.api.deleteAccount(), true) }
+    try { await action() } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The change failed.')
+    } finally { setBusy(false) }
+  }, [])
+  return { busy, ...(error === undefined ? {} : { error }), run: (action) => { void run(action) } }
+}
+
+function RoomLobby({ deps, dispatch }: { deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  const [name, setName] = useState('EQ Legends Party')
+  const [code, setCode] = useState('')
+  const actions = useAsyncActions()
+  const refresh = async (roomCode?: string): Promise<void> => {
+    dispatch({ type: 'account', account: await deps.api.loadMe(), ...(roomCode === undefined ? {} : { roomCode }) })
   }
+  const create = (): void => actions.run(async () => {
+    const created = await deps.api.createRoom(name.trim())
+    await refresh(created.code)
+  })
+  const join = (): void => actions.run(async () => {
+    await deps.api.joinRoom(code.trim())
+    await refresh()
+  })
+  return <main className="center-shell"><section className="state-card room-lobby"><p className="eyebrow">EQ Legends Live</p><h1>Join a shared room</h1>
+    <p>Use one room for your group. Everyone can view encounters; paired desktops contribute their own character and pet damage.</p>
+    <label>Room name<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} /></label>
+    <button disabled={actions.busy || name.trim() === ''} onClick={create}>Create room</button>
+    <div className="lobby-divider"><span>or</span></div>
+    <label>Room code<input value={code} placeholder="XXXX-XXXX-XXXX" onChange={(event) => setCode(event.target.value.toUpperCase())} /></label>
+    <button disabled={actions.busy || code.trim() === ''} onClick={join}>Join room</button>
+    {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
+  </section></main>
 }
 
-function BootPanel(): React.JSX.Element {
-  return <main className="center-shell" aria-live="polite"><section className="state-card"><span className="spinner" /><p className="eyebrow">EQ Legends Live</p><h1>Connecting to Discord…</h1><p>Authenticating your private live view.</p></section></main>
-}
-
-function PairingPanel({ state, busy, create }: { state: ActivityState; busy: boolean; create: () => void }): React.JSX.Element {
-  const action = state.pairing
-    ? <><output className="pair-code" aria-label="Pairing code">{state.pairing.code}</output><p className="fine">Expires in 5 minutes. Keep this code private.</p></>
-    : <button disabled={busy} onClick={create}>{busy ? 'Creating…' : 'Create pairing code'}</button>
-  return <main className="center-shell"><section className="state-card pairing"><p className="eyebrow">Welcome, {state.account?.user.displayName}</p><h1>Pair your desktop companion</h1><p>In EQ Legends Companion, open Preferences → Discord Live, enter this one-time code, then enable publishing.</p>{action}</section></main>
-}
-
-function AccountControls({ state, actions }: { state: ActivityState; actions: AccountActions }): React.JSX.Element {
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  return <section className="account-controls" aria-labelledby="account-controls-heading">
-    <div><p className="eyebrow">Account controls</p><h2 id="account-controls-heading">Paired desktops</h2></div>
-    <ul>{state.account?.devices.map((device) => <li key={device.id}><span>{device.label}</span><button disabled={actions.busy} onClick={() => actions.revoke(device.id)}>Revoke {device.label}</button></li>)}</ul>
-    {actions.error && <p role="alert">{actions.error}</p>}
-    {confirmDelete
-      ? <div className="delete-confirm"><p>This removes every paired desktop and the latest cloud snapshot.</p><button disabled={actions.busy} onClick={() => actions.erase()}>Delete permanently</button><button disabled={actions.busy} onClick={() => setConfirmDelete(false)}>Cancel</button></div>
-      : <button className="danger" disabled={actions.busy} onClick={() => setConfirmDelete(true)}>Delete cloud account</button>}
+function PairingControls({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  const actions = useAsyncActions()
+  const create = (): void => actions.run(async () => {
+    const pairing = await deps.api.createPairing()
+    dispatch({ type: 'pairing', ...pairing })
+  })
+  return <section className="card setup-card"><p className="eyebrow">Desktop contribution</p><h2>{state.account?.paired ? 'Desktop paired' : 'Pair your companion'}</h2>
+    <p>{state.account?.paired ? 'Your paired desktop can publish your live data into this room.' : 'In the desktop app, open Preferences -> Discord Live and enter a one-time code.'}</p>
+    {state.pairing
+      ? <><output className="pair-code compact" aria-label="Pairing code">{state.pairing.code}</output><p className="fine">Expires in 5 minutes. Keep this code private.</p></>
+      : <button disabled={actions.busy} onClick={create}>Create pairing code</button>}
+    {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
   </section>
 }
 
-function ConnectedActivity({ state, now, actions }: { state: ActivityState; now: number; actions: AccountActions }): React.JSX.Element {
+function RoomControls({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  const actions = useAsyncActions()
+  const room = state.account?.room
+  const refresh = async (roomCode?: string): Promise<void> => dispatch({ type: 'account', account: await deps.api.loadMe(), ...(roomCode === undefined ? {} : { roomCode }) })
+  if (room === null || room === undefined) return <></>
+  const rotate = (): void => actions.run(async () => refresh(await deps.api.rotateRoomCode(room.id)))
+  const leave = (): void => actions.run(async () => { await deps.api.leaveRoom(room.id); await refresh() })
+  const close = (): void => actions.run(async () => { await deps.api.closeRoom(room.id); await refresh() })
+  return <section className="card setup-card"><p className="eyebrow">Room access</p><h2>{room.name}</h2>
+    {state.roomCode
+      ? <><output className="room-code" aria-label="Room code">{state.roomCode}</output><p className="fine">Share this with people you want in the room.</p></>
+      : room.owner && <button disabled={actions.busy} onClick={rotate}>Create a new invite code</button>}
+    {room.owner
+      ? <button className="danger" disabled={actions.busy} onClick={close}>Close room</button>
+      : <button className="danger" disabled={actions.busy} onClick={leave}>Leave room</button>}
+    {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
+  </section>
+}
+
+function AccountControls({ account, deps, dispatch }: { account: ViewerAccount; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  const actions = useAsyncActions()
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const revoke = (deviceId: string): void => actions.run(async () => {
+    await deps.api.revokeDevice(deviceId)
+    dispatch({ type: 'account', account: await deps.api.loadMe() })
+  })
+  const erase = (): void => actions.run(async () => {
+    await deps.api.deleteAccount()
+    dispatch({ type: 'deleted' })
+  })
+  return <section className="card setup-card account-controls"><p className="eyebrow">Account controls</p><h2>Paired desktops</h2>
+    {account.devices.length === 0 ? <p>No desktop is paired yet.</p> : <ul>{account.devices.map((device) => <li key={device.id}><span>{device.label}</span><button disabled={actions.busy} onClick={() => revoke(device.id)}>Revoke</button></li>)}</ul>}
+    {confirmDelete
+      ? <div className="delete-confirm"><p>This removes your devices, room membership, and shared state.</p><button disabled={actions.busy} onClick={erase}>Delete permanently</button><button disabled={actions.busy} onClick={() => setConfirmDelete(false)}>Cancel</button></div>
+      : <button className="danger" disabled={actions.busy} onClick={() => setConfirmDelete(true)}>Delete cloud account</button>}
+    {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
+  </section>
+}
+
+function SetupPanel({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  if (state.account === undefined) return <></>
+  return <><PairingControls state={state} deps={deps} dispatch={dispatch} /><RoomControls state={state} deps={deps} dispatch={dispatch} /><AccountControls account={state.account} deps={deps} dispatch={dispatch} /></>
+}
+
+function ConnectedActivity({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
   const stale = state.phase === 'stale'
-  const connection = stale ? 'Desktop offline' : state.phase === 'waiting' ? 'Waiting for desktop' : 'Live'
-  const banner = stale ? `Showing the latest update · last seen ${lastSeen(state.lastSeenAt, now)}` : 'Live from your desktop'
-  return <main className="app-shell"><header><div><p className="brand">EQ Legends <span>Live</span></p><p className="viewer">Viewing as {state.account?.user.displayName}</p></div><div className={`connection ${stale ? 'offline' : ''}`}><span />{connection}</div></header>
-    {state.phase === 'waiting' && <section className="waiting" aria-live="polite"><span className="spinner" /><h1>Waiting for your desktop</h1><p>Start EQ Legends Companion and enable Discord Live. This view will update automatically.</p></section>}
-    {state.state && <><div className={stale ? 'stale-banner' : 'live-banner'} role="status">{banner}</div><LiveDashboard state={state.state} now={now} /></>}
-    <AccountControls state={state} actions={actions} />
+  const onlineCount = state.room?.participants.filter((participant) => participant.online).length ?? 0
+  return <main className="app-shell"><header><div><p className="brand">EQ Legends <span>Live</span></p><p className="viewer">{state.account?.room?.name} · viewing as {state.account?.user.displayName}</p></div>
+    <div className={`connection ${stale ? 'offline' : ''}`}><span />{stale ? 'Reconnecting' : `${onlineCount} connected`}</div></header>
+    {stale && <div className="stale-banner" role="status">Connection lost. Showing the latest room update.</div>}
+    {state.room === undefined
+      ? <section className="waiting" aria-live="polite"><span className="spinner" /><h1>Opening shared room</h1><p>The encounter board will appear as soon as the room connects.</p></section>
+      : <RoomDashboard room={state.room} now={deps.now()} setup={<SetupPanel state={state} deps={deps} dispatch={dispatch} />} />}
   </main>
 }
 
-function ActivityView({ state, retry, pairingBusy, createPairing, now, actions }: { state: ActivityState; retry: () => void; pairingBusy: boolean; createPairing: () => void; now: number; actions: AccountActions }): React.JSX.Element {
-  if (state.phase === 'boot') return <BootPanel />
-  if (state.phase === 'error') return <ErrorPanel title="You’re offline" message={state.message ?? 'The live view could not connect.'} retry={retry} />
+function ActivityView({ state, retry, deps, dispatch }: { state: ActivityState; retry: () => void; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
+  if (state.phase === 'boot') return <main className="center-shell"><section className="state-card"><span className="spinner" /><p className="eyebrow">EQ Legends Live</p><h1>Connecting to Discord...</h1></section></main>
+  if (state.phase === 'error') return <ErrorPanel title="You're offline" message={state.message ?? 'The live view could not connect.'} retry={retry} />
   if (state.phase === 'incompatible') return <ErrorPanel title="Update required" message={state.message ?? 'This Activity and desktop companion use incompatible versions.'} />
-  if (state.phase === 'deleted') return <ErrorPanel title="Cloud sync deleted" message="Your paired devices and latest cloud snapshot were removed." />
-  if (state.phase === 'unpaired') return <PairingPanel state={state} busy={pairingBusy} create={createPairing} />
-  return <ConnectedActivity state={state} now={now} actions={actions} />
+  if (state.phase === 'deleted') return <ErrorPanel title="Cloud sync deleted" message="Your cloud account was removed." />
+  if (state.phase === 'lobby') return <RoomLobby deps={deps} dispatch={dispatch} />
+  return <ConnectedActivity state={state} deps={deps} dispatch={dispatch} />
 }
 
 export function App({ deps = browserDeps }: { deps?: AppDeps }): React.JSX.Element {
   const [state, dispatch] = useReducer(activityReducer, initialState)
   const [attempt, setAttempt] = useState(0)
-  const [pairingBusy, createPairing] = useCreatePairing(deps, dispatch)
-  const accountActions = useAccountActions(deps, dispatch)
-  useAuthenticatedActivity(deps, attempt, dispatch)
-
-  return <ActivityView state={state} retry={() => setAttempt((value) => value + 1)} pairingBusy={pairingBusy} createPairing={createPairing} now={deps.now()} actions={accountActions} />
+  useAuthentication(deps, attempt, dispatch)
+  useRoomTransport(deps, state.account?.room?.id, dispatch)
+  useAccountRefreshOnPublish(state, deps, dispatch)
+  return <ActivityView state={state} retry={() => setAttempt((value) => value + 1)} deps={deps} dispatch={dispatch} />
 }

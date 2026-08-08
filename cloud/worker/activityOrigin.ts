@@ -18,9 +18,11 @@ function normalizedOrigin(value: string): string | null {
 
 export function requiresActivityOrigin(method: string, path: string): boolean {
   if (method === 'POST') {
-    return path === '/api/oauth/token' || path === '/api/pairing' || path === '/api/viewer/session'
+    return path === '/api/oauth/token' || path === '/api/pairing' || path === '/api/viewer/session' ||
+      path === '/api/rooms' || path.startsWith('/api/rooms/')
   }
-  return method === 'DELETE' && (path === '/api/me' || path.startsWith('/api/devices/'))
+  return method === 'DELETE' &&
+    (path === '/api/me' || path.startsWith('/api/devices/') || path.startsWith('/api/rooms/'))
 }
 
 export function requireActivityOrigin(request: Request, env: Env): void {

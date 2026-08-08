@@ -9,6 +9,7 @@ import {
   revokeDevice
 } from './deviceAuth'
 import { createPairing } from './pairing'
+import { activeRoom, closeRoom, createRoom, joinRoom, leaveRoom, rotateRoomCode } from './rooms'
 import { scheduleExpiredRowCleanup } from './retention'
 import { signValue } from './crypto'
 import type { Env, SyncHandoff } from './types'
@@ -27,7 +28,8 @@ async function syncUpgrade(request: Request, env: Env): Promise<Response> {
     throw new HttpError(401, 'unauthorized', 'A WebSocket ticket is required')
   }
   const handoff = await consumeTicket(ticket, env)
-  const room = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName(handoff.accountId))
+  const roomKey = handoff.roomId === undefined ? handoff.accountId : `shared:${handoff.roomId}`
+  const room = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName(roomKey))
   const headers = new Headers(request.headers)
   headers.set('x-eq-sync-handoff', await signValue(encodeHandoff(handoff), env.TICKET_SIGNING_KEY))
   return room.fetch(new Request(request, { headers }))
@@ -42,7 +44,7 @@ async function me(accountId: string, env: Env): Promise<Response> {
     .bind(accountId)
     .all<{ id: string; label: string; created_at: number }>()
   const devices = rows.results.map((row) => ({ id: row.id, label: row.label, createdAt: row.created_at }))
-  return json({ account, devices, paired: devices.length > 0 })
+  return json({ account, devices, paired: devices.length > 0, room: await activeRoom(accountId, env) })
 }
 
 async function publicApi(request: Request, env: Env, path: string): Promise<Response | null> {
@@ -55,24 +57,62 @@ async function publicApi(request: Request, env: Env, path: string): Promise<Resp
   return null
 }
 
-async function authenticatedApi(request: Request, env: Env, path: string, accountId: string): Promise<Response> {
-  if (request.method === 'POST' && path === '/api/pairing') {
-    return json(await createPairing(accountId, request, env))
+async function roomPostApi(request: Request, env: Env, path: string, accountId: string): Promise<Response | null> {
+  if (path === '/api/rooms') return json(await createRoom(accountId, request, env), 201)
+  if (path === '/api/rooms/join') return json(await joinRoom(accountId, request, env))
+  const roomCodeMatch = /^\/api\/rooms\/([^/]+)\/code$/u.exec(path)
+  if (roomCodeMatch?.[1] !== undefined) {
+    return json(await rotateRoomCode(accountId, decodeURIComponent(roomCodeMatch[1]), env))
   }
-  if (request.method === 'POST' && path === '/api/viewer/session') {
-    return json(await createViewerSession(accountId, env))
+  return null
+}
+
+async function roomDeleteApi(env: Env, path: string, accountId: string): Promise<Response | null> {
+  const roomLeaveMatch = /^\/api\/rooms\/([^/]+)\/membership$/u.exec(path)
+  if (roomLeaveMatch?.[1] !== undefined) {
+    await leaveRoom(accountId, decodeURIComponent(roomLeaveMatch[1]), env)
+    return new Response(null, { status: 204 })
   }
-  if (request.method === 'GET' && path === '/api/me') return me(accountId, env)
-  if (request.method === 'DELETE' && path === '/api/me') {
+  const roomCloseMatch = /^\/api\/rooms\/([^/]+)$/u.exec(path)
+  if (roomCloseMatch?.[1] !== undefined) {
+    await closeRoom(accountId, decodeURIComponent(roomCloseMatch[1]), env)
+    return new Response(null, { status: 204 })
+  }
+  return null
+}
+
+async function roomApi(request: Request, env: Env, path: string, accountId: string): Promise<Response | null> {
+  if (!path.startsWith('/api/rooms')) return null
+  if (request.method === 'POST') return roomPostApi(request, env, path, accountId)
+  if (request.method === 'DELETE') return roomDeleteApi(env, path, accountId)
+  return null
+}
+
+async function authenticatedPost(request: Request, env: Env, path: string, accountId: string): Promise<Response | null> {
+  if (path === '/api/pairing') return json(await createPairing(accountId, request, env))
+  if (path === '/api/viewer/session') return json(await createViewerSession(accountId, env))
+  return null
+}
+
+async function authenticatedDelete(request: Request, env: Env, path: string, accountId: string): Promise<Response | null> {
+  if (path === '/api/me') {
     await eraseAccount(accountId, env)
     return new Response(null, { status: 204 })
   }
-  const revokeMatch = request.method === 'DELETE' ? /^\/api\/devices\/([^/]+)$/u.exec(path) : null
-  const encodedDeviceId = revokeMatch?.[1]
-  if (encodedDeviceId !== undefined) {
-    await revokeDevice(accountId, decodeURIComponent(encodedDeviceId), env)
-    return new Response(null, { status: 204 })
-  }
+  const encodedDeviceId = /^\/api\/devices\/([^/]+)$/u.exec(path)?.[1]
+  if (encodedDeviceId === undefined) return null
+  await revokeDevice(accountId, decodeURIComponent(encodedDeviceId), env)
+  return new Response(null, { status: 204 })
+}
+
+async function authenticatedApi(request: Request, env: Env, path: string, accountId: string): Promise<Response> {
+  const roomResponse = await roomApi(request, env, path, accountId)
+  if (roomResponse !== null) return roomResponse
+  if (request.method === 'GET' && path === '/api/me') return me(accountId, env)
+  const response = request.method === 'POST'
+    ? await authenticatedPost(request, env, path, accountId)
+    : request.method === 'DELETE' ? await authenticatedDelete(request, env, path, accountId) : null
+  if (response !== null) return response
   throw new HttpError(404, 'not_found', 'API route was not found')
 }
 

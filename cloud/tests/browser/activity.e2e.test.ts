@@ -195,6 +195,14 @@ function publish(socket: WebSocket, target: string): void {
   }))
 }
 
+async function waitForVisibleText(text: string): Promise<void> {
+  try {
+    await page.getByText(text).first().waitFor({ timeout: 10_000 })
+  } catch {
+    throw new Error(`Activity did not render ${text}\n${await page.locator('body').innerText()}\n${workerOutput.slice(-6_000)}`)
+  }
+}
+
 async function expectNoHorizontalOverflow(): Promise<void> {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
@@ -231,9 +239,12 @@ afterAll(async () => {
 })
 
 describe('real Activity browser and local Worker', () => {
-  it('pairs, fans out bounded live state, responds across viewports, and goes stale/reconnects', async () => {
+  it('creates a room, pairs, publishes a bounded encounter, and reconnects', async () => {
     await page.goto(`http://localhost:${activityPort}`, { waitUntil: 'domcontentloaded' })
-    await page.getByText('Pair your desktop companion').waitFor()
+    await page.getByText('Join a shared room').waitFor()
+    await page.getByRole('button', { name: 'Create room' }).click()
+    await page.getByRole('navigation', { name: 'Shared room views' }).waitFor()
+    await page.getByRole('button', { name: 'Setup' }).click()
     await page.getByRole('button', { name: 'Create pairing code' }).click()
     const code = (await page.getByLabel('Pairing code').textContent())?.trim()
     expect(code).toMatch(/^[A-Z2-9]{8}$/u)
@@ -245,8 +256,9 @@ describe('real Activity browser and local Worker', () => {
     let publisher = await openPublisher(device)
     publish(publisher, 'a fire giant captain')
 
-    await page.getByText('a fire giant captain').waitFor()
-    await page.locator('.connection').getByText('Live', { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Encounters' }).click()
+    await waitForVisibleText('a fire giant captain')
+    await page.getByRole('button', { name: 'Players' }).click()
     expect(await page.locator('body').innerText()).toContain('Mote of Major Potential')
     expect(await page.locator('body').innerText()).not.toContain('RAW-LOG-MUST-NEVER-RENDER')
     await expectNoHorizontalOverflow()
@@ -256,14 +268,15 @@ describe('real Activity browser and local Worker', () => {
     expect(await page.getByText('Primitive', { exact: true }).count()).toBeGreaterThan(0)
 
     publisher.close()
-    await page.getByText('Desktop offline', { exact: true }).waitFor()
+    await page.getByText('Offline', { exact: true }).waitFor()
     publisher = await openPublisher(device)
     publish(publisher, 'Lord Nagafen')
-    await page.getByText('Lord Nagafen', { exact: true }).waitFor()
-    await page.locator('.connection').getByText('Live', { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Encounters' }).click()
+    await waitForVisibleText('Lord Nagafen')
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.getByText('Lord Nagafen', { exact: true }).waitFor()
-    await page.getByRole('button', { name: 'Revoke Browser E2E desktop' }).click()
-    await page.getByText('Pair your desktop companion').waitFor()
+    await waitForVisibleText('Lord Nagafen')
+    await page.getByRole('button', { name: 'Setup' }).click()
+    await page.getByRole('button', { name: 'Revoke' }).click()
+    await page.getByText('Pair your companion').waitFor()
   })
 })

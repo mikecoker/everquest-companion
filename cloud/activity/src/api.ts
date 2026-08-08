@@ -9,6 +9,14 @@ export interface ViewerAccount {
   user: ViewerIdentity
   paired: boolean
   devices: ViewerDevice[]
+  room: ViewerRoom | null
+}
+
+export interface ViewerRoom {
+  id: string
+  name: string
+  owner: boolean
+  joinedAt: number
 }
 
 export interface ViewerDevice {
@@ -22,6 +30,11 @@ export interface ActivityApi {
   loadMe(): Promise<ViewerAccount>
   createPairing(): Promise<{ code: string; expiresAt: number }>
   createViewerSession(): Promise<string>
+  createRoom(name: string): Promise<{ room: ViewerRoom; code: string }>
+  joinRoom(code: string): Promise<ViewerRoom>
+  rotateRoomCode(roomId: string): Promise<string>
+  leaveRoom(roomId: string): Promise<void>
+  closeRoom(roomId: string): Promise<void>
   revokeDevice(deviceId: string): Promise<void>
   deleteAccount(): Promise<void>
 }
@@ -55,13 +68,23 @@ function identity(value: unknown): ViewerIdentity {
 
 async function request(fetcher: FetchLike, path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetcher(path, { credentials: 'include', ...init })
-  if (!response.ok) throw new Error(`Request failed (${response.status})`)
+  if (!response.ok) throw new Error(await responseError(response))
   return response.json() as Promise<unknown>
 }
 
 async function requestVoid(fetcher: FetchLike, path: string, init: RequestInit): Promise<void> {
   const response = await fetcher(path, { credentials: 'include', ...init })
-  if (!response.ok) throw new Error(`Request failed (${response.status})`)
+  if (!response.ok) throw new Error(await responseError(response))
+}
+
+async function responseError(response: Response): Promise<string> {
+  try {
+    const body = record(await response.json(), 'Error response')
+    const error = record(body.error, 'Error')
+    return typeof error.message === 'string' ? error.message : `Request failed (${response.status})`
+  } catch {
+    return `Request failed (${response.status})`
+  }
 }
 
 function device(value: unknown): ViewerDevice {
@@ -70,6 +93,17 @@ function device(value: unknown): ViewerDevice {
     id: requiredString(source.id, 'Device id'),
     label: requiredString(source.label, 'Device label'),
     createdAt: timestamp(source.createdAt, 'Device creation time')
+  }
+}
+
+function room(value: unknown): ViewerRoom {
+  const source = record(value, 'Room')
+  if (typeof source.owner !== 'boolean') throw new Error('Room ownership was invalid')
+  return {
+    id: requiredString(source.id, 'Room id'),
+    name: requiredString(source.name, 'Room name'),
+    owner: source.owner,
+    joinedAt: timestamp(source.joinedAt, 'Room join time')
   }
 }
 
@@ -88,7 +122,8 @@ export function createActivityApi(fetcher: FetchLike = fetch): ActivityApi {
       return {
         user: identity(data.account),
         paired: data.paired,
-        devices: data.devices.map(device)
+        devices: data.devices.map(device),
+        room: data.room === null ? null : room(data.room)
       }
     },
     async createPairing() {
@@ -99,6 +134,30 @@ export function createActivityApi(fetcher: FetchLike = fetch): ActivityApi {
       const data = record(await request(fetcher, '/api/viewer/session', { method: 'POST' }), 'Viewer response')
       timestamp(data.expiresAt, 'Viewer expiry')
       return requiredString(data.ticket, 'Viewer ticket')
+    },
+    async createRoom(name) {
+      const data = record(await request(fetcher, '/api/rooms', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name })
+      }), 'Create room response')
+      return { room: room(data.room), code: requiredString(data.code, 'Room code') }
+    },
+    async joinRoom(code) {
+      const data = record(await request(fetcher, '/api/rooms/join', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code })
+      }), 'Join room response')
+      return room(data.room)
+    },
+    async rotateRoomCode(roomId) {
+      const data = record(await request(fetcher, `/api/rooms/${encodeURIComponent(roomId)}/code`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
+      }), 'Room code response')
+      return requiredString(data.code, 'Room code')
+    },
+    async leaveRoom(roomId) {
+      await requestVoid(fetcher, `/api/rooms/${encodeURIComponent(roomId)}/membership`, { method: 'DELETE' })
+    },
+    async closeRoom(roomId) {
+      await requestVoid(fetcher, `/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' })
     },
     async revokeDevice(deviceId) {
       await requestVoid(fetcher, `/api/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' })
