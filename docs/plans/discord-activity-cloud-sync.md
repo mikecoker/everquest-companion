@@ -1,11 +1,10 @@
 # Discord Activity + Cloudflare live sync
 
-Status: Waves A-D integrated; Wave E hardening/deployment preparation is next
+Status: Waves A-E implemented locally; owner-authorized deployment validation is next
 
 Written: 2026-08-07
 
-Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`; E2E hardening:
-`d259683`)
+Resume point: `feature/discord-cloud-sync` on the `mikecoker` fork
 
 ## 0. Implementation progress
 
@@ -13,8 +12,8 @@ Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`
   publish messages carry no revision, and the server alone assigns broadcast revisions.
 - Wave B is integrated: `cloud/worker/**` implements the authenticated D1 + SQLite Durable Object
   relay, and `cloud/activity/**` implements the Discord Activity live view. The Worker suite runs
-  in the real Cloudflare Vitest pool (16 tests); the Activity has 18 jsdom component/transport
-  tests and a production Vite build.
+  in the real Cloudflare Vitest pool; the Activity has jsdom component/transport tests and a
+  production Vite build.
 - Cloudflare's current declarative Durable Object `exports` configuration is used instead of the
   legacy migration array. D1 still uses `cloud/migrations/0001_initial.sql`.
 - Root CI installs the isolated `cloud/package-lock.json` and gates cloud typecheck, strict lint,
@@ -28,13 +27,12 @@ Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`
   exact allowlist/exclusions, and the publisher is wired after replay, across character switches,
   settings changes, and quit. E2E mode refuses pairing and remains network-silent even when an
   enabled profile is seeded.
-- Merged-main verification is green for root typecheck, strict lint, 2,402 root tests (18 skipped),
-  Worker + Activity tests (34), both production builds, and Wrangler dry-run. All 21 Electron E2E
-  specs have passing evidence; the parallel gauntlet remains timing-sensitive in unrelated legacy
-  probes (the last run passed both cloud-sync and the repaired Sky/Leveling specs, with only the
-  performance probe's sub-500 ms sampling assertion red).
-- A real Chromium Activity + local Worker end-to-end pass remains Wave E work. No Cloudflare or
-  Discord resources have been deployed, and no production secrets or physical IDs are committed.
+- Wave E now includes bounded D1 cleanup, authenticated account/room erasure, a fresh-room handoff
+  race guard, exact configured-origin checks for browser mutations, Activity device/account
+  controls, and a serial real-Chromium Activity-to-local-Worker test. Current focused counts are
+  22 Worker tests, 19 Activity tests, and one real-browser vertical slice.
+- No Cloudflare or Discord resources have been deployed, and no production secrets or physical
+  IDs are committed. Final Discord iframe/proxy verification requires owner-supplied resources.
 
 ## 1. Outcome
 
@@ -443,8 +441,8 @@ main. Add an e2e assertion that sync is off and network-silent by default, plus 
 
 ## 10. Resume commands
 
-Start the next session from a clean `main` and proceed with Wave E. Keep deployment rehearsal local
-until the owner supplies/authorizes Discord and Cloudflare resources:
+Start from the fork feature branch. Keep deployment rehearsal local until the owner
+supplies/authorizes Discord and Cloudflare resources:
 
 ```powershell
 cd D:\projects\everquest-companion

@@ -20,7 +20,11 @@ describe('activity reducer', () => {
   })
 
   it('keeps an unpaired viewer on the pairing instructions during reconnects', () => {
-    const unpaired = { ...initialState, phase: 'unpaired' as const, account: { user: { id: '1', username: 'u', displayName: 'U' }, paired: false } }
+    const unpaired = {
+      ...initialState,
+      phase: 'unpaired' as const,
+      account: { user: { id: '1', username: 'u', displayName: 'U' }, paired: false, devices: [] }
+    }
     expect(activityReducer(unpaired, { type: 'disconnected', at: 20 })).toBe(unpaired)
     expect(activityReducer(unpaired, { type: 'socket', message: { version: CLOUD_SYNC_PROTOCOL_VERSION, type: 'presence', online: false } })).toBe(unpaired)
   })

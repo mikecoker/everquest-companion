@@ -18,12 +18,18 @@ function testDeps(paired: boolean, ready = vi.fn().mockResolvedValue(undefined))
   const authorize = vi.fn().mockResolvedValue('oauth-code')
   const authenticate = vi.fn().mockResolvedValue(undefined)
   const exchangeOAuthCode = vi.fn().mockResolvedValue('sdk-access-token')
-  const loadMe = vi.fn().mockResolvedValue({ user: { id: '1', username: 'josh', displayName: 'Josh' }, paired })
+  const loadMe = vi.fn().mockResolvedValue({
+    user: { id: '1', username: 'josh', displayName: 'Josh' },
+    paired,
+    devices: paired ? [{ id: 'device-1', label: 'Gaming PC', createdAt: 1 }] : []
+  })
   const createPairing = vi.fn().mockResolvedValue({ code: '7QK2MP', expiresAt: 300_000 })
   const createViewerSession = vi.fn().mockResolvedValue('viewer-ticket')
+  const revokeDevice = vi.fn().mockResolvedValue(undefined)
+  const deleteAccount = vi.fn().mockResolvedValue(undefined)
   const discord: DiscordAdapter = { ready, authorize, authenticate }
   const api: ActivityApi = {
-    exchangeOAuthCode, loadMe, createPairing, createViewerSession
+    exchangeOAuthCode, loadMe, createPairing, createViewerSession, revokeDevice, deleteAccount
   }
   const sockets: TestSocket[] = []
   const deps: AppDeps = {
@@ -32,7 +38,11 @@ function testDeps(paired: boolean, ready = vi.fn().mockResolvedValue(undefined))
     now: () => 1_800_000, random: () => 0.5,
     delay: (_ms, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
   }
-  return { deps, calls: { ready, authorize, authenticate, exchangeOAuthCode, createPairing, createViewerSession }, sockets }
+  return {
+    deps,
+    calls: { ready, authorize, authenticate, exchangeOAuthCode, createPairing, createViewerSession, revokeDevice, deleteAccount },
+    sockets
+  }
 }
 
 async function renderReady(paired: boolean) {
@@ -94,6 +104,18 @@ describe('Activity UI states', () => {
     expect(await screen.findByText('Desktop offline')).toBeInTheDocument()
     expect(screen.getByText(/Showing the latest update · last seen/)).toBeInTheDocument()
     expect(screen.getByText('Primitive')).toBeInTheDocument()
+  })
+
+  it('lets the authenticated viewer revoke a desktop and erase the cloud account', async () => {
+    const { calls } = await renderReady(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke Gaming PC' }))
+    await vi.waitFor(() => expect(calls.revokeDevice).toHaveBeenCalledWith('device-1'))
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Delete cloud account' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Delete cloud account' }))
+    expect(screen.getByText(/removes every paired desktop/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
+    expect(await screen.findByText('Cloud sync deleted')).toBeInTheDocument()
+    expect(calls.deleteAccount).toHaveBeenCalledOnce()
   })
 
   it('renders incompatible protocol as a terminal explicit state', async () => {

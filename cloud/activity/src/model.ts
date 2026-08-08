@@ -1,7 +1,7 @@
 import type { CloudSyncState, ServerCloudSyncMessage } from '../../../src/shared/cloudSync'
 import type { ViewerAccount } from './api'
 
-export type ActivityPhase = 'boot' | 'error' | 'unpaired' | 'waiting' | 'live' | 'stale' | 'incompatible'
+export type ActivityPhase = 'boot' | 'error' | 'unpaired' | 'waiting' | 'live' | 'stale' | 'incompatible' | 'deleted'
 
 export interface ActivityState {
   phase: ActivityPhase
@@ -22,6 +22,7 @@ export type ActivityAction =
   | { type: 'disconnected'; at: number }
   | { type: 'error'; message: string }
   | { type: 'incompatible'; message: string }
+  | { type: 'deleted' }
 
 type ServerMessage<T extends ServerCloudSyncMessage['type']> = Extract<ServerCloudSyncMessage, { type: T }>
 
@@ -48,6 +49,15 @@ function socketState(state: ActivityState, message: ServerCloudSyncMessage): Act
   return state
 }
 
+function terminalState(
+  state: ActivityState,
+  action: Extract<ActivityAction, { type: 'error' | 'incompatible' | 'deleted' }>
+): ActivityState {
+  if (action.type === 'deleted') return { ...initialState, phase: 'deleted' }
+  if (action.type === 'incompatible') return { ...state, phase: 'incompatible', message: action.message }
+  return { ...state, phase: 'error', message: action.message }
+}
+
 export function activityReducer(state: ActivityState, action: ActivityAction): ActivityState {
   if (action.type === 'account') {
     return { ...initialState, account: action.account, phase: action.account.paired ? 'waiting' : 'unpaired' }
@@ -58,6 +68,5 @@ export function activityReducer(state: ActivityState, action: ActivityAction): A
     if (!state.state && state.account?.paired === false) return state
     return { ...state, phase: state.state ? 'stale' : 'waiting', lastSeenAt: state.lastSeenAt ?? action.at }
   }
-  if (action.type === 'incompatible') return { ...state, phase: 'incompatible', message: action.message }
-  return { ...state, phase: 'error', message: action.message }
+  return terminalState(state, action)
 }

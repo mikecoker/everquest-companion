@@ -44,13 +44,9 @@ the long-lived device secret. Pairing codes expire after five minutes and are si
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Latest derived snapshot in the per-account Durable Object | Deleted by alarm one hour after the last publisher goes offline. There is no encounter history.                                                    |
 | Browser session cookie                                    | 24 hours in the browser; the server keeps no session row for it.                                                                                   |
-| Pairing codes and WebSocket tickets                       | Unusable after five minutes / 60 seconds respectively, or immediately after first use. Their hashed D1 rows are not yet periodically purged.       |
-| Rate-limit buckets                                        | Stop affecting requests after their reset time; expired rows are not yet periodically purged.                                                      |
-| Discord account and device rows                           | Kept until an operator deletion path is run. Revocation timestamps a device and disconnects that publisher immediately; it does not erase the row. |
-
-The unbounded D1 rows are limitations, not target policy. Before a public deployment, the operator
-must add and verify bounded D1 cleanup plus an account-deletion procedure; the deployment runbook
-treats that as a release blocker.
+| Pairing codes and WebSocket tickets                       | Unusable after five minutes / 60 seconds respectively, or immediately after first use. A five-minute scheduler removes expired hashed rows in bounded 100-row batches. |
+| Rate-limit buckets                                        | Stop affecting requests after their reset time and are removed by the same bounded cleanup scheduler.                                             |
+| Discord account and device rows                           | Kept until the user chooses **Delete cloud account**. Device revocation timestamps one device; account deletion removes all account-owned D1 rows and wipes its room. |
 
 ## Controls
 
@@ -60,6 +56,9 @@ treats that as a release blocker.
 - **Revoke in the Activity** marks the selected server-side device revoked, closes only that
   device's live publisher with code 4003, broadcasts offline state when it was the last publisher,
   and refuses its future sessions.
+- **Delete cloud account** requires an explicit second confirmation, removes every account-owned
+  control-plane row, closes all room sockets with code 4004, and deletes the room alarm/storage.
+  A deleted account cannot reuse a previously consumed WebSocket handoff.
 
 No Cloudflare or Discord production resources are included in source control, and the committed
 configuration contains only placeholder physical ids.

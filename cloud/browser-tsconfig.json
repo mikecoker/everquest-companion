@@ -1,0 +1,12 @@
+{
+  "extends": "./activity/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "tests/browser/main.tsx",
+    "activity/src/**/*.ts",
+    "activity/src/**/*.tsx",
+    "../src/shared/cloudSync.ts"
+  ]
+}

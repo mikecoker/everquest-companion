@@ -27,11 +27,11 @@ single-use D1 ticket is consumed.
 | Ticket replay or role swapping                | Random hashed ticket, 60-second expiry, atomic one-use consume, role/subject in signed DO handoff                          | Query strings can appear in infrastructure logs; disable query logging and keep access-log retention short.                     |
 | Cross-account room access                     | Room id derived from verified Discord account; signed handoff checked at DO boundary                                       | Test through the deployed Discord proxy, not only direct origin.                                                                |
 | Forged/oversized publisher frames             | Shared parser at the Worker boundary, close/error on invalid input, publisher frame rate limit                             | Configure Worker request/CPU limits and monitoring before public use.                                                           |
-| Pair-code guessing/abuse                      | Hashed five-minute single-use codes, account and client-IP rate limits, collision retry                                    | Confirm the real proxy supplies a trustworthy client IP header; rate-limit storage currently needs cleanup.                     |
+| Pair-code guessing/abuse                      | Hashed five-minute single-use codes, account and client-IP rate limits, collision retry, bounded expired-row cleanup       | Confirm the real proxy supplies a trustworthy client IP header.                                                                  |
 | Revoked publisher remains live                | Ownership-checked D1 revoke plus awaited DO RPC; matching sockets close 4003; other devices stay live                      | Exercise multi-device revoke in production before invite.                                                                       |
 | Stale state presented as live                 | Explicit online/offline messages, Activity stale state, one-hour offline alarm deletion                                    | Alarm behavior must be observed after deployment and after a DO restart.                                                        |
-| Browser-session theft/CSRF                    | Signed 24-hour HttpOnly Secure partitioned cookie; JSON/preflight on credential-changing device routes; no permissive CORS | Add an explicit allowed-origin/CSRF policy once the final Discord proxy origin is known. Treat this as a public-launch blocker. |
-| Unbounded identity/control-plane retention    | Expired records are unusable and high-frequency state never enters D1                                                      | Periodic deletion of expired pairing/ticket/rate-limit rows and an account-erasure command are public-launch blockers.          |
+| Browser-session theft/CSRF                    | Signed 24-hour HttpOnly Secure partitioned cookie; configured exact-origin checks on every browser mutation; no permissive CORS | Set `ACTIVITY_ALLOWED_ORIGIN` to the final Discord proxy origin and verify it after URL mapping.                                |
+| Unbounded identity/control-plane retention    | Five-minute bounded cleanup of transient rows; authenticated account erasure removes D1 ownership rows and room state       | Monitor cleanup volume and exercise erasure against production bindings before invite.                                          |
 | Secret/config disclosure                      | Wrangler secrets, no secrets in Activity Vite variables, placeholder ids committed                                         | Scan built assets and Wrangler output before every deploy.                                                                      |
 
 ## Local clean-machine rehearsal
@@ -49,9 +49,13 @@ npm run build:cloud
 npm run deploy:cloud:dry
 ```
 
-The Worker test suite uses Cloudflare's local runtime. The Activity suite uses jsdom. A real
-Chromium Activity-to-local-Worker test is still required before public deployment; unit/component
-coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket behavior.
+The Worker test suite uses Cloudflare's local runtime and the Activity component suite uses jsdom.
+`npm run test:browser --prefix cloud` additionally launches one installed Chrome/Edge instance,
+applies D1 migrations to disposable local storage, and drives the actual Activity against a local
+Worker/Durable Object over HTTP and WebSockets. It covers pairing, live fan-out, bounded-field
+omission, desktop/narrow layout, offline/reconnect, and user-facing revocation. Discord OAuth is
+mocked only at its external HTTP/SDK boundary; the deployed Discord iframe/proxy still needs the
+portal verification below.
 
 ## Cloudflare preparation
 
@@ -63,6 +67,8 @@ coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket be
    Generate each signing key/pepper independently with a cryptographically secure generator.
 4. Set `ACTIVITY_COOKIE_DOMAIN` only when the final host requires it. An invalid value fails
    closed; an unnecessarily broad parent domain widens cookie scope.
+   Set `ACTIVITY_ALLOWED_ORIGIN` to the exact Discord proxy origin; browser mutations fail with
+   403 when it is configured and the `Origin` header is missing or different.
 5. Apply `cloud/migrations/0001_initial.sql` to the production D1 database before first traffic.
 6. Build the Activity, run Wrangler dry-run, inspect the asset bundle for secret strings, then
    deploy from a reviewed commit.
@@ -80,9 +86,8 @@ coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket be
 
 ## Public-launch blockers
 
-- Add the real Chromium Activity + local/deployed Worker end-to-end test.
-- Implement and test D1 expiry cleanup and Discord-account erasure.
-- Set and test an explicit Discord proxy origin/CSRF policy.
+- Set the tested `ACTIVITY_ALLOWED_ORIGIN` control to the final Discord proxy origin.
+- Repeat the real-browser suite through Discord's deployed iframe/proxy.
 - Exercise secret rotation, device revoke, last-publisher offline, one-hour deletion, and a DO
   hibernation/restart.
 - Review the final privacy copy and retention values with the owner.

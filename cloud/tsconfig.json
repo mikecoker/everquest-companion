@@ -16,6 +16,7 @@
   "include": [
     "worker/**/*.ts",
     "tests/**/*.ts",
+    "browser-e2e.vitest.config.ts",
     "vitest.config.ts",
     "worker-configuration.d.ts",
     "../src/shared/cloudSync.ts"

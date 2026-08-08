@@ -9,6 +9,7 @@ export interface Env {
   COOKIE_SIGNING_KEY: string
   TICKET_SIGNING_KEY: string
   DEVICE_PEPPER: string
+  ACTIVITY_ALLOWED_ORIGIN?: string
   ACTIVITY_COOKIE_DOMAIN?: string
   DISCORD_API_ORIGIN?: string
 }

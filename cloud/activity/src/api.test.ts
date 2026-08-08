@@ -8,14 +8,27 @@ describe('Activity API', () => {
   it('uses relative credentialed endpoints and verifies pairing', async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json({ accessToken: 'short-sdk-token', account: { id: '1', username: 'user', displayName: 'User' } }))
-      .mockResolvedValueOnce(json({ account: { id: '1', username: 'user', displayName: 'User' }, devices: [], paired: false }))
+      .mockResolvedValueOnce(json({
+        account: { id: '1', username: 'user', displayName: 'User' },
+        devices: [{ id: 'device-1', label: 'Gaming PC', createdAt: 10 }],
+        paired: true
+      }))
       .mockResolvedValueOnce(json({ code: 'Q7KP2M', expiresAt: 5_000 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
     const api = createActivityApi(fetcher)
     expect(await api.exchangeOAuthCode('oauth-code')).toBe('short-sdk-token')
-    expect(await api.loadMe()).toMatchObject({ user: { displayName: 'User' }, paired: false })
+    expect(await api.loadMe()).toMatchObject({
+      user: { displayName: 'User' }, paired: true,
+      devices: [{ id: 'device-1', label: 'Gaming PC', createdAt: 10 }]
+    })
     expect(await api.createPairing()).toEqual({ code: 'Q7KP2M', expiresAt: 5_000 })
+    await api.revokeDevice('device-1')
+    await api.deleteAccount()
     expect(fetcher).toHaveBeenNthCalledWith(1, '/api/oauth/token', expect.objectContaining({ credentials: 'include', method: 'POST' }))
     expect(fetcher).toHaveBeenNthCalledWith(3, '/api/pairing', expect.objectContaining({ credentials: 'include', method: 'POST' }))
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/api/devices/device-1', expect.objectContaining({ credentials: 'include', method: 'DELETE' }))
+    expect(fetcher).toHaveBeenNthCalledWith(5, '/api/me', expect.objectContaining({ credentials: 'include', method: 'DELETE' }))
   })
 
   it('rejects malformed responses and HTTP errors', async () => {

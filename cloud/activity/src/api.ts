@@ -8,6 +8,13 @@ export interface ViewerIdentity {
 export interface ViewerAccount {
   user: ViewerIdentity
   paired: boolean
+  devices: ViewerDevice[]
+}
+
+export interface ViewerDevice {
+  id: string
+  label: string
+  createdAt: number
 }
 
 export interface ActivityApi {
@@ -15,6 +22,8 @@ export interface ActivityApi {
   loadMe(): Promise<ViewerAccount>
   createPairing(): Promise<{ code: string; expiresAt: number }>
   createViewerSession(): Promise<string>
+  revokeDevice(deviceId: string): Promise<void>
+  deleteAccount(): Promise<void>
 }
 
 type FetchLike = typeof fetch
@@ -50,6 +59,20 @@ async function request(fetcher: FetchLike, path: string, init?: RequestInit): Pr
   return response.json() as Promise<unknown>
 }
 
+async function requestVoid(fetcher: FetchLike, path: string, init: RequestInit): Promise<void> {
+  const response = await fetcher(path, { credentials: 'include', ...init })
+  if (!response.ok) throw new Error(`Request failed (${response.status})`)
+}
+
+function device(value: unknown): ViewerDevice {
+  const source = record(value, 'Device')
+  return {
+    id: requiredString(source.id, 'Device id'),
+    label: requiredString(source.label, 'Device label'),
+    createdAt: timestamp(source.createdAt, 'Device creation time')
+  }
+}
+
 export function createActivityApi(fetcher: FetchLike = fetch): ActivityApi {
   return {
     async exchangeOAuthCode(code) {
@@ -64,7 +87,8 @@ export function createActivityApi(fetcher: FetchLike = fetch): ActivityApi {
       if (!Array.isArray(data.devices) || typeof data.paired !== 'boolean') throw new Error('Account status was invalid')
       return {
         user: identity(data.account),
-        paired: data.paired
+        paired: data.paired,
+        devices: data.devices.map(device)
       }
     },
     async createPairing() {
@@ -75,6 +99,12 @@ export function createActivityApi(fetcher: FetchLike = fetch): ActivityApi {
       const data = record(await request(fetcher, '/api/viewer/session', { method: 'POST' }), 'Viewer response')
       timestamp(data.expiresAt, 'Viewer expiry')
       return requiredString(data.ticket, 'Viewer ticket')
+    },
+    async revokeDevice(deviceId) {
+      await requestVoid(fetcher, `/api/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' })
+    },
+    async deleteAccount() {
+      await requestVoid(fetcher, '/api/me', { method: 'DELETE' })
     }
   }
 }
