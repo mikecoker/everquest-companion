@@ -5,6 +5,7 @@ import { memo, useEffect, useRef } from 'react'
 import { Box, FormControlLabel, Switch, Typography } from '@mui/material'
 import { DashCard, QuietNote } from './combatShared'
 import { formatTime } from '../../lib/formatDate'
+import { isAtBottom } from './followScroll'
 import type { ClassifiedLine } from '@shared/combat'
 
 const ROLE_COLOR: Record<string, string> = {
@@ -40,9 +41,14 @@ export function ProcessingLog({
   setShowUnparsed: (v: boolean) => void
 }): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
+  // FOLLOW ONLY FROM THE BOTTOM (JOS-95). This used to scroll unconditionally on every append,
+  // so during a live tail a reader could never scroll up — the next line yanked them back. The
+  // reader's position is measured BEFORE the append moved anything (scroll events), and an
+  // append only chases the bottom for a reader who was already there.
+  const following = useRef(true)
   useEffect(() => {
     const el = ref.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && following.current) el.scrollTop = el.scrollHeight
   }, [lines])
   // FIXED height, not minHeight (Task #56): this card's body is an append-only ring that grows
   // to 150 lines. As `flex: 0 0 auto` it sized to that CONTENT and — being unshrinkable —
@@ -63,6 +69,10 @@ export function ProcessingLog({
       <Box
         ref={ref}
         data-testid="combat-log"
+        onScroll={(e) => {
+          const el = e.currentTarget
+          following.current = isAtBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+        }}
         sx={{ overflow: 'auto', flexGrow: 1, minHeight: 0, fontFamily: '"Consolas","Courier New",monospace', fontSize: 11 }}
       >
         {lines.length === 0 && <QuietNote>Waiting for combat…</QuietNote>}

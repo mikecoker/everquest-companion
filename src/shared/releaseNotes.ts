@@ -125,6 +125,17 @@ export interface ReleaseNote {
  */
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.11.1',
+    date: '2026-08-07',
+    entries: [
+      {
+        kind: 'fixed',
+        text: "The combat log no longer jumps to the bottom while you're reading: scroll up and your place holds; scroll back to the bottom and it follows new lines again.",
+        fromReport: true
+      }
+    ]
+  },
+  {
     version: '0.11.0',
     date: '2026-08-07',
     entries: [
