@@ -6,7 +6,7 @@ const sdk = vi.hoisted(() => ({
   }
 }))
 
-vi.mock('@discord/embedded-app-sdk', () => ({ DiscordSDK: class { constructor() { return sdk } } }))
+vi.mock('@discord/embedded-app-sdk', () => ({ DiscordSDK: function DiscordSdkMock() { return sdk } }))
 
 import { createDiscordAdapter } from './discord'
 
