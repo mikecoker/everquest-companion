@@ -34,13 +34,14 @@ export interface StoredRoomState {
   name: string
   ownerParticipantId: string
   revision: number
+  checkpointAt: number
   participants: Record<string, ParticipantRecord>
   active?: ActiveEncounter
   history: CloudRoomEncounter[]
 }
 
 export function createStoredRoom(roomId: string, name: string, ownerParticipantId: string): StoredRoomState {
-  return { roomId, name, ownerParticipantId, revision: 0, participants: {}, history: [] }
+  return { roomId, name, ownerParticipantId, revision: 0, checkpointAt: 0, participants: {}, history: [] }
 }
 
 function ownContribution(participantId: string, state: CloudSyncState): CloudRoomEncounterContribution {
@@ -160,7 +161,15 @@ export function applyRoomContribution(stored: StoredRoomState, update: RoomContr
     state
   }
   if (online && state.combat.inCombat) updateActiveEncounter(stored, member.participantId, state, encounterId)
-  else if (stored.active !== undefined) stored.active.fighting[member.participantId] = false
+  else if (stored.active !== undefined) {
+    if (stored.active.fighting[member.participantId]) {
+      const contribution = ownContribution(member.participantId, state)
+      stored.active.participants[member.participantId] = contribution
+      stored.active.lastUpdateAt = Math.max(stored.active.lastUpdateAt, now)
+      chooseEncounterLabel(stored.active, state, contribution)
+    }
+    stored.active.fighting[member.participantId] = false
+  }
   finalizeIfSettled(stored, now)
   stored.revision += 1
   return stored
