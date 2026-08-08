@@ -24,8 +24,23 @@ off logging, the app simply has nothing to show.
 - **Buff timers** — remaining time on buffs, learned from the log *(early — still rough)*.
 - **Sound alerts** — play a sound when something happens: a charm break, a buff fading,
   a raid target dying, or any log line you write a rule for. Voice packs included.
+- **Discord live view (opt-in)** — pair this desktop with the companion Discord Activity to
+  share a small live dashboard. It sends derived character/combat/progression summaries only,
+  never raw log lines or chat, and starts disabled.
 
 Everything is per-character; switch characters and the app re-reads that log.
+
+### Discord cloud sync
+
+Cloud sync is a separate, opt-in path under **Preferences → Cloud Sync**. Pairing does not enable
+publishing by itself. The pane shows the complete public-data allowlist and the things that are
+always excluded before you turn it on. Disabling sync closes the publisher immediately; Forget
+removes this desktop's local credentials. Server-side device revocation is performed from the
+authenticated Discord Activity.
+
+The feature requires a deployed companion service and configured endpoint; source builds have no
+production endpoint by default. See [the privacy and retention contract](docs/cloud-sync-privacy.md)
+for the exact fields and lifetimes.
 
 ## Getting started
 

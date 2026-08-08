@@ -32,14 +32,16 @@ The app installs **per-user**. It never asks for administrator rights, and there
 no UAC prompt at install, update, or uninstall time — the installer is built with
 `perMachine: false`, so it has no elevation manifest at all.
 
-Your log file is the only game data it reads, and it is opened read-only. Log
-contents are parsed locally, and they leave your machine in exactly one case: you
-attach a slice to a feedback report and press Send, having seen it first. The
-anonymous usage counts described below carry no log content of any kind — the
-schema they are built from has no field that could hold a line of your log.
+Your log file is the only game data it reads, and it is opened read-only. Raw log
+contents leave your machine only when you attach a previewed, scrubbed slice to a
+feedback report. If you separately pair and enable Discord cloud sync, a bounded
+allowlist of derived gameplay summaries is published; raw lines and chat still never
+enter that path. The anonymous usage counts described below carry no log content of
+any kind — the schema they are built from has no field that could hold a line of your
+log.
 
-**Over the network** — all HTTPS. Everything the app does on its own from a
-third-party host is a read-only GET:
+**Over the network** — HTTPS, plus WSS for an enabled live-sync socket. Everything
+the app does on its own from a third-party host is a read-only GET:
 
 | Host                                             | Why                                                   |
 | ------------------------------------------------ | ----------------------------------------------------- |
@@ -70,18 +72,26 @@ Remote images are fetched only from an exact hostname allowlist
 (`wiki.project1999.com`, `eqlwiki.com`), HTTPS only, default port only, no embedded
 credentials, and are cached on disk after content sniffing.
 
+**Optional Discord cloud sync is different from the fixed ingest routes above.** Its endpoint is
+visible and editable in Preferences because self-hosted deployments are supported. It accepts
+HTTPS only (loopback HTTP is allowed for local development), is disabled when empty, and is never
+contacted in E2E mode. Enabling it publishes only the closed, size-bounded shared contract. See
+[Discord cloud-sync privacy and retention](docs/cloud-sync-privacy.md) and the
+[deployment/threat-model runbook](docs/cloud-sync-deployment.md).
+
 ## What the app never does
 
-- No account, no login, no credentials, nothing stored that identifies you.
+- The desktop's local features require no account or login. Discord cloud sync is the explicit
+  exception: if you opt in, the service stores your Discord identity and a hashed device secret.
 - **No crash dumps, no session recording, no click stream, no free text.** The app
   does send anonymous usage *counts* (see [Usage analytics](#usage-analytics)); the
   schema those counts are built from is a closed list of numbers and fixed enum
   values with no free-text field anywhere in it, so a character name, a zone, a mob,
   an item, a search box, an alert name, a file path or a line of your log has
   nowhere to go — not "we choose not to send it", *there is no field for it*.
-- **Nothing about your logs, characters, or gameplay is uploaded**, on a timer or
-  otherwise. The one exception is a log slice you deliberately attach to a bug
-  report, after reading it.
+- **Raw log lines and chat are never uploaded on a timer.** The exceptions are a log slice you
+  deliberately attach to a bug report after reading it, and the bounded derived summaries you
+  deliberately enable for Discord cloud sync.
 - It never joins the two things it does send. The anonymous analytics id and the
   feedback install id are separate random values, deliberately non-correlatable, and
   the analytics ingest role cannot read the report table at all.

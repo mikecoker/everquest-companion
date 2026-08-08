@@ -1,8 +1,11 @@
 # Discord Activity + Cloudflare live sync
 
-Status: Waves A-B integrated; Wave C (desktop core) is next  
-Written: 2026-08-07  
-Resume point: current `main` after this update (implementation tip: `1c03f2b`)
+Status: Waves A-D integrated; Wave E hardening/deployment preparation is next
+
+Written: 2026-08-07
+
+Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`; E2E hardening:
+`d259683`)
 
 ## 0. Implementation progress
 
@@ -16,6 +19,20 @@ Resume point: current `main` after this update (implementation tip: `1c03f2b`)
   legacy migration array. D1 still uses `cloud/migrations/0001_initial.sql`.
 - Root CI installs the isolated `cloud/package-lock.json` and gates cloud typecheck, strict lint,
   both test runtimes, the Activity build, and Wrangler deployment dry-run.
+- Wave C is integrated: the desktop state builder projects only the protocol allowlist from
+  authoritative module snapshots, and the publisher implements ticket-only WebSockets,
+  server-revision handling, bounded throttling, heartbeat refresh, reconnect/backoff, revocation,
+  and character replacement. The focused desktop suites cover 22 state/publisher cases.
+- Wave D is integrated: pairing secrets are protected with Electron `safeStorage` when available,
+  the renderer receives sanitized status only, Preferences exposes pairing/enable/forget and the
+  exact allowlist/exclusions, and the publisher is wired after replay, across character switches,
+  settings changes, and quit. E2E mode refuses pairing and remains network-silent even when an
+  enabled profile is seeded.
+- Merged-main verification is green for root typecheck, strict lint, 2,402 root tests (18 skipped),
+  Worker + Activity tests (34), both production builds, and Wrangler dry-run. All 21 Electron E2E
+  specs have passing evidence; the parallel gauntlet remains timing-sensitive in unrelated legacy
+  probes (the last run passed both cloud-sync and the repaired Sky/Leveling specs, with only the
+  performance probe's sub-500 ms sampling assertion red).
 - A real Chromium Activity + local Worker end-to-end pass remains Wave E work. No Cloudflare or
   Discord resources have been deployed, and no production secrets or physical IDs are committed.
 
@@ -426,8 +443,8 @@ main. Add an e2e assertion that sync is off and network-silent by default, plus 
 
 ## 10. Resume commands
 
-Start the next session from a clean `main` and proceed with Wave C. Re-read the authoritative
-desktop snapshot shapes before briefing the state-builder and publisher branches:
+Start the next session from a clean `main` and proceed with Wave E. Keep deployment rehearsal local
+until the owner supplies/authorizes Discord and Cloudflare resources:
 
 ```powershell
 cd D:\projects\everquest-companion
