@@ -6,6 +6,16 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "scripts": {
+    "build": "vite build --config activity/vite.config.ts",
+    "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "dev:activity": "vite --config activity/vite.config.ts",
+    "dev:worker": "wrangler dev --config wrangler.jsonc",
+    "test": "npm run test:worker && npm run test:activity",
+    "test:activity": "vitest run --config activity/vitest.config.ts",
+    "test:worker": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p activity/tsconfig.json --noEmit"
+  },
   "dependencies": {
     "@discord/embedded-app-sdk": "2.5.0",
     "react": "19.2.8",

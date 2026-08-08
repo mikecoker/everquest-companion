@@ -165,6 +165,7 @@ const IGNORES = [
   'out/**',
   'out-e2e/**',
   'dist/**',
+  'cloud/dist/**',
   // esbuild bundle output for the feedback Lambda (infra/build.mjs) — generated,
   // 5.8k phantom no-var errors if linted. gitignored too; both lists need it.
   'infra/dist/**',
@@ -289,6 +290,23 @@ export default tseslint.config(
     files: ['src/renderer/**'],
     languageOptions: { globals: globals.browser },
   },
+  // Discord Activity: browser-only React, built separately from Electron.
+  {
+    files: ['cloud/activity/**'],
+    languageOptions: { globals: globals.browser },
+  },
+  // Cloudflare Worker + its workerd integration suite.
+  {
+    files: ['cloud/worker/**', 'cloud/tests/**'],
+    languageOptions: {
+      globals: { ...globals.worker, ...globals.serviceworker },
+    },
+  },
+  // Vite/Vitest configuration executes under Node, not workerd.
+  {
+    files: ['cloud/*.{ts,mts,js,mjs}', 'cloud/activity/*.{ts,mts,js,mjs}'],
+    languageOptions: { globals: globals.node },
+  },
   // Preload straddles both.
   {
     files: ['src/preload/**'],
@@ -297,7 +315,7 @@ export default tseslint.config(
 
   // ---- react-hooks (renderer only) ---------------------------------------
   {
-    files: ['src/renderer/**/*.{ts,tsx}'],
+    files: ['src/renderer/**/*.{ts,tsx}', 'cloud/activity/src/**/*.{ts,tsx}'],
     ...reactHooks.configs['recommended-latest'],
   },
 
@@ -312,7 +330,7 @@ export default tseslint.config(
 
   // ---- carve-out: tests --------------------------------------------------
   {
-    files: ['tests/**'],
+    files: ['tests/**', 'cloud/tests/**', 'cloud/activity/src/**/*.test.{ts,tsx}'],
     rules: {
       // A node:test case IS one long linear assertion block. Splitting it to
       // satisfy a line count buys nothing and hides the golden window.
