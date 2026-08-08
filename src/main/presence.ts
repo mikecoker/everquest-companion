@@ -30,6 +30,7 @@ import { spawn, type ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'stream'
 import { E2E } from './e2e'
 import { logError, logInfo } from './errorLog'
+import { notePresenceRestart } from './telemetry'
 import { effectiveEqRoot } from './log/config'
 import {
   type PresenceRecord,
@@ -421,6 +422,13 @@ function armStaleWatchdog(): void {
  */
 function scheduleRestart(): void {
   if (restartTimer || listeners.size === 0) return
+  // COUNTED WHERE THE RESTART IS COMMITTED TO (JOS-96), after the guard rather than before it: a
+  // call that is refused because a restart is already pending, or because nobody is listening any
+  // more, did not restart anything and must not read as a health event. All three restart causes
+  // (the stale-child watchdog, the child-gone handler, a failed spawn) funnel through here, so
+  // this is the one increment site. `restartFailures` cannot serve — it is a backoff index that
+  // resets to 0 on a healthy child.
+  notePresenceRestart()
   restartTimer = setTimeout(() => {
     restartTimer = null
     if (listeners.size === 0 || child) return

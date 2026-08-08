@@ -22,14 +22,17 @@
 // sharing them through a settings bundle would hand another machine a pack id it does not have
 // (map-viewer.md §11 wave 3). The keys sit under the `eq.maps.` prefix like every other
 // renderer-local view pref (`eq.view`, `eq.combat.scope`).
+//
+// THE ZONE ITSELF IS NOT ONE OF THEM ANY MORE. `eq.maps.zone` moved to `zoneFollow.ts` (JOS-97),
+// where it lives beside the MODE that says what it means — a followed zone and a pinned one are
+// stored the same way and behave completely differently, so the two keys are read and written
+// together, by pure functions a node test can drive without React.
 
 import { useEffect, useState } from 'react'
 import type { MapData, MapPackInfo, MapPackPrefs, ZoneShort } from '@shared/maps'
 
 /** Per-layer pack preference — `{geometry?, labels?}`, JSON. Absent/corrupt ⇒ `{}` (auto). */
 export const PACK_PREFS_KEY = 'eq.maps.packs'
-/** The zone stem the viewer was last showing, so a relaunch opens where you left off. */
-export const LAST_ZONE_KEY = 'eq.maps.zone'
 /**
  * Is the find-a-mob-or-label sidebar open? `'0'` when the user closed it, absent when open.
  *
@@ -81,15 +84,6 @@ export function loadPackPrefs(): MapPackPrefs {
 
 export function savePackPrefs(prefs: MapPackPrefs): void {
   localStorage.setItem(PACK_PREFS_KEY, JSON.stringify(prefs))
-}
-
-export function loadLastZone(): ZoneShort | null {
-  const raw = localStorage.getItem(LAST_ZONE_KEY)
-  return raw == null || raw === '' ? null : raw
-}
-
-export function saveLastZone(zone: ZoneShort): void {
-  localStorage.setItem(LAST_ZONE_KEY, zone)
 }
 
 /** What the viewer knows about the installed packs. `ready` distinguishes "none" from "not yet". */

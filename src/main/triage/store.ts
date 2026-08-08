@@ -494,6 +494,7 @@ export {
   readUsageFunnelDaily,
   readAnalyticsInstalls,
   readAnalyticsInstall,
+  readReportVersions,
   readOwnerInstalls,
   setInstallCohort,
   deleteAnalyticsInstall,

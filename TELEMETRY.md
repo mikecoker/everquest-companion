@@ -153,15 +153,15 @@ When you reach a step of one of the three flows listed below.
 
 ### `healthCounters`
 
-Once per session: counts of things that went wrong. Counts only, never messages.
+With each session report (every few minutes, and at close): counts of things that went wrong since the last one. Sent even when they are all zero. Counts only, never messages.
 
 | Field | Values | What it means |
 | --- | --- | --- |
-| `rendererCrashes` | whole number | Window crashes. |
+| `rendererCrashes` | whole number | Window crashes. The main window only. |
 | `mainErrorLogLines` | whole number | Lines written to the local error log. |
-| `parserStalls` | whole number | Times log reading stalled. |
+| `parserStalls` | whole number | Times log reading stalled. Not currently measured — always 0. |
 | `presenceRestarts` | whole number | Times the game-window watcher restarted. |
-| `speechFailures` | whole number | Times an utterance failed to speak. |
+| `speechFailures` | whole number | Times an utterance failed to speak. Downloaded voices only. |
 
 ### `updateOutcome`
 

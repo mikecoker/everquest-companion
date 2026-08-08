@@ -231,13 +231,21 @@ export const TELEMETRY_DOC_EVENTS: readonly DocEvent[] = [
   },
   {
     t: 'healthCounters',
-    when: 'Once per session: counts of things that went wrong. Counts only, never messages.',
+    // The cadence is stated exactly, because it is what a reader would otherwise get wrong: this
+    // rides the session reports (every 5 minutes, and again at close) rather than arriving once,
+    // and it is sent even when every count is zero. A report with nothing in it is how we know a
+    // build is reporting at all — without it, a version that is running fine and a version too old
+    // to have this code would look identical.
+    when: 'With each session report (every few minutes, and at close): counts of things that went wrong since the last one. Sent even when they are all zero. Counts only, never messages.',
     fields: [
-      { name: 'rendererCrashes', type: COUNT, note: 'Window crashes.' },
+      { name: 'rendererCrashes', type: COUNT, note: 'Window crashes. The main window only.' },
       { name: 'mainErrorLogLines', type: COUNT, note: 'Lines written to the local error log.' },
-      { name: 'parserStalls', type: COUNT, note: 'Times log reading stalled.' },
+      // SAID OUT LOUD rather than left as an implied zero: nothing in the app detects a stall, so
+      // this field reports 0 from every client and means "not measured". A note claiming it counts
+      // stalls would be a promise the code does not keep.
+      { name: 'parserStalls', type: COUNT, note: 'Times log reading stalled. Not currently measured — always 0.' },
       { name: 'presenceRestarts', type: COUNT, note: 'Times the game-window watcher restarted.' },
-      { name: 'speechFailures', type: COUNT, note: 'Times an utterance failed to speak.' }
+      { name: 'speechFailures', type: COUNT, note: 'Times an utterance failed to speak. Downloaded voices only.' }
     ]
   },
   {

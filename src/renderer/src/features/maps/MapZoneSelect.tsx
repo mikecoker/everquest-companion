@@ -11,9 +11,13 @@
 // somewhere. Typing filters by EITHER spelling (the stem on disk or the long name the table gives
 // it), which matters because the two rarely resemble each other: `soldungb` is Nagafen's Lair.
 //
-// A PICK HOLDS UNTIL THE NEXT ZONE LINE, and then the log wins (MapsView's `useZoneSelection`).
-// There is no follow toggle: "show me where I am" is the feature, and a manual detour that
-// survived zoning would leave you reading the wrong map with nothing on screen saying so.
+// A PICK PINS (JOS-97). It used to hold only until the next zone line, on the argument that a
+// manual detour surviving zoning "would leave you reading the wrong map with nothing on screen
+// saying so" — the second half of which was the real requirement, not the first. A v0.10.0 user
+// asked for the map they chose to still be there after visiting another tab; it was not, because
+// nothing distinguished "the app picked this" from "I picked this". So the pick now sets a MODE
+// (`zoneFollow.ts`), the toolbar STATES which mode is in force right beside this control, and
+// `Current zone` is the labelled way back to following the log.
 
 import type { HTMLAttributes, JSX } from 'react'
 import { Autocomplete, Stack, TextField, Typography } from '@mui/material'

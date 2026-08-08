@@ -13,6 +13,9 @@
 // AND THE WAY OUT IS ALWAYS ON SCREEN. The toolbar's Zone selector (MapZoneSelect.tsx) renders
 // in every state — map or no map — so browsing to a zone you are not standing in, and leaving
 // the map you are on, are the same one control rather than a state you have to fall back into.
+// A pick made there PINS (JOS-97): it survives the next zone line, leaving the tab, and a
+// restart, until the toolbar's `Current zone` hands the choice back to the log. Which of the two
+// is deciding is stated beside the selector — `useZoneSelection` below, rules in zoneFollow.ts.
 //
 // FINDING ANYTHING IS THE SIDEBAR'S JOB, and it is OPEN BY DEFAULT (MapMobPane.tsx). The toolbar
 // used to carry a label-search box and a This zone / All zones toggle beside the sidebar's own
@@ -20,9 +23,14 @@
 // DRAWING and nothing else; the sidebar is the one filter over the wiki's bestiary, this map's
 // own labels and every other installed map.
 //
-// WHAT THIS VIEW CANNOT DO, STATED ON SCREEN: there is no "you are here" marker, and there
-// cannot be — `Your Location` appears ZERO times in 86.6 MB of log. A user hunting for a dot
-// that does not exist is a worse outcome than one quiet line saying so (§10).
+// WHAT THIS VIEW CANNOT DO, AND THE HALF OF IT THE USER CAN (JOS-98). There is no AUTOMATIC "you
+// are here" marker and there cannot be: `Your Location` appears ZERO times in the log — re-measured
+// across the owner's whole 116.8 MB of it for this ticket — because /loc answers in the game window
+// and is never written to the file the app tails. What the viewer can do is take the answer from
+// you: the toolbar's `/loc marker` field accepts the line the game printed, drops a crosshair where
+// it says, and keeps it there per zone until you replace it or clear it. The caption states exactly
+// that pair, because a user hunting for a dot that does not exist is a worse outcome than one quiet
+// line saying so (§10) — and a user who does not know they can place one is the report we got.
 //
 // TWO DENSITY CONTROLS LIVE HERE AND BOTH ARE HONEST ABOUT WHAT THEY ARE. Labels declutter
 // themselves (`labelLayout.ts`) — a label that loses its space becomes a dot and hover raises the
@@ -47,7 +55,17 @@ import { floorBands } from './floorSlice'
 import { useMapViewport } from './useMapViewport'
 import MapToolbar from './MapToolbar'
 import { zoneLabel } from './zoneOptions'
-import { loadLastZone, loadPackPrefs, savePackPrefs, saveLastZone, useMapData, useMapPacks } from './useMapData'
+import { loadPackPrefs, savePackPrefs, useMapData, useMapPacks } from './useMapData'
+import { useLocMarker } from './useLocMarker'
+import {
+  loadZoneSelection,
+  onCharacterZone,
+  onFollowCurrent,
+  onPick,
+  saveZoneSelection,
+  type ZoneMode,
+  type ZoneSelection
+} from './zoneFollow'
 import { Tooltip } from '../../lib/Tooltip'
 
 /** A stand-in extent for the frames where no map is loaded. Never drawn; keeps the hook honest. */
@@ -88,11 +106,17 @@ function zoneLongName(zone: ZoneShort | null, raw: string | undefined): string |
 }
 
 /**
- * WHICH ZONE IS OPEN.
+ * WHICH ZONE IS OPEN — and whether that is the app's answer or the user's (JOS-97).
  *
- * The log wins whenever it says something new: zoning re-points the viewer, overriding a manual
- * pick, because "show me where I am" is the feature. A manual pick holds until the next zone
- * line, and the last zone is remembered across launches.
+ * TWO MODES, both stated on screen, both remembered (`zoneFollow.ts` holds the rules and the
+ * reasoning). In `follow` the log wins whenever it says something new, which is what the viewer
+ * has always done and is still the default: "show me where I am" is the feature. In `pinned` a
+ * manual pick holds — through zone lines, through leaving the tab (this view is UNMOUNTED the
+ * moment you click another one), and through a restart — until `followCurrent` asks for the
+ * character's zone back.
+ *
+ * THE STATE IS PERSISTED BY ONE EFFECT, not by each transition, so there is exactly one place
+ * that can forget to write and none of the reducers has to be impure to be correct.
  *
  * AN UNMAPPED ZONE CLEARS THE MAP RATHER THAN LEAVING THE OLD ONE UP. Leaving the previous zone
  * drawn while you stand somewhere else is the same lie as guessing a stem — the user reads the
@@ -103,22 +127,29 @@ function zoneLongName(zone: ZoneShort | null, raw: string | undefined): string |
 function useZoneSelection(raw: string | undefined): {
   zone: ZoneShort | null
   auto: ZoneShort | null
+  mode: ZoneMode
   pick: (zone: ZoneShort) => void
+  followCurrent: () => void
 } {
   const auto = zoneShortName(raw)
-  const [zone, setZone] = useState<ZoneShort | null>(loadLastZone)
+  // Has the log said where the character is AT ALL? A fresh log (or a replay that has not reached
+  // a zone line yet) is not a zone change, and must never overwrite what was remembered.
+  const stated = raw != null && raw !== ''
+  const [sel, setSel] = useState<ZoneSelection>(loadZoneSelection)
   useEffect(() => {
-    // Nothing stated yet (a fresh log, or the replay hasn't reached a zone line): keep whatever
-    // was remembered, which is the last place this install actually was.
-    if (raw == null || raw === '') return
-    setZone(auto)
-    if (auto != null) saveLastZone(auto)
-  }, [raw, auto])
+    saveZoneSelection(sel)
+  }, [sel])
+  useEffect(() => {
+    if (!stated) return
+    setSel((prev) => onCharacterZone(prev, auto))
+  }, [stated, auto])
   const pick = useCallback((next: ZoneShort) => {
-    setZone(next)
-    saveLastZone(next)
+    setSel(onPick(next))
   }, [])
-  return { zone, auto, pick }
+  const followCurrent = useCallback(() => {
+    setSel((prev) => onFollowCurrent(prev, auto, stated))
+  }, [auto, stated])
+  return { zone: sel.zone, auto, mode: sel.mode, pick, followCurrent }
 }
 
 /** The head: what zone this is, where each layer came from, and the one honest "cannot". */
@@ -138,7 +169,9 @@ function MapsHeader({
         <Typography variant="h6" sx={{ mr: 0.5 }}>
           {title}
         </Typography>
-        {zone != null && <Chip size="small" variant="outlined" label={zone} />}
+        {zone != null && (
+          <Chip size="small" variant="outlined" data-testid="maps-zone-chip" label={zone} />
+        )}
         {/* Which pack each layer actually came from. Geometry and labels routinely come from
             DIFFERENT packs (§6.3), and silently merging two while naming one would be exactly
             the unlabelled inference the world-model laws forbid. */}
@@ -158,7 +191,9 @@ function MapsHeader({
         )}
       </Stack>
       <Typography variant="caption" color="text.disabled">
-        No “you are here” marker: the log states the zone you entered and nothing else positional.
+        The log states the zone you entered and nothing else positional — so there is no automatic
+        “you are here”. Type <code>/loc</code> in game and paste the line into the toolbar to mark
+        where you are; the mark stays with this zone until you replace or clear it.
       </Typography>
     </Stack>
   )
@@ -265,7 +300,7 @@ export default function MapsView(): JSX.Element {
   // WHERE YOU ARE. The character module owns the raw display zone off the `zone` log event; it
   // is undefined until the log prints one, and that absence is a state this view renders.
   const raw = useModule<CharacterSnap, CharacterDelta>('character', applyCharacterDelta)?.zone
-  const { zone, auto, pick } = useZoneSelection(raw)
+  const { zone, auto, mode, pick, followCurrent } = useZoneSelection(raw)
   const [prefs, setPrefs] = useState<MapPackPrefs>(loadPackPrefs)
   const [layers, setLayers] = useState<LayerMask>(DEFAULT_LAYERS)
 
@@ -288,6 +323,10 @@ export default function MapsView(): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const vp = useMapViewport({ bounds: data?.bounds ?? EMPTY_BOUNDS, id: data?.zone ?? '', hostRef })
   const { marker, onJump } = useSearchJump({ vp, zone: data?.zone, pick })
+  // THE POSITION YOU TOLD IT (JOS-98). Keyed on the zone actually DRAWN, never the one being
+  // fetched: a marker attributed to a map that has not loaded would be drawn against the previous
+  // zone's bounds for a frame — a dot in the wrong place, which is the one thing this must not do.
+  const loc = useLocMarker(data?.zone ?? null, vp)
 
   // THE SIDEBAR. Open by default, remembered in `eq.maps.pane`, closed from its own header. Its
   // filtered rows are derived ONCE and read by both the list and the surface's pins.
@@ -303,6 +342,8 @@ export default function MapsView(): JSX.Element {
         zones={zones}
         zone={zone}
         onPick={pick}
+        mode={mode}
+        onFollowCurrent={followCurrent}
         hasMap={data != null}
         layers={layers}
         onLayers={setLayers}
@@ -315,6 +356,10 @@ export default function MapsView(): JSX.Element {
           setPrefs(p)
           savePackPrefs(p)
         }}
+        locMarker={loc.marker}
+        onPlaceLoc={loc.place}
+        onShowLoc={loc.show}
+        onClearLoc={loc.clear}
         zoomedIn={vp.zoomedIn}
         onZoom={vp.zoomBy}
         onFit={vp.fit}
@@ -334,6 +379,7 @@ export default function MapsView(): JSX.Element {
         pane={pane}
         zoneName={zoneName}
         marker={marker}
+        locMarker={loc.marker}
         onJump={onJump}
       />
       <MapCredits data={data} />

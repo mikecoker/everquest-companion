@@ -171,8 +171,30 @@ export const USAGE_METRICS = {
   setupVoice: 'setupVoice',
   setupPacks: 'setupPacks',
   setupUpdateChannel: 'setupUpdateChannel',
-  /** dim = the healthCounters field name; n = the count reported. */
+  /**
+   * ERRORS PER BUILD (JOS-96) — "did I release buggy code", which is a question about a RELEASE
+   * and so cannot be answered by a counter that only knows a field name.
+   *
+   * dim = `<version>:<field>`, n = the count reported. The JOS-57 startup precedent exactly:
+   * `usage_daily` has no version COLUMN (the key is day+cohort+metric+dim and cannot grow one —
+   * infra/schema.sql), so the version lives in `dim`, and that makes this additive with NO schema
+   * change and NO migration. It is also free to redesign right now precisely because NO CLIENT HAS
+   * EVER EMITTED `healthCounters`: there are zero rows in the live table to be re-encoded, so the
+   * old field-name-only encoding has no history to preserve.
+   */
   health: 'health',
+  /**
+   * dim = `<version>`. THE DENOMINATOR, and it is per-version for the same reason
+   * `startupReplays` is: `health / healthReports` at the same version is a self-normalizing RATE
+   * (errors per reporting session on that build), so a build that simply has more users cannot
+   * look buggier than one that has fewer.
+   *
+   * It is also the CAPABILITY SIGNAL, which is the half that keeps the readout honest. A version
+   * that predates the emitting client reports nothing at all — no `healthReports` row — and that
+   * is visibly different from a version that reported sessions and found no errors. The panel
+   * renders the first as "not reporting" and the second as a true zero; without a per-version
+   * denominator the two would be the same absent row.
+   */
   healthReports: 'healthReports',
   /**
    * THE STARTUP REPLAY (JOS-57), and every one of these is dimensioned BY VERSION because that is
@@ -399,13 +421,30 @@ function foldSetup(bag: Bag, ev: Extract<TelemetryEvent, { t: 'setupSnapshot' }>
   add(bag, USAGE_METRICS.setupUpdateChannel, ev.updateChannel, 1)
 }
 
-function foldHealth(bag: Bag, ev: Extract<TelemetryEvent, { t: 'healthCounters' }>): void {
-  add(bag, USAGE_METRICS.healthReports, DIM_NONE, 1)
-  add(bag, USAGE_METRICS.health, 'rendererCrashes', ev.rendererCrashes)
-  add(bag, USAGE_METRICS.health, 'mainErrorLogLines', ev.mainErrorLogLines)
-  add(bag, USAGE_METRICS.health, 'parserStalls', ev.parserStalls)
-  add(bag, USAGE_METRICS.health, 'presenceRestarts', ev.presenceRestarts)
-  add(bag, USAGE_METRICS.health, 'speechFailures', ev.speechFailures)
+/**
+ * ONE SESSION'S HEALTH ROLLUP, DIMENSIONED BY BUILD (JOS-96).
+ *
+ * `healthReports` is written UNCONDITIONALLY and is the denominator; the five field rows are
+ * written only when non-zero, because `add()` refuses non-positive values and an absent row reads
+ * identically to a zero row TO A SUM. That refusal is what makes a clean session cost one row
+ * instead of six — and it is safe here for the same reason it is safe in `foldStartup`: the
+ * denominator is always present, so "no error rows on a version that reported" is unambiguously
+ * zero errors rather than missing data.
+ *
+ * The version is an ENVELOPE fact — no event carries its own — so it is threaded in exactly the
+ * way `foldSession` threads it for the startup reading.
+ */
+function foldHealth(
+  bag: Bag,
+  ev: Extract<TelemetryEvent, { t: 'healthCounters' }>,
+  version: string
+): void {
+  add(bag, USAGE_METRICS.healthReports, version, 1)
+  add(bag, USAGE_METRICS.health, `${version}:rendererCrashes`, ev.rendererCrashes)
+  add(bag, USAGE_METRICS.health, `${version}:mainErrorLogLines`, ev.mainErrorLogLines)
+  add(bag, USAGE_METRICS.health, `${version}:parserStalls`, ev.parserStalls)
+  add(bag, USAGE_METRICS.health, `${version}:presenceRestarts`, ev.presenceRestarts)
+  add(bag, USAGE_METRICS.health, `${version}:speechFailures`, ev.speechFailures)
 }
 
 /**
@@ -504,7 +543,7 @@ function foldEvent(bag: Bag, ev: TelemetryEvent, version: string): void {
       foldSetup(bag, ev)
       return
     case 'healthCounters':
-      foldHealth(bag, ev)
+      foldHealth(bag, ev, version)
       return
     default:
       // The session kinds and the two outcome kinds, already folded by the helpers above.

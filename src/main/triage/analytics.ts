@@ -43,10 +43,12 @@ import type {
   TriageCohortRow,
   TriageFunnelStepRow,
   TriageFunnelView,
+  TriageMixRow,
   TriageStartupRow,
   TriageUpdateRow,
   TriageVersionRow
 } from '../../shared/triage'
+import { buildReleaseHealth } from './releaseHealth'
 import {
   addDays,
   bucketCounts,
@@ -58,6 +60,7 @@ import {
   seriesOf,
   sumOf,
   windowDays,
+  type BugReportRow,
   type FunnelRow,
   type InstallRow,
   type UsageRow
@@ -67,6 +70,13 @@ export interface AnalyticsInput {
   usage: readonly UsageRow[]
   funnels: readonly FunnelRow[]
   installs: readonly InstallRow[]
+  /**
+   * Feedback bug reports per build (JOS-96) — the FOURTH source, and the only one that comes from
+   * the `report` table rather than the counter tables. Optional so every existing caller and test
+   * keeps compiling and reading exactly as it did; absent means the overlay is empty, which is
+   * honest (no reports counted) rather than wrong.
+   */
+  bugReports?: readonly BugReportRow[]
   windowDays: number
   nowMs: number
 }
@@ -250,9 +260,32 @@ function updateRows(counts: Map<string, number>): TriageUpdateRow[] {
   })
 }
 
+/**
+ * The FLEET-WIDE error mix — every build's counts, added up, keyed by error class alone.
+ *
+ * The `health` dim became `<version>:<field>` in JOS-96, so the version is stripped back off here
+ * and the fields re-summed. That is deliberate rather than lazy: this section answers "what goes
+ * wrong in this app", which is a question about the CODE and wants every build's evidence
+ * together, while `releaseHealth` below answers "which build did it start going wrong in" and
+ * keeps them apart. Two questions, two sections, one set of rows.
+ *
+ * A dim with no colon is a row folded by an ingest Lambda older than that change; it is counted
+ * under its bare field name, which is exactly right for this section — the fleet total does not
+ * care which build a crash came from.
+ */
+function errorClasses(usage: readonly UsageRow[]): TriageMixRow[] {
+  const counts = new Map<string, number>()
+  for (const [dim, n] of dimsOf(usage, USAGE_METRICS.health)) {
+    const cut = dim.lastIndexOf(':')
+    const field = cut > 0 && cut < dim.length - 1 ? dim.slice(cut + 1) : dim
+    counts.set(field, (counts.get(field) ?? 0) + n)
+  }
+  return mixRows(counts)
+}
+
 function buildHealth(usage: readonly UsageRow[]): TriageAnalyticsHealth {
   return {
-    errors: mixRows(dimsOf(usage, USAGE_METRICS.health)),
+    errors: errorClasses(usage),
     reports: sumOf(usage, USAGE_METRICS.healthReports),
     update: updateRows(dimsOf(usage, USAGE_METRICS.update)),
     updateFailures: mixRows(dimsOf(usage, USAGE_METRICS.updateFailure))
@@ -460,6 +493,10 @@ export function buildAnalytics(input: AnalyticsInput): TriageAnalyticsData {
     funnels: buildFunnels(input.funnels, input.usage),
     health: buildHealth(input.usage),
     startup: buildStartup(input.usage),
+    // Beside Health and Startup, and reading the same rows from the other end: those two ask what
+    // goes wrong and how launches went; this one asks WHICH BUILD, over time, against how many
+    // people were on it. Its own file (./releaseHealth.ts) — this one is at the line ceiling.
+    releaseHealth: buildReleaseHealth(input.usage, input.bugReports ?? [], days),
     versions: buildVersions(input.usage, input.installs),
     retention: buildRetention(input.installs, ref)
   }

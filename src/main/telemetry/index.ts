@@ -29,6 +29,11 @@ export {
 // The once-ever funnel marks. Producers (session.ts, ipc/speech.ts) reach them through here for
 // the same reason everything else does: the wiring may not reach around the façade.
 export { markFunnelStep, observeFirstRun, recordFunnelFailure } from './funnels'
+// THE HEALTH COUNTERS (JOS-96). Producers reach them through the façade like everything else —
+// with ONE deliberate exception: `errorLog.ts` imports `./telemetry/health` DIRECTLY, because
+// importing this index would pull in `collector.ts`, which imports `errorLog.ts`. The leaf module
+// exists to make that one import safe; every other producer comes through here.
+export { noteParserStall, notePresenceRestart, noteRendererCrash, noteSpeechFailure } from './health'
 // The message → one-of-five-words reduction the two failure producers share. Exported from the
 // façade so no call site can import it and then reach one file further into the ring.
 export { classifyFailure } from './failureClass'

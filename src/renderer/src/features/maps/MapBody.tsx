@@ -2,7 +2,8 @@
 //
 // Split out of MapsView.tsx, which owns WHICH zone is open and nothing about how it is drawn.
 // Everything here is the drawing: the positioned host the viewport measures, the canvas, the
-// label layer, the two markers, and the sidebar column beside them.
+// label layer, the three marks — the search flash, the selection ring and the typed-/loc crosshair
+// — and the sidebar column beside them.
 //
 // WHEN THE SIDEBAR IS OFF IT IS NOT RENDERED AT ALL, so the surface is the row's only flex child
 // and takes the full width. That is the whole anti-flicker design: no zero-width box, no width
@@ -27,17 +28,23 @@ import type { MapData, MapSearchHit, ZoneShort } from '@shared/maps'
 import { MapCanvas } from './MapCanvas'
 import { MapPointsLayer, labelPosition } from './MapPointsLayer'
 import { MapMobPins } from './MapMobPins'
+import { MapLocMarker } from './MapLocMarker'
 import MapMobPane from './MapMobPane'
 import { paneOverlay, type PaneOverlay, type ZonePaneState } from './useMapPane'
-import type { LayerMask } from './mapGeometry'
+import { mapFromLoc, type EqLoc, type LayerMask } from './mapGeometry'
 import { bandRange, type FloorBand } from './floorSlice'
 import type { MapViewport } from './useMapViewport'
 import { Tooltip } from '../../lib/Tooltip'
 
 /** How long the jump-to marker stays on screen. Long enough to find, short enough to forget. */
 const MARKER_MS = 2600
-/** Scale bump when jumping from a fitted view — a fitted zone puts a POI at a couple of pixels. */
-const JUMP_ZOOM = 6
+/**
+ * Scale bump when jumping from a fitted view — a fitted zone puts a POI at a couple of pixels.
+ *
+ * EXPORTED so the `/loc` marker jumps with exactly the same feel (useLocMarker.ts). Two constants
+ * for one gesture is how two gestures start behaving differently for no stated reason.
+ */
+export const JUMP_ZOOM = 6
 
 /** The transient "here it is" pip a cross-zone hit leaves behind. */
 export interface Marker {
@@ -147,6 +154,7 @@ function MapSurface({
   bands,
   floor,
   marker,
+  locMarker,
   pane
 }: {
   data: MapData
@@ -156,6 +164,8 @@ function MapSurface({
   bands: readonly FloorBand[]
   floor: number | null
   marker: Marker | null
+  /** The `/loc` the user typed for THIS zone, still in the game's own axes (JOS-98). */
+  locMarker: EqLoc | null
   /** The sidebar's contribution, or null when it is closed and draws nothing. */
   pane: PaneOverlay | null
 }): JSX.Element {
@@ -191,6 +201,9 @@ function MapSurface({
       {pane != null && <MapMobPins pins={pane.pins} vp={vp} selectedId={pane.selectedId} />}
       {ringAt != null && <MarkerRing at={ringAt} size={26} testId="maps-pane-marker" />}
       {at != null && <MarkerRing at={at} size={22} testId="maps-marker" />}
+      {/* THE ONE SEAM, AGAIN: the typed reading reaches the screen through `mapFromLoc` and then
+          the same `project` every other mark uses. Nothing here knows which way north is. */}
+      {locMarker != null && <MapLocMarker at={mapFromLoc(locMarker)} loc={locMarker} vp={vp} />}
     </Box>
   )
 }
@@ -233,12 +246,15 @@ export interface MapBodyProps {
   /** The LONG zone name the catalog was joined on, for the sidebar's own honesty. */
   zoneName: string | null
   marker: Marker | null
+  /** This zone's typed-/loc marker, or null. Persistent, unlike `marker` above it. */
+  locMarker: EqLoc | null
   /** A cross-zone hit was clicked — `useSearchJump`'s handler, which changes zone first. */
   onJump: (hit: MapSearchHit) => void
 }
 
 export default function MapBody(props: MapBodyProps): JSX.Element {
   const { data, empty, vp, hostRef, layers, bands, floor, pane, zoneName, marker, onJump } = props
+  const { locMarker } = props
   return (
     <Stack direction="row" spacing={1.5} sx={{ position: 'relative', flexGrow: 1, minHeight: 0 }}>
       {data != null ? (
@@ -250,6 +266,7 @@ export default function MapBody(props: MapBodyProps): JSX.Element {
           bands={bands}
           floor={floor}
           marker={marker}
+          locMarker={locMarker}
           pane={paneOverlay(pane)}
         />
       ) : (

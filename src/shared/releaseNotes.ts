@@ -125,6 +125,16 @@ export interface ReleaseNote {
  */
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.12.0',
+    date: '2026-08-08',
+    entries: [
+      {
+        kind: 'changed',
+        text: 'Anonymous usage reporting (if you have it on) now includes error counts — how many errors happened, never what they said — so a buggy release gets noticed and fixed faster.'
+      }
+    ]
+  },
+  {
     version: '0.11.1',
     date: '2026-08-07',
     entries: [

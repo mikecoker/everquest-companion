@@ -21,7 +21,18 @@ it exists today. Numbers in this document are **counts I took**, not estimates.
 | 4 | **Hybrid render**: geometry on canvas, the ~350 point labels as absolutely-positioned DOM. | Labels need hit-testing, tooltips, non-scaling text and search-jump focus. Measured max 316 points per zone — DOM is free at that scale. |
 | 5 | **Zone long→short mapping is a HAND-AUTHORED, committed table.** | Measured: naive normalization resolves **7 of 51** real zone names from the live log. This is the feature's critical path (§5). |
 | 6 | **Layer `_2` is a LEGEND, not map geometry** — off by default and **excluded from the bounds computation**. | Measured: `brewall\airplane_2.txt` spans y ∈ [-250, 4800] while the actual map is y ∈ [-1668, 1737]. Naively unioning it makes every map render as a speck. |
-| 7 | **No player-position marker. Confirmed impossible.** | `Your Location` appears **0 times** in 86.6 MB of log. The log states the zone and nothing else positional (law 6 — say what the log cannot say). |
+| 7 | **No AUTOMATIC player-position marker. Confirmed impossible.** | `Your Location` appears **0 times** in the log (re-measured 2026-08-08 across the whole 116.8 MB `eqlog_Primitive_freeport.txt` and every log beside it). The log states the zone and nothing else positional (law 6 — say what the log cannot say). |
+
+> **CORRECTED 2026-08-08 (JOS-98).** #7 said "no player-position marker", and the UI said so too.
+> The measurement is unchanged and still decides the AUTOMATIC case — nothing in the log will ever
+> place a dot. What it does not decide is whether the USER may place one, and the v0.10.0 report
+> asked for exactly that: *"Would also be nice if there was a marker on the map for my current
+> positon. I realize I would need to feed the map a /loc but would gladly do so."* So the viewer now
+> takes a typed or pasted `/loc` and marks it, per zone, until it is replaced or cleared
+> (`locMarker.ts`, `MapLocField.tsx`, `MapLocMarker.tsx`). The transform is `mapFromLoc` and nothing
+> else — §2.1's, unchanged — and the marker reaches the screen through the same `project` as every
+> other mark. Read #7 as: **the app will never claim to know where you are; it will remember where
+> you said you were.**
 | 8 | **Height filter: manual z-slice, default OFF, last wave.** | The in-game filter is *player-relative*, and per #7 we have no player Z. A manual discrete-floor selector is the honest substitute (§8). |
 
 ---
@@ -653,8 +664,14 @@ the Vite build. Type-only imports may keep the alias. Documented at `features/mo
 
 **The in-game filter is player-relative**: "only display the number of units above (High) and
 below (Low) the character", default 10/10. **We cannot do that** — `Your Location` appears 0
-times in 86.6 MB of log (§0 #7). Implementing a "height filter" that silently centres on
+times in the log (§0 #7). Implementing a "height filter" that silently centres on
 something other than the player would be a lie.
+
+> **Still true after JOS-98.** The typed `/loc` marker carries an elevation and the floor stepper
+> deliberately does not read it. A loc is stated ONCE; the floor you are standing on changes as you
+> walk, so auto-slicing from a marker minutes old would be the player-relative filter with stale
+> input — a lie with a number attached. The stepper stays manual (and `mobPins.ts` carries the
+> matching reason for why pins do not slice either).
 
 Recommendation — **include, in the last wave, as a manual control**, and label it as such:
 
@@ -760,13 +777,17 @@ Bound by the stated UI conventions:
 
 | Can | Cannot |
 |---|---|
-| Auto-open the **current zone's** map from the log | Show **where you are** in it — no positional line exists in the log (verified: 0 `Your Location` in 86.6 MB) |
+| Auto-open the **current zone's** map from the log | Show **where you are** on its own — no positional line exists in the log (verified: 0 `Your Location`, re-measured over 116.8 MB) |
+| Mark a `/loc` **you type or paste**, per zone, until you replace or clear it (JOS-98) | **Follow** you — the mark is a fact you stated once, not live tracking |
 | Search POI labels in-zone and corpus-wide | Show live mob positions, spawn timers, or anything not in the file |
 | Toggle layers, pick per-layer packs, step floors | Follow the player's Z (that is what the in-game filter does; we have no Z) |
 | State which pack each layer came from | — |
 
-State the "cannot" column in the UI where a user would otherwise assume otherwise — a map with
-no "you are here" dot should say so once, quietly, not leave the user hunting for it.
+State the "cannot" column in the UI where a user would otherwise assume otherwise — and state the
+"can" beside it, which is the JOS-98 lesson. The header used to carry a flat *"No 'you are here'
+marker"*, which read as a dead end rather than as an invitation; the reporter worked out the `/loc`
+workaround unaided and offered it. It now says both halves in one line: the log cannot say where you
+are, so type `/loc` and the map will remember it.
 
 ---
 

@@ -1,6 +1,10 @@
 import { app } from 'electron'
 import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
+// A LEAF MODULE WITH NO IMPORTS OF ITS OWN, which is what makes this import safe on the error
+// path: `telemetry/collector.ts` imports THIS file (`logInfo`), so a counter that lived there
+// would close the cycle errorLog → collector → errorLog. See telemetry/health.ts.
+import { noteErrorLogLine } from './telemetry/health'
 
 /**
  * Tiny append-only error logger. Every captured error (main-process crashes,
@@ -87,6 +91,12 @@ export function logError(source: string, payload: unknown): void {
       // File doesn't exist yet — appendFileSync will create it.
     }
     appendFileSync(path, line)
+    // COUNT THE LINE THAT WAS ACTUALLY WRITTEN (JOS-96), after the append rather than before it:
+    // `mainErrorLogLines` is meant to be readable as "lines in this fleet's error logs", so a
+    // write that threw must not be counted as one. `noteErrorLogLine` is a plain integer add in a
+    // module that imports nothing (telemetry/health.ts says why), so it cannot throw and cannot
+    // re-enter this function.
+    noteErrorLogLine()
   } catch (err) {
     // Last resort: don't let a logging failure become a new uncaught error.
     // eslint-disable-next-line no-console

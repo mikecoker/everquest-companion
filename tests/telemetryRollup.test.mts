@@ -131,25 +131,50 @@ test('a setup snapshot becomes one row per FIELD, each dim a bucket index or an 
   assert.equal(c.get(`${USAGE_METRICS.setupPacks} ${DIM_NONE}`), 4)
 })
 
-test('health counters keep the FIELD as the dim, so an error class is a row not a column', () => {
-  const c = counters(
-    batchOf([
-      {
-        t: 'healthCounters',
-        rendererCrashes: 1,
-        mainErrorLogLines: 12,
-        parserStalls: 0,
-        presenceRestarts: 2,
-        speechFailures: 0
-      }
-    ])
-  )
-  assert.equal(c.get(`${USAGE_METRICS.healthReports} ${DIM_NONE}`), 1)
-  assert.equal(c.get(`${USAGE_METRICS.health} rendererCrashes`), 1)
-  assert.equal(c.get(`${USAGE_METRICS.health} mainErrorLogLines`), 12)
+const HEALTH: TelemetryEvent = {
+  t: 'healthCounters',
+  rendererCrashes: 1,
+  mainErrorLogLines: 12,
+  parserStalls: 0,
+  presenceRestarts: 2,
+  speechFailures: 0
+}
+
+test('health counters are dimmed <version>:<field>, so an error class is a row PER BUILD', () => {
+  // JOS-96. The question the owner asks of these numbers is "did I release buggy code", which is
+  // a question about a RELEASE — a fleet-wide count keyed on the field name alone can never
+  // answer it, and would smear a bad build across the ones either side of it.
+  const c = counters(batchOf([HEALTH], '0.9.0'))
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:rendererCrashes`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:mainErrorLogLines`), 12)
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:presenceRestarts`), 2)
   // A ZERO IS NOT A ROW. Writing zeros would multiply the table by five for no information —
   // "no parser stall was reported" is the absence of the row, and the reader defaults to 0.
-  assert.equal(c.has(`${USAGE_METRICS.health} parserStalls`), false)
+  assert.equal(c.has(`${USAGE_METRICS.health} 0.9.0:parserStalls`), false)
+  // And the OLD encoding is gone: an un-versioned dim would sum two builds into one row.
+  assert.equal(c.has(`${USAGE_METRICS.health} rendererCrashes`), false)
+})
+
+test('healthReports is dimmed by VERSION — its own denominator, and the capability signal', () => {
+  // The rate is health/healthReports AT THE SAME VERSION, which is self-normalizing: a build with
+  // more users cannot look buggier than one with fewer. And a version with no `healthReports` row
+  // at all is a build that never reported — 'not reporting', which the panel must never render
+  // the same way as a build that reported sessions and found nothing wrong.
+  const c = counters(batchOf([HEALTH], '0.9.0'))
+  assert.equal(c.get(`${USAGE_METRICS.healthReports} 0.9.0`), 1)
+  assert.equal(c.has(`${USAGE_METRICS.healthReports} ${DIM_NONE}`), false)
+})
+
+test('two builds reporting on one day stay SEPARATE rows — never summed into a fleet average', () => {
+  const a = counters(batchOf([HEALTH, HEALTH], '0.9.0'))
+  const b = counters(batchOf([HEALTH], '0.10.0'))
+  assert.equal(a.get(`${USAGE_METRICS.healthReports} 0.9.0`), 2)
+  assert.equal(a.get(`${USAGE_METRICS.health} 0.9.0:mainErrorLogLines`), 24)
+  assert.equal(b.get(`${USAGE_METRICS.healthReports} 0.10.0`), 1)
+  assert.equal(b.get(`${USAGE_METRICS.health} 0.10.0:mainErrorLogLines`), 12)
+  // The dims are disjoint, which is the whole property: nothing a later reader does can merge
+  // them by accident, because there is no shared key to merge on.
+  assert.equal(a.has(`${USAGE_METRICS.health} 0.10.0:mainErrorLogLines`), false)
 })
 
 test('an update outcome carries its own ok/failed dim, and the failure CLASS is a second row', () => {

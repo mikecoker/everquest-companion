@@ -52,7 +52,7 @@ import { createSpeechEngine } from '../speech/engine'
 import { KOKORO_TOTAL_BYTES } from '../speech/pinned'
 import { listKokoroVoices, provisionKokoro } from '../speech/provision'
 import { getVoicePrefs, setVoicePrefs } from '../store'
-import { classifyFailure, markFunnelStep, recordFunnelFailure } from '../telemetry'
+import { classifyFailure, markFunnelStep, noteSpeechFailure, recordFunnelFailure } from '../telemetry'
 import { sendToMain } from '../windows'
 import type { SpeechInstallProgress } from '../../shared/alertTypes'
 import type { SpeechEngine } from '../speech/engine'
@@ -167,6 +167,12 @@ export function registerSpeechIpc(): void {
     // main, which is right: this funnel measures the install flow, and an install that ends in a
     // system-tier utterance has not completed it.
     if (result.ok) markFunnelStep('voice-install', 'firstUtterance')
+    // …and the health counter for the other arm (JOS-96). Every way an utterance can fail — a
+    // worker that would not spawn, a dead thread, a synthesis reply that came back not-ok, a
+    // missing cache file, an engine that is not installed — collapses into this one
+    // `SpeechSayResult`, so this is the single funnel. Counts only: the `reason` is not sent.
+    // Same tier caveat as the funnel above: the system voice never reaches main.
+    else noteSpeechFailure()
     return result
   })
 

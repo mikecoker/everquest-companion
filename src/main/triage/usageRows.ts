@@ -10,7 +10,7 @@
 // column, key a Map, walk a date. It is separate because the two together are past the repo's
 // 400-code-line ceiling and a split is the answer to that, not a widened threshold.
 
-import { cohortOf, DIM_NONE, type UsageCohort } from '../../shared/telemetryRollup'
+import { cohortForChannel, cohortOf, DIM_NONE, type UsageCohort } from '../../shared/telemetryRollup'
 import type { UsageDayPoint } from '../../shared/triage'
 
 /** A DSQL row as node-postgres hands it over: every column is `unknown` until proven. */
@@ -59,6 +59,20 @@ export interface InstallRow {
   cohort: UsageCohort
 }
 
+/**
+ * ONE BUILD'S FEEDBACK BUG REPORTS (JOS-96) — the release-health section's fourth source, and the
+ * only row shape here that comes from the `report` table rather than a counter table.
+ *
+ * It lives beside the other three, and carries a `cohort` like them, so `ofCohort` partitions it
+ * with no special case. It is defined HERE rather than next to its only consumer because
+ * `releaseHealth.ts` imports this module — putting the type there would make the two circular.
+ */
+export interface BugReportRow {
+  appVersion: string
+  cohort: UsageCohort
+  n: number
+}
+
 export function toUsageRows(rows: readonly Row[]): UsageRow[] {
   return rows.map((r) => ({
     day: str(r.day),
@@ -79,6 +93,32 @@ export function toFunnelRows(rows: readonly Row[]): FunnelRow[] {
     appVersion: str(r.app_version, '?'),
     n: num(r.n)
   }))
+}
+
+/**
+ * `report` rows grouped per build (JOS-96), for the release-health overlay.
+ *
+ * BUGS ONLY, and the filter is here rather than in the SQL so the discarded kinds are visible in
+ * the code that decides: a feature request filed from 0.9.0 is not evidence 0.9.0 is buggy, and
+ * plotting one beside a crash count would be the panel telling a small lie in a chart.
+ *
+ * The cohort is derived from the CHANNEL, exactly as the ingest path derives a counter row's
+ * (`cohortForChannel`) — a dev-channel report is the author's own. That keeps the user/owner
+ * split intact across a source that has no cohort column of its own; `ofCohort` then partitions
+ * these rows beside the counters without anything special-casing them.
+ *
+ * TOTAL, like every other mapper here: a missing or wrong-typed column becomes a default. A row
+ * with no `app_version` reads as '?', which groups the unknown builds together rather than
+ * silently attaching their reports to a real release.
+ */
+export function toBugReportRows(rows: readonly Row[]): BugReportRow[] {
+  return rows
+    .filter((r) => str(r.report_type, 'bug') === 'bug')
+    .map((r) => ({
+      appVersion: str(r.app_version, '?'),
+      cohort: cohortForChannel(str(r.channel, 'prod')),
+      n: num(r.n)
+    }))
 }
 
 export function toInstallRows(rows: readonly Row[]): InstallRow[] {

@@ -52,6 +52,7 @@ import {
   missingColumn,
   missingTable,
   readAnalyticsInstalls,
+  readReportVersions,
   readUsageDaily,
   readUsageFunnelDaily,
   setAccepting,
@@ -70,6 +71,7 @@ import {
   anyOwner,
   dayOf,
   ofCohort,
+  toBugReportRows,
   toFunnelRows,
   toInstallRows,
   toUsageRows
@@ -188,19 +190,31 @@ async function readAnalytics(
   const nowMs = Date.now()
   const since = addDays(dayOf(nowMs), -(days - 1))
   try {
-    const [rawUsage, rawFunnels, rawInstalls] = await Promise.all([
+    const [rawUsage, rawFunnels, rawInstalls, rawBugs] = await Promise.all([
       readUsageDaily(c, since),
       readUsageFunnelDaily(c, since),
-      readAnalyticsInstalls(c)
+      readAnalyticsInstalls(c),
+      // THE FOURTH READ (JOS-96), and the only one that touches the `report` table. It is in the
+      // same `Promise.all` and inside the same try, so a cluster missing that table degrades
+      // through the identical `missingTable` arm rather than through a second, drifting one.
+      //
+      // `report.received_at` is epoch MILLISECONDS while the counter tables are keyed on a day
+      // string, so the same window has to be expressed twice. Converting the day key (rather than
+      // subtracting from `nowMs`) is what keeps the two windows identical: both start at the same
+      // UTC midnight, so a report and a counter from the same morning are either both in or both
+      // out, and the bug overlay can never be a day out of step with the curve it sits under.
+      readReportVersions(c, Date.parse(`${since}T00:00:00Z`))
     ])
     const usage = toUsageRows(rawUsage)
     const funnels = toFunnelRows(rawFunnels)
     const installs = toInstallRows(rawInstalls)
+    const bugReports = toBugReportRows(rawBugs)
     const build = (cohort: UsageCohort): TriageAnalyticsData =>
       buildAnalytics({
         usage: ofCohort(usage, cohort),
         funnels: ofCohort(funnels, cohort),
         installs: ofCohort(installs, cohort),
+        bugReports: ofCohort(bugReports, cohort),
         windowDays: days,
         nowMs
       })

@@ -27,6 +27,7 @@ import { logError } from './errorLog'
 import { defaultOverlayBounds, overlayDefaultSize } from './overlayLayout'
 import { overlayMouseForward, windowsMayShow } from './replayGate'
 import { allowedExternalUrl, isInternalPageUrl } from './security'
+import { captureMainWindowErrors, forwardConsoleMessages } from './windowErrors'
 import { getGraphicsPrefs, getOverlayConfig, getWindowBounds, setOverlayConfig, setWindowBounds } from './store'
 import { TRANSPARENT_OVERLAY_BG, overlayBackgroundColor } from '../shared/graphicsPrefs'
 import { OVERLAY_KINDS, type OverlayKind } from '../shared/types'
@@ -233,69 +234,9 @@ export function hardenSession(ses: Electron.Session): void {
   ses.setDevicePermissionHandler(() => false)
 }
 
-/**
- * Forward renderer console warnings/errors (level >= 2) into main stdout +
- * errors.log so agents reading the dev task output see renderer-side errors too.
- * level: 0=verbose 1=info 2=warning 3=error.
- *
- * Electron's `console-message` listener is five positional arguments wide; the four fields
- * are taken as a rest tuple so the callback stays inside the project's max-params ceiling.
- * `tag` is the errors.log source tag ('renderer:console' / 'overlay:console').
- */
-function forwardConsoleMessages(wc: Electron.WebContents, tag: string): void {
-  wc.on('console-message', (_e, ...rest) => {
-    const [level, message, line, sourceId] = rest
-    if (level < 2) return
-    logError(tag, { level, message, source: `${sourceId}:${line}` })
-  })
-}
-
-/**
- * webContents error capture for the MAIN window (Task #13). Each of these would otherwise
- * leave a blank window with no console trace. Log everything to errors.log + dev stdout, and
- * self-heal once where it's safe.
- */
-function captureMainWindowErrors(wc: Electron.WebContents): void {
-  // The renderer process died/crashed (OOM, GPU crash, killed). Log the reason,
-  // then reload the window ONCE so a transient crash doesn't strand the user.
-  let renderProcessReloaded = false
-  wc.on('render-process-gone', (_e, details) => {
-    logError('main:render-process-gone', details)
-    if (!renderProcessReloaded && mainWindow && !mainWindow.isDestroyed()) {
-      renderProcessReloaded = true
-      logError('main:render-process-gone', 'reloading window once to recover')
-      mainWindow.reload()
-    }
-  })
-
-  // The page (or dev server) failed to load. Retry ONCE — most common in dev when
-  // the window opens a beat before electron-vite's renderer server is ready.
-  // (Rest tuple for the same max-params reason as forwardConsoleMessages.)
-  let didFailReloaded = false
-  wc.on('did-fail-load', (_e, ...rest) => {
-    const [errorCode, errorDescription, validatedURL, isMainFrame] = rest
-    // errorCode -3 (ABORTED) is a benign navigation cancel; don't spam or retry.
-    if (errorCode === -3) return
-    logError('main:did-fail-load', { errorCode, errorDescription, validatedURL, isMainFrame })
-    if (isMainFrame && !didFailReloaded && mainWindow && !mainWindow.isDestroyed()) {
-      didFailReloaded = true
-      setTimeout(() => {
-        if (!mainWindow || mainWindow.isDestroyed()) return
-        const url = process.env.ELECTRON_RENDERER_URL
-        if (url) void mainWindow.loadURL(url)
-        else void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-      }, 300)
-    }
-  })
-
-  // A preload script threw while initializing (the contextBridge/api is then
-  // missing — a classic invisible cause of a broken renderer).
-  wc.on('preload-error', (_e, preloadPath, error) => {
-    logError('main:preload-error', { preloadPath, error })
-  })
-
-  forwardConsoleMessages(wc, 'renderer:console')
-}
+// The webContents error capture (Task #13) and the console forwarder moved to
+// `./windowErrors.ts` when this file reached the 400-code-line ceiling — a split, not a widened
+// threshold. This file keeps what it is about: creating windows, and the trust boundary.
 
 export function createMainWindow(): void {
   const bounds = getWindowBounds()
@@ -333,7 +274,9 @@ export function createMainWindow(): void {
   mainWindow.webContents.on('did-finish-load', pushMaximized)
 
   // --- webContents error capture (Task #13) ---
-  captureMainWindowErrors(mainWindow.webContents)
+  // The window is passed as a GETTER: every guard inside fires long after this call returns, and
+  // must see the module's current `mainWindow` rather than the one that existed at wiring time.
+  captureMainWindowErrors(mainWindow.webContents, () => mainWindow)
 
   // Remember window position + size across restarts.
   const saveBounds = (): void => {

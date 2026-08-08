@@ -49,6 +49,7 @@ import {
   viewsVisited
 } from './collector'
 import { markFunnelStep } from './funnels'
+import { takeHealth } from './health'
 import { readRing, writeRing } from './ring'
 import { getTelemetryPrefs } from '../store'
 
@@ -111,6 +112,29 @@ function startupField(): { startup?: StartupReplayStats } {
   return startup === undefined ? {} : { startup }
 }
 
+/**
+ * DRAIN THE HEALTH COUNTERS ONTO A SESSION REPORT (JOS-96), beside the two drains above and for
+ * the same reason: whichever of `sessionHeartbeat` / `sessionEnd` fires first takes them, so a
+ * session that does both reports each error exactly once and a killed session loses at most its
+ * last window.
+ *
+ * IT IS RECORDED EVEN WHEN EVERYTHING IS ZERO, and that is the decision the whole readout rests
+ * on. `healthCounters` is dimmed by VERSION in the rollup, so the report itself — not the errors
+ * in it — is what says "a client on this build is capable of reporting". Emitting only on a bad
+ * session would make a healthy build look exactly like a build that predates this code, and the
+ * panel could never honestly separate "no errors" from "no data". The cost is one extra ring
+ * record per five minutes, which is nothing; the alternative costs the question its answer.
+ *
+ * It is a SEPARATE `recordEvent` rather than a field on the session event because `healthCounters`
+ * is an existing kind in the shipped contract — the ingest Lambda already validates it — so this
+ * needs no wire change at all, and the deploy-skew rule (shared/telemetry.ts) is satisfied without
+ * an additive field. An older Lambda accepts the batch and folds it under the OLD dims; it never
+ * 400s, so nothing is ever dropped while the deploys are out of step.
+ */
+function reportHealth(): void {
+  recordEvent({ t: 'healthCounters', ...takeHealth() })
+}
+
 let heartbeat: ReturnType<typeof setInterval> | null = null
 let flushTimer: ReturnType<typeof setInterval> | null = null
 
@@ -150,6 +174,7 @@ function startTimers(prefs: TelemetryPrefs): void {
       // Drained, so exactly one report carries it: one launch is one reading.
       ...startupField()
     })
+    reportHealth()
   }, HEARTBEAT_INTERVAL_MS)
   heartbeat.unref()
   ensureFlushTimer(prefs)
@@ -246,6 +271,11 @@ export function stopTelemetry(): void {
       // since most sessions end before the five-minute mark.
       ...startupField()
     })
+    // The tail of the health deltas, on the same terms as the line delta beside it. Inside the
+    // `uptime > 0` guard deliberately: a process that never started collecting has no session to
+    // report the health OF, and a bare `healthReports` row from it would inflate the denominator
+    // every rate on the panel is divided by.
+    reportHealth()
   }
   clearTimers()
   endSession()

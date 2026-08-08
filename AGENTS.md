@@ -11,7 +11,8 @@ view — DPS w/ inline drill, live curve, current mob, zone, leveling rate +
 next-level ETA, class loadout, recent drops/kills), Plane of Sky quest
 tracking, loot, inventory reconcile, leveling/AA analytics (zone bands,
 drag-select range stats), a Maps tab (Brewall/default rendering, POI
-search, label declutter, floor slicing), class-combo inference with user
+search, label declutter, floor slicing, pinned zone, typed-/loc marker),
+class-combo inference with user
 corrections, proc analytics (PPM + state attribution), raid targets, buffs
 simulation, alerts with sounds + rank-upgrade intelligence, a Details-style
 DPS meter with drill-down/timeline (drilled by default, pet nested), and
@@ -449,6 +450,10 @@ Maps: src/main/maps (pack discovery/per-layer cross-pack merge/LRU/search,
 Electron-free w/ injected roots) over shared/maps types + shared/zones
 (THE zone-knowledge table); renderer features/maps (canvas geometry, DOM
 labels w/ collision declutter, floor slicing). Pure fns + goldens all over.
+  **`mapFromLoc` IS THE ONE `/loc`→map SEAM** (`mapX=-ew, mapY=-ns`, y grows
+  SOUTH — JOS-65). Wiki mob pins and the user's typed-/loc marker (JOS-98,
+  `eq.maps.loc`, per zone) both go through it and then through `project`;
+  a second copy of those negations is the bug this repo already shipped once.
 Renderer: useModule(id, applyDelta) — hydrate, seq-dedupe deltas, re-hydrate
 on `log:character`. Overlay = second renderer entry (overlay.html) with a
 minimal `eqOverlay` bridge (transparent alwaysOnTop, click-through pin).

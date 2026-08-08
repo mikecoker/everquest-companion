@@ -64,6 +64,7 @@ import {
   StartupSection,
   VersionsSection
 } from './AnalyticsBits'
+import { ReleaseHealthSection } from './ReleaseHealthSection'
 import {
   durationLabel,
   funnelBars,
@@ -248,6 +249,13 @@ function Readout({
       <HealthSection data={data} />
       {/* Beside Health and above Versions: it is a health fact, read per build. */}
       <StartupSection data={data} />
+      {/*
+        JOS-96, and it sits HERE rather than at the end for a reason: Health above says what goes
+        wrong across the fleet, and this says which build it started going wrong in. Reading the
+        second immediately after the first is the whole workflow — "is anything up" then "did I
+        ship it". Versions below then answers "who is still on that build".
+      */}
+      <ReleaseHealthSection data={data} />
       <VersionsSection data={data} />
       <DownloadsSection downloads={downloads} />
       <RetentionSection data={data} />

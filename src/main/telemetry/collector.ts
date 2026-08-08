@@ -30,6 +30,7 @@ import { CHANNEL } from '../channel'
 import { logInfo } from '../errorLog'
 import { getTelemetryPrefs, setTelemetryPrefs } from '../store'
 import { telemetryCollectEnabled, telemetryEndpointConfigured } from './net'
+import { resetHealth } from './health'
 import { dropRing, pushCapped, readRing, writeRing } from './ring'
 
 /** `process.platform` folded onto the closed enum — a raw platform string is still a string. */
@@ -72,6 +73,10 @@ export function beginSession(now = Date.now()): void {
   viewsSeen.clear()
   linesPending = 0
   startupPending = null
+  // The health deltas live in their own leaf module (telemetry/health.ts — it has to, so
+  // `errorLog.ts` can bump one without a cycle), but they are SESSION state exactly like the two
+  // above and are cleared on the same boundaries.
+  resetHealth()
 }
 
 /**
@@ -84,6 +89,7 @@ export function endSession(): void {
   viewsSeen.clear()
   linesPending = 0
   startupPending = null
+  resetHealth()
 }
 
 /**

@@ -456,6 +456,100 @@ export interface TriageCohortRow {
   d30: number | null
 }
 
+// ---- release health (JOS-96) ------------------------------------------------------------
+//
+// "DID I RELEASE BUGGY CODE" — an error rate per build, over time, read against how many people
+// were actually ON that build and when it went out. Four sources, and they are deliberately
+// different KINDS of evidence rather than four columns of the same thing:
+//
+//   * ERRORS come from `health` / `healthReports`, both dimmed by version (telemetryRollup.ts).
+//     The rate is self-normalizing at one version, so a popular build cannot look buggier than
+//     an unpopular one purely by having more sessions.
+//   * ADOPTION comes from the `version` envelope fact, which EVERY client has always sent —
+//     which is why the adoption curve is complete back through history while the error curve
+//     starts the day a capable client shipped.
+//   * RELEASE DATES come from `RELEASE_NOTES` (shared/releaseNotes.ts): committed source,
+//     reviewed in the diff that ships it, available offline. Not a GitHub fetch.
+//   * BUG REPORTS come from the feedback `report` table's `app_version` — a bug-rate proxy that
+//     covers EVERY version ever shipped, including the ones that predate health reporting. It is
+//     the only honest signal about those builds, and it is a different measurement (a human
+//     bothered to type something) that must never be added to the error counts.
+//
+// THE HOUSE RULE, and it is the reason half these fields exist: A QUIET VERSION IS NOT A CLEAN
+// ONE. A build that predates the emitting client sends no health report at all, so its error
+// count is absent — identical, to a SUM, to a build that reported perfectly and found nothing.
+// Every shape below keeps those two apart: `reporting` is a first-class field, the rate is
+// `null` rather than 0 when nothing reported, and `coverage` says what share of the fleet is on
+// builds that can report at all, so the reader can see how much of the picture is missing.
+
+/** One build's numbers ON ONE DAY — the graph's vertices. */
+export interface TriageReleaseHealthDay {
+  day: string
+  /** Health rollups received from this build that day. 0 ⇒ this build said nothing that day. */
+  reports: number
+  /** All five error fields summed, from this build, that day. */
+  errors: number
+  /** errors / reports, or NULL when reports is 0 — unknown, never a zero rate. */
+  rate: number | null
+  /** Installs seen on this build that day (`version`), and its share of that day's actives. */
+  active: number
+  share: number
+}
+
+export interface TriageReleaseHealthVersion {
+  version: string
+  /**
+   * The release's committed date (`RELEASE_NOTES`), or null for a build with no note — a dev
+   * build, or a version this build of the app is too old to have heard of.
+   */
+  releaseDate: string | null
+  /**
+   * DID ANY CLIENT ON THIS BUILD EVER SEND A HEALTH REPORT IN THE WINDOW? The whole
+   * not-reporting / zero distinction hangs off this one boolean, and it is derived from the
+   * DENOMINATOR (`healthReports` at this version), never from the error counts — a build with
+   * zero errors is exactly the case that must still read as reporting.
+   */
+  reporting: boolean
+  reports: number
+  errors: number
+  /** errors / reports over the window. NULL when `reporting` is false. */
+  rate: number | null
+  /** Per error class, prefix already stripped: `rendererCrashes`, `mainErrorLogLines`, … */
+  byField: TriageMixRow[]
+  /** Feedback bug reports filed FROM this build in the window. Never summed with `errors`. */
+  bugReports: number
+  /** Peak share of daily active installs this build reached in the window, 0..1. */
+  peakShare: number
+  /** Aligned to `TriageAnalyticsData.days` — dense, so a quiet day is a zero and not a gap. */
+  days: TriageReleaseHealthDay[]
+}
+
+/** One day's answer to "how much of the fleet could have told us if something was wrong". */
+export interface TriageReleaseCoverageDay {
+  day: string
+  /** Active installs that day on builds that reported health in the window. */
+  covered: number
+  /** Active installs that day, all builds. */
+  active: number
+  /** covered / active, or null on a day with no actives at all. */
+  share: number | null
+}
+
+export interface TriageAnalyticsReleaseHealth {
+  /** Newest build first, capped. Includes NON-reporting builds — that is the point. */
+  versions: TriageReleaseHealthVersion[]
+  /** Per-day reporting coverage, aligned to the window. */
+  coverage: TriageReleaseCoverageDay[]
+  /** Window-wide coverage: covered install-days / all install-days. Null when nothing was active. */
+  coverageShare: number | null
+  /**
+   * Has ANY build reported health in this window? False is the pre-rollout state and gets its own
+   * sentence in the panel — it means the whole error curve is missing, not that the fleet is
+   * healthy, and it is the single most misreadable state this section has.
+   */
+  anyReporting: boolean
+}
+
 export interface TriageAnalyticsData {
   windowDays: number
   /** The day keys the window covers, ascending — the x-axis every series is aligned to. */
@@ -468,6 +562,8 @@ export interface TriageAnalyticsData {
   health: TriageAnalyticsHealth
   /** How the fleet's launches actually went — the startup replay, per build (JOS-57). */
   startup: TriageAnalyticsStartup
+  /** Error rate per build over time, against adoption and release dates (JOS-96). */
+  releaseHealth: TriageAnalyticsReleaseHealth
   versions: TriageVersionRow[]
   retention: TriageCohortRow[]
 }

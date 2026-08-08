@@ -98,6 +98,32 @@ export function readUsageFunnelDaily(c: Clients, sinceDay: string): Promise<Row[
 }
 
 /**
+ * FEEDBACK BUG REPORTS PER BUILD (JOS-96) — the release-health section's fourth source.
+ *
+ * It reads the `report` table rather than a counter table, and it is here rather than in
+ * `store.ts` because it is an ANALYTICS read: it is grouped, it is capped by the analytics
+ * window, and it selects three columns none of which is a person. `report_type` comes back so
+ * the caller can keep bugs apart from feature requests — a wishlist entry is not a defect and
+ * must never be plotted as one.
+ *
+ * NOTHING IDENTIFYING IS SELECTED. No `report_id`, no `install_id`, no `description` — the whole
+ * projection is (build, kind, count), which is the least this question can be answered with. That
+ * matters more here than in the other reads on this page, because `report` is the ONE table in
+ * the cluster that holds human-written text.
+ *
+ * The channel is carried so the caller can derive the cohort the same way the ingest path does
+ * (`cohortForChannel`): a dev-channel report is the author's own, and the user/owner split is not
+ * suspended just because these rows came from a different table.
+ */
+export function readReportVersions(c: Clients, sinceMs: number): Promise<Row[]> {
+  return c.query(
+    'SELECT app_version, report_type, channel, COUNT(*) AS n FROM report' +
+      ' WHERE received_at >= $1 GROUP BY app_version, report_type, channel LIMIT $2',
+    [sinceMs, USAGE_ROW_LIMIT],
+  )
+}
+
+/**
  * NOTE WHAT IS NOT SELECTED: `analytics_id`. The readout needs day-grained facts about the
  * population (how many, first seen when, on what version) and never the identifier itself, so
  * the id does not leave the database — not into main, not over the bridge, not into a panel.

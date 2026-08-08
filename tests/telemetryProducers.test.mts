@@ -21,6 +21,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { classifyFailure, failureTextOf } from '../src/main/telemetry/failureClass'
+// THE FIFTH PRODUCER — the five health counters (JOS-96) — is tested in
+// `tests/releaseHealth.test.mts`, beside the readout it exists to feed, because the producer's
+// "report even a clean session" decision and the panel's "not reporting" state are one argument.
+// This file was also at the 400-code-line ceiling: a split, not a widened threshold.
 import {
   allFunnelStepMarks,
   bucketOf,
@@ -393,3 +397,4 @@ test('a batch with no line counts at all produces NO linesParsed row, rather tha
     )
   )
 })
+

@@ -297,6 +297,30 @@ test('an update step with no reports has an UNKNOWN rate, not a zero one', () =>
   assert.equal(d.reports, 40)
 })
 
+test('the fleet Health mix strips the VERSION back off, so it stays a question about the code', () => {
+  // JOS-96 dimmed `health` by `<version>:<field>`. THIS section asks "what goes wrong in this
+  // app", which wants every build's evidence added together; the release-health section (its own
+  // suite, tests/releaseHealth.test.mts) asks "which build" and keeps them apart. Two questions,
+  // two sections, one set of rows.
+  const d = build([
+    u(TODAY, USAGE_METRICS.health, '0.11.0:rendererCrashes', 2),
+    u(TODAY, USAGE_METRICS.health, '0.10.0:rendererCrashes', 3),
+    u(TODAY, USAGE_METRICS.health, '0.11.0:speechFailures', 1),
+    // A row folded by an ingest Lambda older than the change: no colon, bare field name. It is
+    // counted under that name, which is exactly right HERE — a fleet total does not care which
+    // build a crash came from.
+    u(TODAY, USAGE_METRICS.health, 'speechFailures', 4),
+    u(TODAY, USAGE_METRICS.healthReports, '0.11.0', 10)
+  ]).health
+  // Both classes total 5, so the tie breaks on the id ascending — `mixRows`'s determinism rule.
+  assert.deepEqual(d.errors, [
+    { id: 'rendererCrashes', n: 5 },
+    { id: 'speechFailures', n: 5 }
+  ])
+  // The denominator sums across version dims too — it is a fleet count in this section.
+  assert.equal(d.reports, 10)
+})
+
 // ---- versions -------------------------------------------------------------------------------------
 
 test('days-to-adopt is first-seen -> first MAJORITY day, and is null until there is one', () => {
