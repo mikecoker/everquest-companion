@@ -42,7 +42,8 @@ import {
   settle,
   settleGone
 } from './appHarness.mjs'
-import { launchApp, mainWindow, makeUserData, removeUserData } from './appWindow.mjs'
+import { mainWindow, makeUserData, removeUserData } from './appWindow.mjs'
+import { launchOnFixture, stageFixture } from './logFixture.mjs'
 
 const NAV_SKY = '[data-testid="nav-posky"]'
 const NAV_OVERVIEW = '[data-testid="nav-overview"]'
@@ -151,9 +152,14 @@ async function main(): Promise<void> {
   // OWNED BY THIS SPEC, not by either launch: the restart assertion IS the dir outliving a
   // process, so `launchApp` must not delete what it did not create.
   const userData = makeUserData()
+  // ONE staged install across both launches. A fresh userData directory has no discovered
+  // character of its own, and the product correctly keeps feature tabs behind the no-logs gate.
+  // Reusing the same committed fixture makes the navigation deterministic without weakening the
+  // restart assertion: only localStorage in userData carries the preference under test.
+  const log = stageFixture('e2e-overview.log')
   try {
     console.log('launch 1: a fresh install — default, tab round trip, and the un-tick…')
-    const first = await launchApp({ userData })
+    const first = await launchOnFixture(log, { userData })
     let page: Page | null = null
     try {
       page = await mainWindow(first.app)
@@ -171,7 +177,7 @@ async function main(): Promise<void> {
     }
 
     console.log('launch 2: the SAME userData dir, a new process — the tick must still be there…')
-    const second = await launchApp({ userData })
+    const second = await launchOnFixture(log, { userData })
     let restarted: Page | null = null
     try {
       restarted = await mainWindow(second.app)
@@ -182,6 +188,7 @@ async function main(): Promise<void> {
       await second.close()
     }
   } finally {
+    await log.dispose()
     await removeUserData(userData)
   }
 

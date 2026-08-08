@@ -67,14 +67,24 @@ async function stepDropsPanel(page: Page, log: FixtureLog): Promise<string | nul
   // Play the drops into the tailed file. They travel chokidar → Tailer → parser → loot module →
   // IPC → render, exactly as a real pull's would.
   const written = playLootDrops(log)
-  const rows = await settleCount(page, DROP_ROW, before + 1, { timeoutMs: 20_000 })
+  // Wait for the claim this step is about, not merely the first intermediate render. Under a
+  // busy parallel run the four tailed lines can produce several module deltas, so observing one
+  // row only proves that the first line arrived; it does not prove the three identical drops
+  // have all folded into that row yet.
+  const top = (
+    await settle(
+      () => textOf(page, DROP_ROW),
+      (text) => text.includes(DROP_ITEM) && text.includes(`${String(DROP_COUNT)}×`),
+      { timeoutMs: 20_000 }
+    )
+  ).replace(/\s+/g, ' ')
+  const rows = await countOf(page, DROP_ROW)
   if (!check(`${String(written)} looted lines reach the panel through the live tail`, rows > before, `${String(before)} → ${String(rows)} rows`)) {
     return null
   }
 
   // ORDER IS THE OBSERVATION: three of one item beat one of another, so the mote is the top row.
   // Its COUNT is asserted exactly, because the harness wrote it.
-  const top = (await textOf(page, DROP_ROW)).replace(/\s+/g, ' ')
   check('…ordered by observed drops — the item that dropped three times is the top row', top.includes(DROP_ITEM), top)
   check(`…stating its in-window count exactly (${String(DROP_COUNT)} of them were written)`, top.includes(`${String(DROP_COUNT)}×`), top)
   // A RATE NEVER APPEARS WITHOUT ITS SPAN: the panel's single caption is the active time every
