@@ -57,4 +57,19 @@ describe('shared room aggregation', () => {
     const encounter = roomSnapshot(stored, 12_000).encounters[0]
     expect(encounter).toMatchObject({ id: 'enc-1', active: false, endedAt: 12_000, totalDamage: 450 })
   })
+
+  it('uses the final resting snapshot so a hibernation checkpoint cannot lose late damage', () => {
+    const stored = createStoredRoom('room-1', 'Raid', 'one')
+    applyRoomContribution(stored, {
+      member: { participantId: 'one', displayName: 'One' }, state: state('One', 400),
+      online: true, now: 10_000, encounterId: 'enc-1'
+    })
+    applyRoomContribution(stored, {
+      member: { participantId: 'one', displayName: 'One' }, state: state('One', 900, false),
+      online: true, now: 12_000, encounterId: 'unused'
+    })
+    expect(roomSnapshot(stored, 12_000).encounters[0]).toMatchObject({
+      active: false, totalDamage: 950
+    })
+  })
 })

@@ -171,7 +171,7 @@ test('disabled gates make no network or socket attempt', async () => {
   assert.deepEqual(statuses, [{ state: 'disabled', reason: 'e2e' }])
 })
 
-test('ready publishes a validated full state and dirty changes coalesce at 500ms', async () => {
+test('ready publishes a validated full state and dirty changes coalesce at 1s', async () => {
   const run = harness()
   run.publisher.start()
   await settle()
@@ -184,12 +184,12 @@ test('ready publishes a validated full state and dirty changes coalesce at 500ms
 
   run.publisher.notifyDirty()
   run.publisher.notifyDirty()
-  run.clock.advance(499)
+  run.clock.advance(999)
   assert.equal(run.sockets[0]!.sent.length, 1)
   run.clock.advance(1)
   assert.equal(run.sockets[0]!.sent.length, 2)
   run.publisher.notifyDirty()
-  run.clock.advance(500)
+  run.clock.advance(1_000)
   assert.equal(run.sockets[0]!.sent.length, 3)
 })
 
@@ -207,7 +207,7 @@ test('heartbeat pings and refreshes the full state after an idle interval', asyn
   assert.equal(run.sockets[0]!.sent.length, 5)
 })
 
-test('heartbeat refresh waits out the 500ms ceiling after a recent event publish', async () => {
+test('heartbeat refresh waits out the 1s ceiling after a recent event publish', async () => {
   const run = harness()
   run.publisher.start()
   await settle()
@@ -220,7 +220,7 @@ test('heartbeat refresh waits out the 500ms ceiling after a recent event publish
   run.clock.advance(100)
   assert.equal(run.sockets[0]!.sent.length, 3)
   assert.equal((JSON.parse(run.sockets[0]!.sent[2]!) as { type: string }).type, 'ping')
-  run.clock.advance(399)
+  run.clock.advance(899)
   assert.equal(run.sockets[0]!.sent.length, 3)
   run.clock.advance(1)
   assert.equal(run.sockets[0]!.sent.length, 4)

@@ -1,5 +1,5 @@
 import { env, exports } from 'cloudflare:workers'
-import { applyD1Migrations, reset, runInDurableObject } from 'cloudflare:test'
+import { applyD1Migrations, evictDurableObject, reset, runInDurableObject } from 'cloudflare:test'
 import type { SyncRoom } from '../../worker/SyncRoom'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { CloudSyncState } from '../../../src/shared/cloudSync'
@@ -146,6 +146,51 @@ describe('shared room control plane and fanout', () => {
     otherPublisher.close()
     ownerViewer.close()
     otherViewer.close()
+  })
+
+  it('broadcasts intermediate frames without writes and preserves the final frame across hibernation', async () => {
+    await seedAccount()
+    const ownerPublisher = await publisher(await seedDevice())
+    const created = await createTestRoom()
+    const ownerViewer = await viewer(ACCOUNT_ID)
+    const shared = env.SYNC_ROOM.get(env.SYNC_ROOM.idFromName(`shared:${created.id}`))
+
+    ownerPublisher.send(JSON.stringify({ version: 1, type: 'publish', state: publishedState('Primitive', 400) }))
+    expect(await roomMessage(ownerViewer, 'first checkpoint')).toMatchObject({
+      room: { encounters: [expect.objectContaining({ active: true, totalDamage: 400 })] }
+    })
+    const checkpoint = await runInDurableObject(shared, async (_instance: SyncRoom, state) =>
+      state.storage.get<{ revision: number; checkpointAt: number }>('sharedRoom')
+    )
+    expect(checkpoint).toBeDefined()
+
+    ownerPublisher.send(JSON.stringify({ version: 1, type: 'publish', state: publishedState('Primitive', 700) }))
+    expect(await roomMessage(ownerViewer, 'live uncheckpointed frame')).toMatchObject({
+      room: { encounters: [expect.objectContaining({ active: true, totalDamage: 700 })] }
+    })
+    const afterLiveFrame = await runInDurableObject(shared, async (_instance: SyncRoom, state) =>
+      state.storage.get<{ revision: number; checkpointAt: number }>('sharedRoom')
+    )
+    expect(afterLiveFrame).toEqual(checkpoint)
+
+    await evictDurableObject(shared)
+    const resting = publishedState('Primitive', 900)
+    ownerPublisher.send(JSON.stringify({
+      version: 1,
+      type: 'publish',
+      state: { ...resting, combat: { ...resting.combat, inCombat: false } }
+    }))
+    expect(await roomMessage(ownerViewer, 'final checkpoint after eviction')).toMatchObject({
+      room: { encounters: [expect.objectContaining({ active: false, totalDamage: 900 })] }
+    })
+    const finalCheckpoint = await runInDurableObject(shared, async (_instance: SyncRoom, state) =>
+      state.storage.get<{ revision: number; checkpointAt: number; history: unknown[] }>('sharedRoom')
+    )
+    expect(finalCheckpoint?.revision).toBeGreaterThan(checkpoint!.revision)
+    expect(finalCheckpoint?.checkpointAt).toBeGreaterThanOrEqual(checkpoint!.checkpointAt)
+    expect(finalCheckpoint?.history).toHaveLength(1)
+    ownerPublisher.close()
+    ownerViewer.close()
   })
 
   it('lets a member leave and lets only the owner close the room', async () => {
