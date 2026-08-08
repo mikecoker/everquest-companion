@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { SyncRoom } from '../../worker/SyncRoom'
 import { signValue } from '../../worker/crypto'
 import { consumeTicket } from '../../worker/deviceAuth'
-import { ACCOUNT_ID, jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
+import { ACCOUNT_ID, ACTIVITY_ORIGIN, jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
 
 beforeEach(async () => {
   await reset()
@@ -120,7 +120,7 @@ describe('SyncRoom authorization and protocol', () => {
     const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${device.deviceId}`, {
         method: 'DELETE',
-        headers: { cookie: await sessionCookie() }
+        headers: { cookie: await sessionCookie(), origin: ACTIVITY_ORIGIN }
       })
     )
     expect(response.status).toBe(204)
@@ -147,7 +147,7 @@ describe('SyncRoom authorization and protocol', () => {
     const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${revokedDevice.deviceId}`, {
         method: 'DELETE',
-        headers: { cookie: await sessionCookie() }
+        headers: { cookie: await sessionCookie(), origin: ACTIVITY_ORIGIN }
       })
     )
     expect(response.status).toBe(204)
@@ -258,7 +258,7 @@ describe('account erasure', () => {
     const cookie = await sessionCookie()
     const eraseRequest = (): Request => new Request('https://worker.test/api/me', {
       method: 'DELETE',
-      headers: { cookie }
+      headers: { cookie, origin: ACTIVITY_ORIGIN }
     })
     expect((await exports.default.fetch(eraseRequest())).status).toBe(204)
     expect(await publisherClosed).toMatchObject({ code: 4004, reason: 'Account deleted' })
@@ -300,7 +300,7 @@ describe('account erasure', () => {
     const cookie = await sessionCookie()
     const erased = await exports.default.fetch(new Request('https://worker.test/api/me', {
       method: 'DELETE',
-      headers: { cookie }
+      headers: { cookie, origin: ACTIVITY_ORIGIN }
     }))
     expect(erased.status).toBe(204)
     await evictDurableObject(room)

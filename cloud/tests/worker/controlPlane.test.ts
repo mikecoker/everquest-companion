@@ -3,7 +3,7 @@ import { applyD1Migrations, reset } from 'cloudflare:test'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { consumePairing, createPairing, pairingHash } from '../../worker/pairing'
 import { oauthToken } from '../../worker/auth'
-import { ACCOUNT_ID, jsonRequest, seedAccount, seedDevice, sessionCookie } from './helpers'
+import { ACCOUNT_ID, ACTIVITY_ORIGIN, jsonRequest, seedAccount, seedDevice, sessionCookie } from './helpers'
 
 beforeEach(async () => {
   await reset()
@@ -12,6 +12,20 @@ beforeEach(async () => {
 })
 
 describe('Discord OAuth and Activity session', () => {
+  it('rejects browser mutations from missing or foreign origins', async () => {
+    await seedAccount()
+    const cookie = await sessionCookie()
+    expect((await exports.default.fetch(new Request('https://worker.test/api/pairing', {
+      method: 'POST', headers: { cookie }
+    }))).status).toBe(403)
+    expect((await exports.default.fetch(new Request('https://worker.test/api/pairing', {
+      method: 'POST', headers: { cookie, origin: 'https://attacker.example' }
+    }))).status).toBe(403)
+    expect((await exports.default.fetch(new Request('https://worker.test/api/pairing', {
+      method: 'POST', headers: { cookie, origin: ACTIVITY_ORIGIN }
+    }))).status).toBe(200)
+  })
+
   it('returns bounded failures when Discord rejects the exchange', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('no', { status: 401 }))
     await expect(oauthToken(jsonRequest('/api/oauth/token', { code: 'bad-code' }), env)).rejects.toMatchObject({
@@ -94,7 +108,9 @@ describe('devices and tickets', () => {
     expect((await exports.default.fetch(jsonRequest('/api/devices/pair', { code: pairing.code }))).status).toBe(400)
     expect((await exports.default.fetch(jsonRequest('/api/devices/session', device))).status).toBe(200)
     const revoke = await exports.default.fetch(
-      new Request(`https://worker.test/api/devices/${device.deviceId}`, { method: 'DELETE', headers: { cookie } })
+      new Request(`https://worker.test/api/devices/${device.deviceId}`, {
+        method: 'DELETE', headers: { cookie, origin: ACTIVITY_ORIGIN }
+      })
     )
     expect(revoke.status).toBe(204)
     expect((await exports.default.fetch(jsonRequest('/api/devices/session', device))).status).toBe(401)
@@ -129,7 +145,9 @@ describe('devices and tickets', () => {
     const me = await exports.default.fetch(new Request('https://worker.test/api/me', { headers: { cookie } }))
     expect(await me.json()).toMatchObject({ paired: true, devices: [{ id: device.deviceId, label: 'Test desktop' }] })
     expect(
-      (await exports.default.fetch(new Request('https://worker.test/api/devices/not-owned', { method: 'DELETE', headers: { cookie } }))).status
+      (await exports.default.fetch(new Request('https://worker.test/api/devices/not-owned', {
+        method: 'DELETE', headers: { cookie, origin: ACTIVITY_ORIGIN }
+      }))).status
     ).toBe(404)
   })
 })

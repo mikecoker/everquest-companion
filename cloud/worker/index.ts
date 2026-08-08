@@ -1,5 +1,6 @@
 import { oauthToken, loadAccount, requireSession } from './auth'
 import { eraseAccount } from './accountErasure'
+import { requireActivityOrigin, requiresActivityOrigin } from './activityOrigin'
 import {
   consumeTicket,
   createDeviceSession,
@@ -76,6 +77,7 @@ async function authenticatedApi(request: Request, env: Env, path: string, accoun
 }
 
 async function routeApi(request: Request, env: Env, path: string): Promise<Response> {
+  if (requiresActivityOrigin(request.method, path)) requireActivityOrigin(request, env)
   const publicResponse = await publicApi(request, env, path)
   if (publicResponse !== null) return publicResponse
   const accountId = await requireSession(request, env)

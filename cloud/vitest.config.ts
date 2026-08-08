@@ -17,6 +17,7 @@ export default defineConfig({
           COOKIE_SIGNING_KEY: 'test-cookie-signing-key-with-enough-entropy',
           TICKET_SIGNING_KEY: 'test-ticket-signing-key-with-enough-entropy',
           DEVICE_PEPPER: 'test-device-pepper-with-enough-entropy',
+          ACTIVITY_ALLOWED_ORIGIN: 'https://activity.test',
           DISCORD_API_ORIGIN: 'https://discord.test',
           TEST_MIGRATIONS: await readD1Migrations('./migrations')
         }

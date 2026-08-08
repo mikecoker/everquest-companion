@@ -166,6 +166,7 @@ const IGNORES = [
   'out-e2e/**',
   'dist/**',
   'cloud/dist/**',
+  'cloud/.wrangler/**',
   // esbuild bundle output for the feedback Lambda (infra/build.mjs) — generated,
   // 5.8k phantom no-var errors if linted. gitignored too; both lists need it.
   'infra/dist/**',
@@ -326,6 +327,13 @@ export default tseslint.config(
   {
     files: ['tests/**', '**/*.{mjs,cjs}'],
     extends: [tseslint.configs.disableTypeChecked],
+  },
+  // The browser E2E entry is typechecked by cloud/browser-tsconfig.json rather
+  // than the Worker's nearest tsconfig. Keep syntactic/factoring lint here.
+  {
+    files: ['cloud/tests/browser/main.tsx'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { globals: globals.browser },
   },
 
   // ---- carve-out: tests --------------------------------------------------
