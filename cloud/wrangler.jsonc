@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "eq-legends-cloud-sync",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-07",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eq-legends-cloud-sync-local",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SYNC_ROOM",
+        "class_name": "SyncRoom"
+      }
+    ]
+  },
+  "exports": {
+    "SyncRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "assets": {
+    "directory": "dist/activity",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  }
+}
