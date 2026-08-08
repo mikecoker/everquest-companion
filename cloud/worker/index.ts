@@ -30,8 +30,7 @@ async function syncUpgrade(request: Request, env: Env): Promise<Response> {
   return room.fetch(new Request(request, { headers }))
 }
 
-async function me(request: Request, env: Env): Promise<Response> {
-  const accountId = await requireSession(request, env)
+async function me(accountId: string, env: Env): Promise<Response> {
   const account = await loadAccount(accountId, env)
   const rows = await env.DB.prepare(
     `SELECT id, label, created_at FROM device
@@ -43,27 +42,38 @@ async function me(request: Request, env: Env): Promise<Response> {
   return json({ account, devices, paired: devices.length > 0 })
 }
 
-async function routeApi(request: Request, env: Env, path: string): Promise<Response> {
+async function publicApi(request: Request, env: Env, path: string): Promise<Response | null> {
   if (request.method === 'POST' && path === '/api/oauth/token') return oauthToken(request, env)
   if (request.method === 'POST' && path === '/api/devices/pair') return json(await pairDevice(request, env))
   if (request.method === 'POST' && path === '/api/devices/session') {
     return json(await createDeviceSession(request, env))
   }
   if (request.method === 'GET' && path === '/api/sync') return syncUpgrade(request, env)
-  const accountId = await requireSession(request, env)
+  return null
+}
+
+async function authenticatedApi(request: Request, env: Env, path: string, accountId: string): Promise<Response> {
   if (request.method === 'POST' && path === '/api/pairing') {
     return json(await createPairing(accountId, request, env))
   }
   if (request.method === 'POST' && path === '/api/viewer/session') {
     return json(await createViewerSession(accountId, env))
   }
-  if (request.method === 'GET' && path === '/api/me') return me(request, env)
+  if (request.method === 'GET' && path === '/api/me') return me(accountId, env)
   const revokeMatch = request.method === 'DELETE' ? /^\/api\/devices\/([^/]+)$/u.exec(path) : null
-  if (revokeMatch !== null) {
-    await revokeDevice(accountId, decodeURIComponent(revokeMatch[1]!), env)
+  const encodedDeviceId = revokeMatch?.[1]
+  if (encodedDeviceId !== undefined) {
+    await revokeDevice(accountId, decodeURIComponent(encodedDeviceId), env)
     return new Response(null, { status: 204 })
   }
   throw new HttpError(404, 'not_found', 'API route was not found')
+}
+
+async function routeApi(request: Request, env: Env, path: string): Promise<Response> {
+  const publicResponse = await publicApi(request, env, path)
+  if (publicResponse !== null) return publicResponse
+  const accountId = await requireSession(request, env)
+  return authenticatedApi(request, env, path, accountId)
 }
 
 export default {
@@ -71,7 +81,7 @@ export default {
     const path = new URL(request.url).pathname
     try {
       if (path.startsWith('/api/')) return await routeApi(request, env, path)
-      if (env.ASSETS !== undefined) return env.ASSETS.fetch(request)
+      if (env.ASSETS !== undefined) return await env.ASSETS.fetch(request)
       return new Response('Not found', { status: 404 })
     } catch (error) {
       return errorResponse(error)

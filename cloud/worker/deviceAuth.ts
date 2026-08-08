@@ -56,11 +56,13 @@ export async function createDeviceSession(request: Request, env: Env): Promise<{
   )
     .bind(deviceId)
     .first<{ discord_user_id: string; secret_hash: string; revoked_at: number | null }>()
-  if (
-    row === null ||
-    row.revoked_at !== null ||
-    !(await verifyDeviceSecret(deviceSecret, row.secret_hash, env.DEVICE_PEPPER))
-  ) {
+  if (row === null) {
+    throw new HttpError(401, 'unauthorized', 'Device credentials are invalid or revoked')
+  }
+  if (row.revoked_at !== null) {
+    throw new HttpError(401, 'unauthorized', 'Device credentials are invalid or revoked')
+  }
+  if (!(await verifyDeviceSecret(deviceSecret, row.secret_hash, env.DEVICE_PEPPER))) {
     throw new HttpError(401, 'unauthorized', 'Device credentials are invalid or revoked')
   }
   return createTicket(row.discord_user_id, 'publisher', deviceId, env)

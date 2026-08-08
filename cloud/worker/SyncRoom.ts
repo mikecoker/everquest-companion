@@ -51,10 +51,6 @@ function attachment(socket: WebSocket): SocketAttachment | null {
 }
 
 export class SyncRoom extends DurableObject<Env> {
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env)
-  }
-
   private publishers(except?: WebSocket): WebSocket[] {
     return this.ctx.getWebSockets().filter((socket) => socket !== except && attachment(socket)?.role === 'publisher')
   }
