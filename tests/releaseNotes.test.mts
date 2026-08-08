@@ -125,6 +125,8 @@ test('releaseNotesProblems CATCHES the mistakes this file will actually acquire'
  * that makes an introduction stand out is gone and the panel is a wall of prose.
  */
 const INTRODUCTIONS: readonly { version: string; bullets: number }[] = [
+  // 0.13.0: Discord Live shared rooms (4).
+  { version: '0.13.0', bullets: 4 },
   // 0.9.0: the What's new panel (3) and the "This week" lockout view (3).
   { version: '0.9.0', bullets: 3 },
   // 0.4.0: the exaltation planner (3) and the celebration cards (3).

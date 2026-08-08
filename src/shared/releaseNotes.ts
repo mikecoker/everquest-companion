@@ -125,6 +125,28 @@ export interface ReleaseNote {
  */
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.13.0',
+    date: '2026-08-08',
+    entries: [
+      {
+        kind: 'new',
+        text: 'Share live EverQuest encounters with your group in a Discord Activity using a private room code.'
+      },
+      {
+        kind: 'new',
+        text: 'The Encounters view combines each connected player\'s own character and pet damage into one room report.'
+      },
+      {
+        kind: 'new',
+        text: 'The Players view lets everyone inspect the character, progression, and recent activity each paired player chooses to share.'
+      },
+      {
+        kind: 'new',
+        text: 'Pair the desktop companion with a one-time Discord code; raw logs, chat, inventory, settings, and account tokens never enter the shared room.'
+      }
+    ]
+  },
+  {
     version: '0.12.0',
     date: '2026-08-08',
     entries: [

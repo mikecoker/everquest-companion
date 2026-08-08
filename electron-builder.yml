@@ -64,7 +64,7 @@ npmRebuild: false
 # latest*.yml from the same owner/repo. `channel` is per-release (main vs latest).
 publish:
   provider: github
-  owner: jmoyers
+  owner: mikecoker
   repo: everquest-companion
 
 win:
