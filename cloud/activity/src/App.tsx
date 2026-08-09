@@ -112,13 +112,15 @@ function RoomLobby({ deps, dispatch }: { deps: AppDeps; dispatch: React.Dispatch
     await deps.api.joinRoom(code.trim())
     await refresh()
   })
-  return <main className="center-shell"><section className="state-card room-lobby"><p className="eyebrow">EQ Legends Live</p><h1>Join a shared room</h1>
-    <p>Use one room for your group. Everyone can view encounters; paired desktops contribute their own character and pet damage.</p>
-    <label>Room name<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} /></label>
-    <button disabled={actions.busy || name.trim() === ''} onClick={create}>Create room</button>
-    <div className="lobby-divider"><span>or</span></div>
-    <label>Room code<input value={code} placeholder="XXXX-XXXX-XXXX" onChange={(event) => setCode(event.target.value.toUpperCase())} /></label>
-    <button disabled={actions.busy || code.trim() === ''} onClick={join}>Join room</button>
+  return <main className="center-shell"><section className="state-card room-lobby"><p className="eyebrow">EQ Legends Live</p><h1>Join your group</h1>
+    <p>Ask the person hosting for their room code. Joining lets you see the room immediately; pairing your desktop is optional.</p>
+    <label>Room code<input autoFocus value={code} placeholder="XXXX-XXXX-XXXX" onChange={(event) => setCode(event.target.value.toUpperCase())} /></label>
+    <button disabled={actions.busy || code.trim() === ''} onClick={join}>Join with code</button>
+    <div className="lobby-divider"><span>Hosting the group?</span></div>
+    <div className="host-option"><p>Create one room, then share its code with everyone else.</p>
+      <label>Room name<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} /></label>
+      <button className="secondary" disabled={actions.busy || name.trim() === ''} onClick={create}>Create a new room</button>
+    </div>
     {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
   </section></main>
 }
@@ -129,13 +131,27 @@ function PairingControls({ state, deps, dispatch }: { state: ActivityState; deps
     const pairing = await deps.api.createPairing()
     dispatch({ type: 'pairing', ...pairing })
   })
-  return <section className="card setup-card"><p className="eyebrow">Desktop contribution</p><h2>{state.account?.paired ? 'Desktop paired' : 'Pair your companion'}</h2>
-    <p>{state.account?.paired ? 'Your paired desktop can publish your live data into this room.' : 'In the desktop app, open Preferences -> Discord Live and enter a one-time code.'}</p>
+  return <section className="card setup-card"><p className="eyebrow">Step 2 · Optional</p><h2>{state.account?.paired ? 'Your desktop is connected' : 'Share your own stats'}</h2>
+    <p>{state.account?.paired
+      ? 'Done — your companion can publish your character and pet damage into this room.'
+      : 'You can already view the room. Pair only if you want your own character and damage to appear for everyone.'}</p>
     {state.pairing
-      ? <><output className="pair-code compact" aria-label="Pairing code">{state.pairing.code}</output><p className="fine">Expires in 5 minutes. Keep this code private.</p></>
-      : <button disabled={actions.busy} onClick={create}>Create pairing code</button>}
+      ? <><output className="pair-code compact" aria-label="Pairing code">{state.pairing.code}</output><p className="fine">In the desktop app: Preferences → Discord Live → enter this code. It expires in 5 minutes.</p></>
+      : <button disabled={actions.busy} onClick={create}>{state.account?.paired ? 'Pair another desktop' : 'Get desktop pairing code'}</button>}
     {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
   </section>
+}
+
+function RoomExitControls({ owner, busy, exit }: { owner: boolean; busy: boolean; exit: () => void }): React.JSX.Element {
+  const [confirmExit, setConfirmExit] = useState(false)
+  if (!confirmExit) return <button className="danger subtle" disabled={busy} onClick={() => setConfirmExit(true)}>
+    {owner ? 'Close room and return to start' : 'Leave room and return to start'}
+  </button>
+  return <div className="room-exit-confirm"><p>{owner
+    ? 'This closes the room for everyone and returns you to the join screen.'
+    : 'This removes you from the room and returns you to the join screen.'}</p>
+    <button className="danger" disabled={busy} onClick={exit}>{owner ? 'Yes, close the room' : 'Yes, leave the room'}</button>
+    <button className="secondary" disabled={busy} onClick={() => setConfirmExit(false)}>Cancel</button></div>
 }
 
 function RoomControls({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
@@ -146,13 +162,13 @@ function RoomControls({ state, deps, dispatch }: { state: ActivityState; deps: A
   const rotate = (): void => actions.run(async () => refresh(await deps.api.rotateRoomCode(room.id)))
   const leave = (): void => actions.run(async () => { await deps.api.leaveRoom(room.id); await refresh() })
   const close = (): void => actions.run(async () => { await deps.api.closeRoom(room.id); await refresh() })
-  return <section className="card setup-card"><p className="eyebrow">Room access</p><h2>{room.name}</h2>
+  const exit = room.owner ? close : leave
+  return <section className="card setup-card"><p className="eyebrow">Step 1 · Room joined</p><h2>{room.name}</h2>
+    <p>{room.owner ? 'You are hosting. Share a code so your friends can join.' : 'You joined this room. You can view it without pairing a desktop.'}</p>
     {state.roomCode
       ? <><output className="room-code" aria-label="Room code">{state.roomCode}</output><p className="fine">Share this with people you want in the room.</p></>
-      : room.owner && <button disabled={actions.busy} onClick={rotate}>Create a new invite code</button>}
-    {room.owner
-      ? <button className="danger" disabled={actions.busy} onClick={close}>Close room</button>
-      : <button className="danger" disabled={actions.busy} onClick={leave}>Leave room</button>}
+      : room.owner && <button disabled={actions.busy} onClick={rotate}>Get a fresh room code</button>}
+    <RoomExitControls owner={room.owner} busy={actions.busy} exit={exit} />
     {actions.error && <p role="alert" className="form-error">{actions.error}</p>}
   </section>
 }
@@ -179,7 +195,7 @@ function AccountControls({ account, deps, dispatch }: { account: ViewerAccount; 
 
 function SetupPanel({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
   if (state.account === undefined) return <></>
-  return <><PairingControls state={state} deps={deps} dispatch={dispatch} /><RoomControls state={state} deps={deps} dispatch={dispatch} /><AccountControls account={state.account} deps={deps} dispatch={dispatch} /></>
+  return <><RoomControls state={state} deps={deps} dispatch={dispatch} /><PairingControls state={state} deps={deps} dispatch={dispatch} /><AccountControls account={state.account} deps={deps} dispatch={dispatch} /></>
 }
 
 function ConnectedActivity({ state, deps, dispatch }: { state: ActivityState; deps: AppDeps; dispatch: React.Dispatch<ActivityAction> }): React.JSX.Element {
@@ -190,7 +206,8 @@ function ConnectedActivity({ state, deps, dispatch }: { state: ActivityState; de
     {stale && <div className="stale-banner" role="status">Connection lost. Showing the latest room update.</div>}
     {state.room === undefined
       ? <section className="waiting" aria-live="polite"><span className="spinner" /><h1>Opening shared room</h1><p>The encounter board will appear as soon as the room connects.</p></section>
-      : <RoomDashboard room={state.room} now={deps.now()} setup={<SetupPanel state={state} deps={deps} dispatch={dispatch} />} />}
+      : <RoomDashboard room={state.room} now={deps.now()} initialTab={state.account?.paired ? 'encounters' : 'setup'}
+        setup={<SetupPanel state={state} deps={deps} dispatch={dispatch} />} />}
   </main>
 }
 

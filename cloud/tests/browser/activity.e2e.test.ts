@@ -241,11 +241,11 @@ afterAll(async () => {
 describe('real Activity browser and local Worker', () => {
   it('creates a room, pairs, publishes a bounded encounter, and reconnects', async () => {
     await page.goto(`http://localhost:${activityPort}`, { waitUntil: 'domcontentloaded' })
-    await page.getByText('Join a shared room').waitFor()
-    await page.getByRole('button', { name: 'Create room' }).click()
+    await page.getByText('Join your group').waitFor()
+    await page.getByRole('button', { name: 'Create a new room' }).click()
     await page.getByRole('navigation', { name: 'Shared room views' }).waitFor()
     await page.getByRole('button', { name: 'Setup' }).click()
-    await page.getByRole('button', { name: 'Create pairing code' }).click()
+    await page.getByRole('button', { name: 'Get desktop pairing code' }).click()
     const code = (await page.getByLabel('Pairing code').textContent())?.trim()
     expect(code).toMatch(/^[A-Z2-9]{8}$/u)
 
@@ -277,6 +277,6 @@ describe('real Activity browser and local Worker', () => {
     await waitForVisibleText('Lord Nagafen')
     await page.getByRole('button', { name: 'Setup' }).click()
     await page.getByRole('button', { name: 'Revoke' }).click()
-    await page.getByText('Pair your companion').waitFor()
+    await page.getByText('Share your own stats').waitFor()
   })
 })

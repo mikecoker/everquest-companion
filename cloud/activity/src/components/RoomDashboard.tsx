@@ -100,12 +100,13 @@ function PlayersTab({ room, now }: { room: CloudRoomSnapshot; now: number }): Re
     <PlayerDetail participant={selected} now={now} /></div>
 }
 
-export function RoomDashboard({ room, now, setup }: {
+export function RoomDashboard({ room, now, setup, initialTab = 'encounters' }: {
   room: CloudRoomSnapshot
   now: number
   setup: React.ReactNode
+  initialTab?: RoomTab
 }): React.JSX.Element {
-  const [tab, setTab] = useState<RoomTab>('encounters')
+  const [tab, setTab] = useState<RoomTab>(initialTab)
   return <><nav className="room-tabs" aria-label="Shared room views">
     {(['encounters', 'players', 'setup'] as const).map((value) => <button key={value} className={tab === value ? 'selected' : ''}
       aria-current={tab === value ? 'page' : undefined} onClick={() => setTab(value)}>{value[0]?.toUpperCase()}{value.slice(1)}</button>)}
