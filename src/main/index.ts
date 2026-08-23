@@ -55,6 +55,7 @@ import {
   lootModule,
   notifyCloudSyncStateChanged,
   progressionModule,
+  sendWorldRebuilt,
   sessionDetector,
   setCloudSyncStateObserver
 } from './pipeline'
@@ -63,7 +64,8 @@ import { initProcessPriority } from './processPriority'
 import { getProcessPriorityPrefs } from './storeProcessPriority'
 import { initPresenceEffects, stopPresenceEffects } from './presenceEffects'
 import { provisionDefaultPacks } from './provisionPacks'
-import { activeCharId, getActiveCharacter, startTailing, stopSession } from './session'
+import { removedPackIds } from './storeSoundPacks'
+import { activeCharId, getActiveCharacter, markTailPosition, startTailing, stopSession } from './session'
 import { buildCloudSyncState } from './cloudSync/state'
 import {
   notifyCloudSyncDirty,
@@ -495,7 +497,55 @@ if (!gotSingleInstanceLock) {
 app.on('before-quit', () => {
   teardownStep('main:stopCloudSync', stopCloudSyncRuntime)
   teardownStep('main:stopPresence', stopPresenceEffects)
+  flushStoreForQuit()
+  logTopmostSavings()
 })
+
+/**
+ * WHAT THE Z-ORDER GUARD SAVED THIS SESSION, in dev only (JOS-368).
+ *
+ * The guard's whole claim is a count — how many `SetWindowPos` calls over the game did NOT happen
+ * — and a claim like that should be readable rather than argued about. It is logged ONCE, at quit,
+ * because that is the only moment the number is final, and it is gated on `!app.isPackaged`
+ * (main's own dev discriminator, `channel.ts`) because a player has no use for it and a shipped
+ * build should not narrate its own bookkeeping. The counting itself is two integers and runs
+ * everywhere: a counter that only counted in dev could not be checked against a real session.
+ */
+function logTopmostSavings(): void {
+  if (app.isPackaged) return
+  const { issued, avoided } = topmostStats()
+  logInfo(`[everquest-companion] topmost: ${avoided} SetWindowPos avoided, ${issued} issued`)
+}
+
+/**
+ * EVERY STORE WRITE THIS PROCESS STILL OWES, DONE NOW.
+ *
+ * Both steps were already `before-quit` steps and still are. They are a NAMED function because the
+ * auto-updater has to be able to run them BEFORE it hands this process to the installer (JOS-272 —
+ * `initUpdater`'s second argument is this).
+ *
+ * WHY THAT ORDER IS THE FIX. `quitAndInstall(true, true)` spawns the NSIS installer and only then
+ * quits; the installer sleeps ~1 s and then taskkills whatever is still running
+ * (allowOnlyOneInstallerInstance.nsh — updater.ts's research block quotes it). Every write these two
+ * make would otherwise happen INSIDE that one-second window, racing a kill. Running them first
+ * empties the window rather than trying to survive it.
+ *
+ * Idempotent, so `before-quit` firing straight afterwards costs one repeated write of identical
+ * bytes — which is exactly what the tail-mark note below already relied on.
+ */
+function flushStoreForQuit(): void {
+  // The tail mark, belt-and-braces and one more reason (JOS-57 scope addition): `app.quit()` does
+  // NOT emit `window-all-closed`, so an auto-updater's `quitAndInstall` would otherwise leave no
+  // mark and blind the very next launch — the one right after an update, which is exactly the launch
+  // a startup measurement most wants to see. Writing it on both events is one store key written
+  // twice, and the later write is the better answer.
+  teardownStep('main:logTailMark', markTailPosition)
+  // …and the window's own size and position (JOS-248), for EXACTLY that reason: the debounced save
+  // is flushed by the window's `close`, and `app.quit()` — an auto-updater's `quitAndInstall`, an
+  // OS logoff — is not a close. Without this the launch right after an update is the one that comes
+  // up at a stale size, which is the launch a user is most likely to be watching.
+  teardownStep('main:saveWindowState', flushMainWindowState)
+}
 
 /**
  * One teardown step, isolated. `window-all-closed` runs a LIST of these before `app.quit()`,

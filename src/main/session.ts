@@ -630,10 +630,14 @@ export async function tailCharacter(ref: CharacterRef): Promise<TailResult> {
   // was closed is swept before the first publish, and the first snapshot the user sees is judged
   // against now.
   registry.flushNow()
-  sendToMain(IPC.onCharacter, character)
+  sendWorldRebuilt(character)
   // A character switch is a full replacement at the cloud boundary, never a cross-character
   // delta. This fires after replay disposal and hydration, when every snapshot names one owner.
   notifyCloudSyncStateChanged()
+  // Against the scan's FROZEN SIZE, not its `endOffset`: the mark is the tailer's offset, which is
+  // the file's size as of its last read, and subtracting two observations of the same quantity is
+  // what keeps a log that merely ended mid-line from being reported as a rotation (scanHistory.ts).
+  const newBytes = newBytesSince(mark, scan.size)
   return {
     eventsReplayed: scan.seq - startSeq,
     replay: { slices: slicer.slices, workMs: slicer.workMs, restMs: slicer.restMs },

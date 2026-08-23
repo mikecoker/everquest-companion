@@ -84,6 +84,54 @@ export function notifyCloudSyncStateChanged(): void {
   cloudSyncStateObserver?.()
 }
 
+/** The overlay kinds that consume the generic module transport — see the fan-out below. */
+// 'xp' (JOS-195) reads TWO of them — `progression` for the pace and the projection, `loot` for
+// the mote rates — and needs the rebuild signal below at least as much as the timer windows do:
+// its whole subject is a fold over months of log, and a window open at launch hydrates part-way
+// through one.
+const MODULE_READING_OVERLAYS: OverlayKind[] = ['events', 'buffs', 'debuffs', 'xp', 'respawn']
+
+/**
+ * Push to every overlay window that reads modules — the fan-out `emitDelta` performs, as a
+ * function, because a delta is no longer the only thing an overlay has to be told (JOS-172).
+ *
+ * An overlay window that reads a module needs BOTH halves of the transport the main window has
+ * always had: the increments, and the "throw it all away and ask again" signal. It had only the
+ * first, which is invisible until the moment the two disagree — a COLD START with an overlay
+ * already open. The window is created while the historical fold is running (index.ts restores
+ * overlays in the same `whenReady` turn that kicked off `startTailing`), so it hydrates from a
+ * snapshot taken at a random instant part-way through months of log; `endReplay` then DISCARDS
+ * what the fold accumulated (registry.ts — deliberately, so a character switch cannot fire the
+ * celebration detectors), so no delta ever describes the rest of it. A charm or an Ensnare that
+ * genuinely survived the fold was in the model, in the main window, and missing from the overlay
+ * until the next live event happened to touch that module.
+ *
+ * THE DELIVERY IS THE FIX, NOT THE DISCARD. Exempting buffs/buffTimers from `endReplay` would
+ * mean shipping one module's whole history as an INCREMENT again — the exact shape JOS-60
+ * removed — and would leave the other module-reading overlay (the event log) with the same
+ * asymmetry. Re-hydration is what the main window does (`useModule` on `log:character`), so the
+ * overlays now get the same signal through the same list.
+ */
+export function sendToModuleOverlays(channel: string, ...args: unknown[]): void {
+  for (const kind of MODULE_READING_OVERLAYS) {
+    const w = getOverlayWindow(kind)
+    if (w && !w.isDestroyed()) w.webContents.send(channel, ...args)
+  }
+}
+
+/**
+ * "The world for this character was rebuilt — re-hydrate." ONE call, every window that folds a
+ * module: the main window and the module-reading overlays.
+ *
+ * Every `log:character` send in this process goes through here (session.ts's two, index.ts's
+ * live-epoch re-send), so "who is told the world was rebuilt" is answered in one place rather
+ * than at each call site — which is precisely how the overlays came to be missing from it.
+ */
+export function sendWorldRebuilt(character: CharacterRef | null): void {
+  sendToMain(IPC.onCharacter, character)
+  sendToModuleOverlays(IPC.onCharacter, character)
+}
+
 // The extension framework. Modules own their slice of log-derived state and push
 // deltas to the renderer over the generic `module:delta` channel. Registration
 // order = bus delivery order.
@@ -94,10 +142,14 @@ export const registry = new ModuleRegistry({
     // AlertsModule about the feed) keeps the alerts module untouched, and because eventFeed is
     // registered LAST the row it appends is picked up by the same flush pass.
     feedAlertDelta(delta)
-    // The 'events' overlay is a second consumer of the module transport (it hydrates the
-    // eventFeed module and rides its deltas), so deltas must reach that window too.
-    const evOverlay = getOverlayWindow('events')
-    if (evOverlay && !evOverlay.isDestroyed()) evOverlay.webContents.send(IPC.onModuleDelta, delta)
+    // OVERLAYS THAT READ MODULES GET THE DELTA TOO. The 'events' overlay hydrates the eventFeed
+    // module and rides its deltas; the 'buffs' and 'debuffs' overlays (JOS-89, split in JOS-119)
+    // do the same for `buffs` + `buffTimers` — two SURFACES over one model, so both subscribe to
+    // the same two modules and each keeps the rows that are its subject (shared/buffTimers.ts
+    // `timerRowSurface`). The fan-out stays an explicit per-kind list rather than a broadcast over
+    // OVERLAY_KINDS: an overlay that reads no module has no business being woken ~10×/second,
+    // and a new kind that DOES read one should have to say so here.
+    sendToModuleOverlays(IPC.onModuleDelta, delta)
     if (CLOUD_SYNC_MODULES.has(delta.moduleId)) notifyCloudSyncStateChanged()
   }
 })

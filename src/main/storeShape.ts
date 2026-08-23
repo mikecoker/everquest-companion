@@ -21,6 +21,7 @@ import type { BuffAllowPrefs } from '../shared/buffAllow'
 import type { RespawnPrefs } from '../shared/respawn'
 import type { SoundPackPrefs } from '../shared/soundPacks'
 import type { WindowBounds } from './store'
+import type { StoredCloudSyncPrefs } from './cloudSync/settingsControl'
 
 /**
  * One character's tail position at the last clean shutdown (JOS-57 scope addition). `at` is a wall
@@ -294,4 +295,12 @@ export interface StoreShape {
    * importing a friend's answer to that is not a setting anyone wanted.
    */
   uiScale?: number
+  /**
+   * Discord cloud sync is additive, optional and closed by default. Like `lastSeenNotesVersion`,
+   * every reader supplies the absent-key default, so this does not change the meaning of an older
+   * store and deliberately needs no schema bump/migration. It is also private-by-construction:
+   * settings sharing reads an explicit whitelist and never reads this key. The secret
+   * representation is main-only and never crosses IPC.
+   */
+  cloudSync?: StoredCloudSyncPrefs
 }

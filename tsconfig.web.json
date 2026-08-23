@@ -49,6 +49,20 @@
     // …and `releaseNotes.ts` (the one what's-new store key, JOS-73), likewise.
     "src/preload/releaseNotes.ts",
     // …and `cloudSync.ts` (sanitized Discord cloud settings/status), likewise.
-    "src/preload/cloudSync.ts"
+    "src/preload/cloudSync.ts",
+    // …and `planner.ts` (the exaltation planner's IPC surface), likewise.
+    "src/preload/planner.ts",
+    // …and `knowledge.ts` (the item/mob knowledge lookups), likewise.
+    "src/preload/knowledge.ts",
+    // …and `logStream.ts` (the raw log line stream), likewise.
+    "src/preload/logStream.ts",
+    // …and `buffTrust.ts` (JOS-140's trusted-caster prefs), likewise.
+    "src/preload/buffTrust.ts",
+    // …and `respawn.ts` (JOS-194's respawn-clock prefs), likewise.
+    "src/preload/respawn.ts",
+    // …and `uiScale.ts` (JOS-123's main-window zoom control), likewise.
+    "src/preload/uiScale.ts",
+    // …and `overlaySnap.ts` (JOS-217's overlay-drag magnetism), likewise.
+    "src/preload/overlaySnap.ts"
   ]
 }

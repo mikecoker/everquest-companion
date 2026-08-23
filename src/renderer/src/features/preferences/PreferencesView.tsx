@@ -131,6 +131,7 @@ import { windowSection } from './CloseToTraySetting'
 // that renders it. See features/whatsnew/WhatsNewPanel.tsx for why the notes are a SECTION.
 import { whatsNewSection } from '../whatsnew/WhatsNewPanel'
 import { cloudSyncSection } from './CloudSyncSettings'
+import { thanksSection } from './ThanksSetting'
 // The section CARD and the arrival pulse live together in their own file — same ceiling, same
 // answer as PerfSetting's descriptor: split, don't widen the threshold.
 import PrefSectionBlock, { FILL_COLUMN_SX, FILL_ROOT_SX, FILL_ROW_SX, paneFills, useLandedSection } from './PrefSectionBlock'
