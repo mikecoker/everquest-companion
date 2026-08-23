@@ -1,4 +1,5 @@
 import { parseServerCloudSyncJson } from '../../../src/shared/cloudSync'
+import { parseServerCloudRoomJson } from '../../../src/shared/cloudRoom'
 import type { ActivityApi } from './api'
 import { viewerSocketUrl } from './api'
 import type { ActivityAction } from './model'
@@ -33,7 +34,8 @@ function socketRun(deps: TransportDeps, url: string, signal: AbortSignal): Promi
     signal.addEventListener('abort', abort, { once: true })
     ws.addEventListener('message', (event) => {
       if (!(event instanceof MessageEvent) || typeof event.data !== 'string') return
-      const parsed = parseServerCloudSyncJson(event.data)
+      const sync = parseServerCloudSyncJson(event.data)
+      const parsed = sync.ok ? sync : parseServerCloudRoomJson(event.data)
       if (parsed.ok) {
         deps.dispatch({ type: 'socket', message: parsed.value })
         if (parsed.value.type === 'error' && parsed.value.code === 'version_mismatch') {

@@ -8,7 +8,7 @@ import type { DesktopCloudSyncMessage, ServerCloudSyncMessage } from '../../shar
 import { CloudSyncClient, CloudSyncHttpError } from './client'
 import type { CloudSyncConfig } from './config'
 
-const PUBLISH_INTERVAL_MS = 500
+const PUBLISH_INTERVAL_MS = 1_000
 const HEARTBEAT_INTERVAL_MS = 20_000
 const MAX_RECONNECT_MS = 30_000
 const MAX_SERVER_RETRY_MS = 5 * 60_000

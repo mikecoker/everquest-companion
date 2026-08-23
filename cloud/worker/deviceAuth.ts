@@ -32,16 +32,17 @@ async function createTicket(
   accountId: string,
   role: SyncRole,
   subjectId: string,
-  env: Env
+  options: { env: Env; roomId?: string }
 ): Promise<{ ticket: string; expiresAt: number }> {
+  const { env, roomId } = options
   const now = Date.now()
   const ticket = randomToken()
   const expiresAt = now + TICKET_TTL_MS
   await env.DB.prepare(
-    `INSERT INTO session_ticket (token_hash, discord_user_id, role, subject_id, expires_at, consumed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`
+    `INSERT INTO session_ticket (token_hash, discord_user_id, role, subject_id, expires_at, consumed_at, created_at, room_id)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`
   )
-    .bind(await sha256(`${ticket}:${env.TICKET_SIGNING_KEY}`), accountId, role, subjectId, expiresAt, now)
+    .bind(await sha256(`${ticket}:${env.TICKET_SIGNING_KEY}`), accountId, role, subjectId, expiresAt, now, roomId ?? null)
     .run()
   return { ticket, expiresAt }
 }
@@ -65,11 +66,15 @@ export async function createDeviceSession(request: Request, env: Env): Promise<{
   if (!(await verifyDeviceSecret(deviceSecret, row.secret_hash, env.DEVICE_PEPPER))) {
     throw new HttpError(401, 'unauthorized', 'Device credentials are invalid or revoked')
   }
-  return createTicket(row.discord_user_id, 'publisher', deviceId, env)
+  return createTicket(row.discord_user_id, 'publisher', deviceId, { env })
 }
 
-export function createViewerSession(accountId: string, env: Env): Promise<{ ticket: string; expiresAt: number }> {
-  return createTicket(accountId, 'viewer', accountId, env)
+export async function createViewerSession(accountId: string, env: Env): Promise<{ ticket: string; expiresAt: number }> {
+  const membership = await env.DB.prepare(
+    `SELECT rm.room_id FROM room_member rm JOIN room r ON r.id = rm.room_id
+     WHERE rm.discord_user_id = ? AND rm.left_at IS NULL AND r.closed_at IS NULL`
+  ).bind(accountId).first<{ room_id: string }>()
+  return createTicket(accountId, 'viewer', accountId, { env, ...(membership === null ? {} : { roomId: membership.room_id }) })
 }
 
 export async function revokeDevice(accountId: string, deviceId: string, env: Env): Promise<void> {
@@ -88,10 +93,10 @@ export async function consumeTicket(ticket: string, env: Env, now = Date.now()):
   const row = await env.DB.prepare(
     `UPDATE session_ticket SET consumed_at = ?
      WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
-     RETURNING discord_user_id, role, subject_id, expires_at`
+     RETURNING discord_user_id, role, subject_id, expires_at, room_id`
   )
     .bind(now, tokenHash, now)
-    .first<{ discord_user_id: string; role: string; subject_id: string; expires_at: number }>()
+    .first<{ discord_user_id: string; role: string; subject_id: string; expires_at: number; room_id: string | null }>()
   if (row === null || (row.role !== 'publisher' && row.role !== 'viewer')) {
     throw new HttpError(401, 'unauthorized', 'WebSocket ticket is invalid or expired')
   }
@@ -105,6 +110,7 @@ export async function consumeTicket(ticket: string, env: Env, now = Date.now()):
   }
   return {
     accountId: row.discord_user_id,
+    ...(row.room_id === null ? {} : { roomId: row.room_id }),
     role: row.role,
     subjectId: row.subject_id,
     expiresAt: row.expires_at,

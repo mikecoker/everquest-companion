@@ -1,15 +1,15 @@
 # Discord cloud-sync deployment and threat model
 
-This is an operator runbook, not evidence that a production service exists. The repository ships
-placeholder Cloudflare ids and no secrets. Do not invite users until every release blocker below
-has been exercised against the intended production account.
+This is the operator runbook for the deployed companion service. Physical Cloudflare ids and
+secrets remain outside source control. Exercise every release blocker below before widening use.
 
 ## Trust boundaries
 
 ```text
 local EQ log -> trusted desktop model -> strict shared allowlist
              -> HTTPS/WSS internet boundary -> Worker control plane
-             -> per-Discord-user Durable Object -> authenticated Activity viewer
+             -> per-account Durable Object -> shared-room Durable Object
+             -> authenticated room members in the Activity
 ```
 
 The renderer is not trusted with the device secret. The Activity is not trusted to claim a Discord
@@ -25,13 +25,14 @@ single-use D1 ticket is consumed.
 | Accidental raw-log or arbitrary-object upload | Fresh allowlist parser, finite/integer checks, payload/string/list caps, no `LogEvent` transport                           | Keep protocol changes additive and review every new field as a privacy change.                                                  |
 | Stolen desktop credential                     | Salted+peppered server hash; OS-backed local encryption when available; secret never enters renderer/exports/telemetry     | Plaintext fallback is explicitly possible. Revoke the device; rotate `DEVICE_PEPPER` only with a forced re-pair plan.           |
 | Ticket replay or role swapping                | Random hashed ticket, 60-second expiry, atomic one-use consume, role/subject in signed DO handoff                          | Query strings can appear in infrastructure logs; disable query logging and keep access-log retention short.                     |
-| Cross-account room access                     | Room id derived from verified Discord account; signed handoff checked at DO boundary                                       | Test through the deployed Discord proxy, not only direct origin.                                                                |
+| Cross-room or unauthenticated access           | Discord-authenticated membership, hashed 12-character invite, exact-origin mutations, signed room handoff checked at DO boundary | Rotate a leaked invite and test isolation through the deployed Discord proxy.                                                |
+| Over-counted multiplayer damage                | Shared encounters sum only each publisher's self and owned-pet rows; observed party rows are excluded                     | Keep aggregation tests whenever combat rows change.                                                                             |
 | Forged/oversized publisher frames             | Shared parser at the Worker boundary, close/error on invalid input, publisher frame rate limit                             | Configure Worker request/CPU limits and monitoring before public use.                                                           |
-| Pair-code guessing/abuse                      | Hashed five-minute single-use codes, account and client-IP rate limits, collision retry                                    | Confirm the real proxy supplies a trustworthy client IP header; rate-limit storage currently needs cleanup.                     |
+| Pair-code guessing/abuse                      | Hashed five-minute single-use codes, account and client-IP rate limits, collision retry, bounded expired-row cleanup       | Confirm the real proxy supplies a trustworthy client IP header.                                                                  |
 | Revoked publisher remains live                | Ownership-checked D1 revoke plus awaited DO RPC; matching sockets close 4003; other devices stay live                      | Exercise multi-device revoke in production before invite.                                                                       |
 | Stale state presented as live                 | Explicit online/offline messages, Activity stale state, one-hour offline alarm deletion                                    | Alarm behavior must be observed after deployment and after a DO restart.                                                        |
-| Browser-session theft/CSRF                    | Signed 24-hour HttpOnly Secure partitioned cookie; JSON/preflight on credential-changing device routes; no permissive CORS | Add an explicit allowed-origin/CSRF policy once the final Discord proxy origin is known. Treat this as a public-launch blocker. |
-| Unbounded identity/control-plane retention    | Expired records are unusable and high-frequency state never enters D1                                                      | Periodic deletion of expired pairing/ticket/rate-limit rows and an account-erasure command are public-launch blockers.          |
+| Browser-session theft/CSRF                    | Signed 24-hour HttpOnly Secure partitioned cookie; configured exact-origin checks on every browser mutation; no permissive CORS | Set `ACTIVITY_ALLOWED_ORIGIN` to the final Discord proxy origin and verify it after URL mapping.                                |
+| Unbounded identity/control-plane retention    | Five-minute bounded cleanup of transient rows; authenticated account erasure removes D1 ownership rows and room state       | Monitor cleanup volume and exercise erasure against production bindings before invite.                                          |
 | Secret/config disclosure                      | Wrangler secrets, no secrets in Activity Vite variables, placeholder ids committed                                         | Scan built assets and Wrangler output before every deploy.                                                                      |
 
 ## Local clean-machine rehearsal
@@ -49,9 +50,13 @@ npm run build:cloud
 npm run deploy:cloud:dry
 ```
 
-The Worker test suite uses Cloudflare's local runtime. The Activity suite uses jsdom. A real
-Chromium Activity-to-local-Worker test is still required before public deployment; unit/component
-coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket behavior.
+The Worker test suite uses Cloudflare's local runtime and the Activity component suite uses jsdom.
+`npm run test:browser --prefix cloud` additionally launches one installed Chrome/Edge instance,
+applies D1 migrations to disposable local storage, and drives the actual Activity against a local
+Worker/Durable Object over HTTP and WebSockets. It covers pairing, live fan-out, bounded-field
+omission, desktop/narrow layout, offline/reconnect, and user-facing revocation. Discord OAuth is
+mocked only at its external HTTP/SDK boundary; the deployed Discord iframe/proxy still needs the
+portal verification below.
 
 ## Cloudflare preparation
 
@@ -63,7 +68,10 @@ coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket be
    Generate each signing key/pepper independently with a cryptographically secure generator.
 4. Set `ACTIVITY_COOKIE_DOMAIN` only when the final host requires it. An invalid value fails
    closed; an unnecessarily broad parent domain widens cookie scope.
-5. Apply `cloud/migrations/0001_initial.sql` to the production D1 database before first traffic.
+   Set `ACTIVITY_ALLOWED_ORIGIN` to the exact Discord proxy origin; browser mutations fail with
+   403 when it is configured and the `Origin` header is missing or different.
+5. Apply all migrations in `cloud/migrations/` to production D1 in order. Migration 0002 adds
+   shared rooms, memberships, and room-bound viewer tickets.
 6. Build the Activity, run Wrangler dry-run, inspect the asset bundle for secret strings, then
    deploy from a reviewed commit.
 7. Configure bounded Worker/access-log retention, alarms, and a cost ceiling.
@@ -80,9 +88,8 @@ coverage is not a substitute for Discord iframe, cookie, proxy, and WebSocket be
 
 ## Public-launch blockers
 
-- Add the real Chromium Activity + local/deployed Worker end-to-end test.
-- Implement and test D1 expiry cleanup and Discord-account erasure.
-- Set and test an explicit Discord proxy origin/CSRF policy.
+- Set the tested `ACTIVITY_ALLOWED_ORIGIN` control to the final Discord proxy origin.
+- Repeat the real-browser suite through Discord's deployed iframe/proxy.
 - Exercise secret rotation, device revoke, last-publisher offline, one-hour deletion, and a DO
   hibernation/restart.
 - Review the final privacy copy and retention values with the owner.

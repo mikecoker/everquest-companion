@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { SyncRoom } from '../../worker/SyncRoom'
 import { signValue } from '../../worker/crypto'
 import { consumeTicket } from '../../worker/deviceAuth'
-import { ACCOUNT_ID, jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
+import { ACCOUNT_ID, ACTIVITY_ORIGIN, jsonRequest, message, seedAccount, seedDevice, sessionCookie, TEST_STATE } from './helpers'
 
 beforeEach(async () => {
   await reset()
@@ -73,9 +73,13 @@ describe('SyncRoom authorization and protocol', () => {
     viewer.send(JSON.stringify({ version: 1, type: 'publish', state: TEST_STATE }))
     expect(await message(viewer)).toMatchObject({ type: 'error', code: 'invalid_message' })
     publish(publisher)
-    expect(await message(viewer)).toMatchObject({ type: 'state', revision: 1, state: TEST_STATE })
+    const first = await message(viewer)
+    expect(first).toMatchObject({ type: 'state', state: TEST_STATE })
+    expect(first.revision).toEqual(expect.any(Number))
     publish(publisher, { ...TEST_STATE, publishedAt: 2000 })
-    expect(await message(viewer)).toMatchObject({ type: 'state', revision: 2, state: { publishedAt: 2000 } })
+    const second = await message(viewer)
+    expect(second).toMatchObject({ type: 'state', state: { publishedAt: 2000 } })
+    expect(second.revision as number).toBeGreaterThan(first.revision as number)
     publisher.close()
     viewer.close()
   })
@@ -87,11 +91,12 @@ describe('SyncRoom authorization and protocol', () => {
     const firstViewer = await openViewer()
     await message(firstViewer)
     publish(publisher)
-    expect((await message(firstViewer)).revision).toBe(1)
+    const firstRevision = (await message(firstViewer)).revision as number
+    expect(firstRevision).toBeGreaterThan(0)
     firstViewer.close()
 
     const reconnect = await openViewer()
-    expect(await message(reconnect)).toMatchObject({ type: 'state', revision: 1, state: TEST_STATE })
+    expect(await message(reconnect)).toMatchObject({ type: 'state', revision: firstRevision, state: TEST_STATE })
     expect(await message(reconnect)).toMatchObject({ type: 'presence', online: true })
     publisher.close()
     reconnect.close()
@@ -120,7 +125,7 @@ describe('SyncRoom authorization and protocol', () => {
     const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${device.deviceId}`, {
         method: 'DELETE',
-        headers: { cookie: await sessionCookie() }
+        headers: { cookie: await sessionCookie(), origin: ACTIVITY_ORIGIN }
       })
     )
     expect(response.status).toBe(204)
@@ -147,13 +152,15 @@ describe('SyncRoom authorization and protocol', () => {
     const response = await exports.default.fetch(
       new Request(`https://worker.test/api/devices/${revokedDevice.deviceId}`, {
         method: 'DELETE',
-        headers: { cookie: await sessionCookie() }
+        headers: { cookie: await sessionCookie(), origin: ACTIVITY_ORIGIN }
       })
     )
     expect(response.status).toBe(204)
     expect((await closed).code).toBe(4003)
     publish(remainingPublisher)
-    expect(await message(viewer)).toMatchObject({ type: 'state', revision: 1 })
+    const liveState = await message(viewer)
+    expect(liveState.type).toBe('state')
+    expect(typeof liveState.revision).toBe('number')
     remainingPublisher.close()
     viewer.close()
   })
@@ -170,7 +177,9 @@ describe('hibernation and retention', () => {
 
     await evictDurableObject(stub)
     publish(publisher)
-    expect(await message(viewer)).toMatchObject({ type: 'state', revision: 1 })
+    const liveState = await message(viewer)
+    expect(liveState.type).toBe('state')
+    expect(typeof liveState.revision).toBe('number')
     const attachments = await runInDurableObject(stub, (_instance: SyncRoom, state) =>
       state.getWebSockets().map((socket) => socket.deserializeAttachment() as Record<string, unknown>)
     )
@@ -178,6 +187,7 @@ describe('hibernation and retention', () => {
     const firstAttachment = attachments[0]
     if (firstAttachment === undefined) throw new Error('Durable Object attachment was missing')
     expect(Object.keys(firstAttachment).sort()).toEqual([
+      'accountId',
       'bytes',
       'connectedAt',
       'messages',
@@ -258,7 +268,7 @@ describe('account erasure', () => {
     const cookie = await sessionCookie()
     const eraseRequest = (): Request => new Request('https://worker.test/api/me', {
       method: 'DELETE',
-      headers: { cookie }
+      headers: { cookie, origin: ACTIVITY_ORIGIN }
     })
     expect((await exports.default.fetch(eraseRequest())).status).toBe(204)
     expect(await publisherClosed).toMatchObject({ code: 4004, reason: 'Account deleted' })
@@ -300,7 +310,7 @@ describe('account erasure', () => {
     const cookie = await sessionCookie()
     const erased = await exports.default.fetch(new Request('https://worker.test/api/me', {
       method: 'DELETE',
-      headers: { cookie }
+      headers: { cookie, origin: ACTIVITY_ORIGIN }
     }))
     expect(erased.status).toBe(204)
     await evictDurableObject(room)

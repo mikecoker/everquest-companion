@@ -1,11 +1,10 @@
 # Discord Activity + Cloudflare live sync
 
-Status: Waves A-D integrated; Wave E hardening/deployment preparation is next
+Status: Private vertical slice deployed; shared-room multiplayer extension implemented and in validation
 
 Written: 2026-08-07
 
-Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`; E2E hardening:
-`d259683`)
+Resume point: `feature/discord-cloud-sync` on the `mikecoker` fork
 
 ## 0. Implementation progress
 
@@ -13,8 +12,8 @@ Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`
   publish messages carry no revision, and the server alone assigns broadcast revisions.
 - Wave B is integrated: `cloud/worker/**` implements the authenticated D1 + SQLite Durable Object
   relay, and `cloud/activity/**` implements the Discord Activity live view. The Worker suite runs
-  in the real Cloudflare Vitest pool (16 tests); the Activity has 18 jsdom component/transport
-  tests and a production Vite build.
+  in the real Cloudflare Vitest pool; the Activity has jsdom component/transport tests and a
+  production Vite build.
 - Cloudflare's current declarative Durable Object `exports` configuration is used instead of the
   legacy migration array. D1 still uses `cloud/migrations/0001_initial.sql`.
 - Root CI installs the isolated `cloud/package-lock.json` and gates cloud typecheck, strict lint,
@@ -28,13 +27,13 @@ Resume point: current `main` after this update (desktop lifecycle tip: `b6bfbd9`
   exact allowlist/exclusions, and the publisher is wired after replay, across character switches,
   settings changes, and quit. E2E mode refuses pairing and remains network-silent even when an
   enabled profile is seeded.
-- Merged-main verification is green for root typecheck, strict lint, 2,402 root tests (18 skipped),
-  Worker + Activity tests (34), both production builds, and Wrangler dry-run. All 21 Electron E2E
-  specs have passing evidence; the parallel gauntlet remains timing-sensitive in unrelated legacy
-  probes (the last run passed both cloud-sync and the repaired Sky/Leveling specs, with only the
-  performance probe's sub-500 ms sampling assertion red).
-- A real Chromium Activity + local Worker end-to-end pass remains Wave E work. No Cloudflare or
-  Discord resources have been deployed, and no production secrets or physical IDs are committed.
+- Wave E now includes bounded D1 cleanup, authenticated account/room erasure, a fresh-room handoff
+  race guard, exact configured-origin checks for browser mutations, Activity device/account
+  controls, and a serial real-Chromium Activity-to-local-Worker test. Current focused counts are
+  22 Worker tests, 19 Activity tests, and one real-browser vertical slice.
+- The private vertical slice was deployed and verified through Discord. The follow-up multiplayer
+  design adds authenticated, code-invited shared rooms, bounded encounter history, an Encounters-first
+  Activity, and per-player drill-down. Production secrets and physical IDs remain uncommitted.
 
 ## 1. Outcome
 
@@ -71,12 +70,14 @@ EverQuest log
    reinterpret EQ events.
 3. **Server owns revisions.** A Durable Object assigns the broadcast revision. A reconnect gets
    a full snapshot, so clients never need to repair an unbounded delta history.
-4. **One Durable Object per Discord user for MVP.** Channel/raid rooms are a later additive
-   capability. This keeps authorization and deletion semantics obvious.
+4. **Account relays feed explicit shared-room Durable Objects.** A Discord-authenticated user joins
+   one active room with a hashed high-entropy invite code. Owners can rotate or close it; members
+   can leave. A signed one-use ticket binds each Activity viewer to current D1 membership.
 5. **D1 stores control-plane data only.** Discord identities, device hashes, pairing codes,
    revocation, and session metadata belong in D1. High-frequency combat frames do not.
-6. **No history in MVP.** The latest state lives in Durable Object storage and expires. R2 or
-   summarized D1 encounter rows can be added only after retention controls exist.
+6. **Bounded room-session encounter history.** The room Durable Object keeps at most 25 current or
+   completed encounter summaries. It never stores the combat event stream, and closing the room
+   wipes the summaries. Aggregation sums only each publisher's self and owned-pet rows.
 7. **Two transports, one renderer-facing seam.** Existing desktop views continue over Electron
    IPC. The Activity consumes the cloud transport. Do not teach browser code about Electron.
 8. **Opt-in and closed by default.** No endpoint or credentials means disabled. E2E mode never
@@ -443,8 +444,8 @@ main. Add an e2e assertion that sync is off and network-silent by default, plus 
 
 ## 10. Resume commands
 
-Start the next session from a clean `main` and proceed with Wave E. Keep deployment rehearsal local
-until the owner supplies/authorizes Discord and Cloudflare resources:
+Start from the fork feature branch. Keep deployment rehearsal local until the owner
+supplies/authorizes Discord and Cloudflare resources:
 
 ```powershell
 cd D:\projects\everquest-companion

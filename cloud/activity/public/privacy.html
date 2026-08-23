@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b1120" />
+    <meta name="robots" content="index,follow" />
+    <title>Privacy Policy — EQ Legends Live</title>
+    <link rel="stylesheet" href="/legal.css" />
+  </head>
+  <body>
+    <main>
+      <p class="meta"><a href="/">EQ Legends Live</a></p>
+      <h1>Privacy Policy</h1>
+      <p class="meta">Effective August 8, 2026</p>
+      <p class="lede">EQ Legends Live is an opt-in companion view for the EQ Legends Companion desktop application. This policy explains what the cloud service processes, why, and how you can delete it.</p>
+
+      <h2>Data we process</h2>
+      <ul>
+        <li><strong>Discord identity:</strong> your Discord user ID, username, display name, and optional avatar URL, obtained with the <code>identify</code> OAuth scope.</li>
+        <li><strong>Paired devices:</strong> a random device ID, the label shown in account controls, creation and revocation times, and a salted and peppered hash of the device secret. The service does not retain the original secret.</li>
+        <li><strong>Derived EverQuest companion state:</strong> character name and ID, server, up to three detected classes, optional level and zone, a compact current-combat summary, leveling pace and ETA when available, and up to ten recent kills and loot entries.</li>
+        <li><strong>Short-lived security records:</strong> hashed pairing codes, hashed single-use connection tickets, request counts, reset times, and client IP addresses embedded in short-lived rate-limit keys.</li>
+        <li><strong>Infrastructure metadata:</strong> Cloudflare and Discord may process ordinary request, network, device, and diagnostic metadata while hosting and proxying the Activity.</li>
+      </ul>
+
+      <div class="notice"><strong>We do not upload raw EverQuest log lines, chat, tells, guild or group messages, local file paths, machine usernames, inventory dumps, map data, settings exports, alert text, or audio.</strong></div>
+
+      <h2>How we use data</h2>
+      <p>We use this data only to authenticate you, manage shared rooms and invite codes, pair and revoke desktop devices, relay validated companion snapshots to authenticated members of your room, build a bounded shared encounter summary, prevent abuse, diagnose service failures, and honor deletion requests. We do not sell personal data, serve targeted advertising, or build advertising profiles.</p>
+
+      <h2>Who receives data</h2>
+      <p><strong>Other room members</strong> can see your Discord display identity, online status, allowlisted companion snapshot, and your character's contribution to shared encounters after they join the same room with its invite code. <strong>Cloudflare</strong> hosts the Worker, D1 database, Durable Objects, assets, and network edge. <strong>Discord</strong> provides OAuth, the Activity iframe, and the Activity proxy, so Activity traffic may pass through Discord infrastructure. We do not intentionally disclose your data to other third parties except when required by law or necessary to protect users and the service.</p>
+
+      <h2>Retention</h2>
+      <ul>
+        <li>Each account's latest derived snapshot is deleted one hour after its last paired desktop disconnects.</li>
+        <li>An open shared room retains its member roster, each member's latest shared snapshot, and at most 25 active or completed encounter summaries. The room owner can close the room to erase its Durable Object state; account deletion also removes that account's membership and state.</li>
+        <li>The browser session cookie expires after 24 hours; no corresponding server-side session row is stored.</li>
+        <li>Pairing codes expire after five minutes. Connection tickets expire after 60 seconds. Both are single-use.</li>
+        <li>Expired pairing, ticket, and rate-limit records are removed in bounded cleanup batches scheduled every five minutes.</li>
+        <li>Discord account and paired-device rows remain until you choose <strong>Delete cloud account</strong>. Room and membership rows remain until members leave, the owner closes the room, or the owning account is deleted.</li>
+        <li>Cloudflare and Discord may retain infrastructure metadata according to their own policies and configured service settings.</li>
+      </ul>
+
+      <h2>Your controls</h2>
+      <p>Desktop publishing is off until you pair a device and enable it. You can disable publishing, forget local credentials, revoke individual desktops, leave a shared room, rotate a room invite code, close a room you own, or delete your cloud account. A room code grants authenticated Discord users membership, so share it only with people you want to receive the room's data. Account deletion removes your account-owned rows, closes your connections, and removes your room contribution. You may also contact us for help with access or deletion.</p>
+
+      <h2>Cookies and security</h2>
+      <p>The Activity uses a signed, 24-hour, Secure, HttpOnly, SameSite=None, partitioned cookie for authentication. Connection tickets are short-lived and single-use. Payloads are bounded and reconstructed from a strict allowlist. No system is perfectly secure, but we limit the data collected and use access controls, encrypted transport, credential hashing, device revocation, and automatic expiry.</p>
+
+      <h2>Children</h2>
+      <p>The service is not directed to anyone below the minimum age required to use Discord in their country. Do not use the service if you are not permitted to use Discord.</p>
+
+      <h2>Changes</h2>
+      <p>We may update this policy as the service changes. The effective date above will be revised when material changes are published.</p>
+
+      <h2>Contact</h2>
+      <p>Questions or privacy requests can be submitted through the <a href="https://github.com/mikecoker/everquest-companion/issues">EQ Legends Companion issue tracker</a>. Avoid including private game logs, pairing codes, device secrets, or other sensitive information in a public issue.</p>
+      <p class="meta"><a href="/terms.html">Terms of Service</a></p>
+    </main>
+  </body>
+</html>

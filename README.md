@@ -25,8 +25,8 @@ off logging, the app simply has nothing to show.
 - **Sound alerts** — play a sound when something happens: a charm break, a buff fading,
   a raid target dying, or any log line you write a rule for. Voice packs included.
 - **Discord live view (opt-in)** — pair this desktop with the companion Discord Activity to
-  share a small live dashboard. It sends derived character/combat/progression summaries only,
-  never raw log lines or chat, and starts disabled.
+  contribute to a shared room. Room members see combined active/recent encounters and can inspect
+  each connected player's allowlisted dashboard. It never sends raw log lines or chat and starts disabled.
 
 Everything is per-character; switch characters and the app re-reads that log.
 

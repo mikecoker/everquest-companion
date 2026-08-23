@@ -11,10 +11,11 @@
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc",
     "dev:activity": "vite --config activity/vite.config.ts",
     "dev:worker": "wrangler dev --config wrangler.jsonc",
-    "test": "npm run test:worker && npm run test:activity",
+    "test": "npm run test:worker && npm run test:activity && npm run test:browser",
     "test:activity": "vitest run --config activity/vitest.config.ts",
+    "test:browser": "npm run build && vitest run --config browser-e2e.vitest.config.ts --maxWorkers=1",
     "test:worker": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p activity/tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p activity/tsconfig.json --noEmit && tsc -p browser-tsconfig.json --noEmit"
   },
   "dependencies": {
     "@discord/embedded-app-sdk": "2.5.0",

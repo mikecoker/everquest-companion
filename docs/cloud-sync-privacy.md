@@ -7,7 +7,9 @@ publishing even if an enabled profile is seeded.
 
 ## What is published
 
-The desktop builds one bounded `CloudSyncState` and validates it before sending. Protocol v1 can
+The desktop builds one bounded `CloudSyncState` and validates it before sending. Authenticated
+Discord users may create or join a shared room with a high-entropy invite code. Every active room
+member can see each member's latest allowlisted state. Protocol v1 can
 contain only:
 
 - publication time;
@@ -21,7 +23,9 @@ The shared parser rejects oversized payloads, strings and lists, invalid numbers
 versions, and malformed objects. It constructs a fresh allowlisted object, so extra and
 prototype-shaped properties do not cross the boundary.
 
-The protocol has no field for raw log lines, chat, tells, guild/group messages, file paths,
+Shared encounter totals count only each publisher's `self` and owned-`pet` rows. This prevents
+the same observed party damage from being counted again by every player's log. The protocol has
+no field for raw log lines, chat, tells, guild/group messages, file paths,
 machine/user names, settings exports, map data, inventory dumps, alert text, audio, or the
 event-by-event combat stream. Cloudflare relays the validated snapshot; it does not receive the
 source log or reinterpret EQ events.
@@ -42,15 +46,12 @@ the long-lived device secret. Pairing codes expire after five minutes and are si
 
 | Data                                                      | Current lifetime                                                                                                                                   |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Latest derived snapshot in the per-account Durable Object | Deleted by alarm one hour after the last publisher goes offline. There is no encounter history.                                                    |
+| Latest derived snapshot in the per-account Durable Object | Deleted by alarm one hour after the last publisher goes offline.                                                                                |
+| Shared-room state and encounter summaries                 | An open room retains the roster, latest member states, and at most 25 encounter summaries. Closing the room wipes its Durable Object state.       |
 | Browser session cookie                                    | 24 hours in the browser; the server keeps no session row for it.                                                                                   |
-| Pairing codes and WebSocket tickets                       | Unusable after five minutes / 60 seconds respectively, or immediately after first use. Their hashed D1 rows are not yet periodically purged.       |
-| Rate-limit buckets                                        | Stop affecting requests after their reset time; expired rows are not yet periodically purged.                                                      |
-| Discord account and device rows                           | Kept until an operator deletion path is run. Revocation timestamps a device and disconnects that publisher immediately; it does not erase the row. |
-
-The unbounded D1 rows are limitations, not target policy. Before a public deployment, the operator
-must add and verify bounded D1 cleanup plus an account-deletion procedure; the deployment runbook
-treats that as a release blocker.
+| Pairing codes and WebSocket tickets                       | Unusable after five minutes / 60 seconds respectively, or immediately after first use. A five-minute scheduler removes expired hashed rows in bounded 100-row batches. |
+| Rate-limit buckets                                        | Stop affecting requests after their reset time and are removed by the same bounded cleanup scheduler.                                             |
+| Discord account, room membership, and device rows         | Kept until the user leaves/closes the room or chooses **Delete cloud account**. Device revocation timestamps one device.                          |
 
 ## Controls
 
@@ -60,6 +61,13 @@ treats that as a release blocker.
 - **Revoke in the Activity** marks the selected server-side device revoked, closes only that
   device's live publisher with code 4003, broadcasts offline state when it was the last publisher,
   and refuses its future sessions.
+- **Leave room** removes a non-owner's membership and contribution. **Close room** is the owner's
+  deletion control: it invalidates the invite, removes every membership, closes room viewers, and
+  wipes the shared roster, snapshots, and encounter summaries. The owner may rotate the invite
+  code without closing the room.
+- **Delete cloud account** requires an explicit second confirmation, removes every account-owned
+  control-plane row, closes all room sockets with code 4004, and deletes the room alarm/storage.
+  A deleted account cannot reuse a previously consumed WebSocket handoff.
 
 No Cloudflare or Discord production resources are included in source control, and the committed
 configuration contains only placeholder physical ids.

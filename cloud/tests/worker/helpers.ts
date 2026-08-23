@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers'
 import { signValue, hashDeviceSecret, randomToken } from '../../worker/crypto'
 
 export const ACCOUNT_ID = '123456789012345678'
+export const ACTIVITY_ORIGIN = 'https://activity.test'
 
 export async function seedAccount(accountId = ACCOUNT_ID): Promise<void> {
   await env.DB.prepare(
@@ -34,7 +35,7 @@ export async function seedDevice(accountId = ACCOUNT_ID): Promise<{ deviceId: st
 }
 
 export function jsonRequest(path: string, body: unknown, cookie?: string): Request {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  const headers: Record<string, string> = { 'content-type': 'application/json', origin: ACTIVITY_ORIGIN }
   if (cookie !== undefined) headers.cookie = cookie
   return new Request(`https://worker.test${path}`, { method: 'POST', headers, body: JSON.stringify(body) })
 }

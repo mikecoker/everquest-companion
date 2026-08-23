@@ -80,3 +80,7 @@ crash.*.log
 # any log slice `triage-feedback show` downloads. Those slices are a user's own
 # game log; they are read locally and never enter git or a public issue.
 .triage/
+
+# Wrangler local runtime state and generated development bundles.
+cloud/.wrangler/
+cloud/wrangler.production.jsonc
