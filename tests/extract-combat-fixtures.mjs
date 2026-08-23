@@ -250,6 +250,63 @@ slice(1256800, 1259658, 'w44-foreign-charm-player-hostile.log')
 //             owner as PET damage, which is exactly what must survive the gating.
 slice(213988, 214240, 'w45-owner-charm-bind.log')
 
+// ---------------------------------------------------------------------------
+// ALLY CHARM (JOS-250) — the three windows behind "whose pet is that, when it is not yours?"
+//
+// W44 above is the fourth, and it is the one that changed meaning: `Scooba begins casting
+// Allure VII.` was already in it, one second before each broadcast, and JOS-250 is what finally
+// reads it. These three are the shapes W44 does not carry — a clean credit, a same-named twin,
+// and a two-caster tie — cut from the same real log at the three instants the whole-log sweep
+// found them. Whole-log measurement (1,608,483 lines, 2026-08-12, through the SHIPPED roster and
+// arm window): 456 charm broadcasts, 441 the owner's own, 15 a NAMED third party's, 0 unmatched,
+// 0 resolving both.
+// ---------------------------------------------------------------------------
+
+// W66 AN ALLY'S CHARM PET IS CREDITED, THEN PROVES ITS OWN BREAK (Fri Jul 31 20:05:40 →
+// 20:06:35, raw 741548..741690). The cleanest of the fifteen, and it carries three of the four
+// bind/unbind ends in fifty seconds:
+//   20:05:57  `Gordon begins casting Cajoling Whispers III.`  (DB cast time 5,500 ms)
+//   20:05:58  `an imp protector has been charmed.`   → +1s, inside the arm: BIND to Gordon.
+//   20:05:59→ the imp fights `a lava guardian` — the mob-vs-mob damage the meter has always
+//             dropped, now Gordon's row.
+//   20:06:05  `An imp protector hits Gordon for 8 points of damage.` — SOFT-HOSTILE PROOF. The
+//             pet turned on its own charmer, so the charm is over at that instant and nothing
+//             after it is credited. (Its swing-and-miss at Gordon in the same second is the
+//             same proof; whichever the model reads first ends the bind.)
+//   20:06:12  `Gordon begins casting Cajoling Whispers III.` again
+//   20:06:14  `an imp protector has been charmed.`   → RE-CHARM: the same name, the same
+//             charmer, a fresh bind and a fresh hold, and the crediting resumes.
+// The owner is not fighting in this window at all, which is the point of choosing it: every
+// number in it belongs to somebody else and none of it may touch his.
+slice(741548, 741690, 'w66-ally-charm-credited-and-broken.log')
+
+// W67 A SAME-NAMED TWIN MAKES THE NAME UNREADABLE (Thu Jul 30 18:27:08 → 18:27:36, raw
+// 508140..508430) — the rock-golem episode the investigation named, and the canonical fixture
+// for the twin refusal:
+//   18:27:12  `Enzee begins singing Solon's Bewitching Bravura III.`  — a BARD charm, whose
+//             landing sentence is `Someone 's eyes glaze over.` and which therefore cannot be
+//             what a `has been charmed.` broadcast resolved (JOS-200's standing cost). It must
+//             not arm the join, or every enchanter binding beside a bard becomes a tie.
+//   18:27:12  `President begins casting Cajoling Whispers V.`
+//   18:27:15  `A rock golem cleaves a rock golem for 128 points of damage.` — the twin is
+//             ALREADY swinging, one second before the broadcast.
+//   18:27:16  `a rock golem has been charmed.`   → binds to President (the only eligible cast)
+//   18:27:17  `A rock golem pierces a rock golem for 102 points of damage.` — and the name is
+//             ambiguous from that line forward. The window continues that way for its whole
+//             length, so the honest credit is ZERO.
+slice(508140, 508430, 'w67-ally-charm-same-named-twin.log')
+
+// W68 TWO CASTERS, ONE MOB, ONE SECOND APART (Fri Jul 31 21:13:09 → 21:13:20, raw
+// 747240..747300) — the ONLY multi-caster tie in the whole log, and therefore the only sample
+// the refusal has:
+//   21:13:12  `Paladrial begins casting Cajoling Whispers III.`
+//   21:13:13  `Satya begins casting Cajoling Whispers III.`     — same spell, same target
+//   21:13:14  `a lava duct crawler has been charmed.`  → BOTH arms contain it, and nothing in
+//             the log separates them. REFUSE: a coin flip credited to a named person is worse
+//             than silence. The crawler then fights a sonic bat for the rest of the window,
+//             which is exactly the damage a guess would have handed to whichever name won.
+slice(747240, 747300, 'w68-ally-charm-multi-caster-tie.log')
+
 // W37 DISPEL VARIANTS ARE NOT A ROGUE PROC (Mon Aug 03 00:38:18 → 00:40:02, raw
 // 1095620..1096030) — the Efreeti Lord Djarn kill, cut because it is the densest dispel
 // window in the log and because it sits BEFORE the poison session (the first coat is at
@@ -429,3 +486,66 @@ slice(1142851, 1142980, 'w57-ranged-lane.log')
 // throughout, slaying one at 16:09:42 and another at 16:09:57, so the span is a clean fight of
 // his own with a real critical bow shot landing beside it.
 slice(1438572, 1438700, 'w58-ranged-critical.log')
+
+// ---------------------------------------------------------------------------
+// W61 A CC HOLD SPEAKS FOR AN ENGAGED HOSTILE — NOT FOR YOUR OWN PET (JOS-176). The owner's
+// Fused Hate run, Sun Aug 09: the Grandmaster R`tal encounter OPENED at 20:10:02, seventy-eight
+// seconds before the pull, so the boss fight's meter carried the whole preceding twin skirmish.
+//
+// The shape only exists because in the Plane of Hate the owner's CHARMED PET and the mobs he is
+// killing share one name — `Innoruuk`s Chosen` — so the world model holds a charmed instance and
+// hostile twins under one nameKey, and a CC line naming that name resolves to whichever instance
+// is live. Two spans, because the pet is bound six minutes before the window and a combat-only
+// cut cannot establish it (the same prime-then-window arrangement W35 → W36 uses).
+// ---------------------------------------------------------------------------
+
+// W61 PRIME (Sun Aug 09 20:02:45 → 20:03:17, raw 1502972..1503072) — the charm bind, nothing
+// else. `You begin casting Allure VI.` at 20:02:58, `Innoruuk`s Chosen has been charmed.` at
+// 20:03:02 (inside the arm, so the ownership gate BINDS it), and the pet's own claim tell
+// `Innoruuk`s Chosen told you, 'Attacking Coercer T`vala Master.'` at 20:03:17 confirming it.
+// The span opens on the zone line, so the replay starts from an empty world model.
+slice(1502972, 1503072, 'w61-twin-mez-prime.log')
+
+// W61 THE WINDOW (Sun Aug 09 20:08:50 → 20:11:59, raw 1505971..1507053). Hand-read beats:
+//   20:08:50  `Master of Spite has been slain by Innoruuk`s Chosen!` — a clean start: the
+//             previous pull is over and 15s of quiet follow, so the skirmish below provably
+//             opens its own encounter.
+//   20:09:05  the twin skirmish opens (`You bash Innoruuk`s Chosen for 4 points of damage.`) —
+//             a HOSTILE `Innoruuk`s Chosen`, spawned as gen 2 beside the charmed gen 1.
+//   20:09:18  `Innoruuk`s Chosen has been mesmerized.` — the owner's own mez, which correctly
+//             resolves to the HOSTILE twin (gen 2) and opens a 120s hold on it.
+//   20:09:50  `Innoruuk`s Chosen has been slain by Innoruuk`s Chosen!` — gen 2 dies, and its
+//             hold is cleared by the death path (88s of it still unexpired).
+//   20:10:02  `Your Dazzle spell has worn off of Innoruuk`s Chosen.` — a CC REFRESH (JOS-161:
+//             the caster-only wear-off line parses as `cc {refresh:true}`), and by now NO
+//             hostile twin is live, so it resolves to the only remaining instance of that
+//             name: THE OWNER'S OWN PET. It opens an encounter and stamps a hold on the pet
+//             until 20:12:02.
+//   20:10:38  the second twin (gen 3, spawned right after) is slain. Every engaged hostile is
+//             now gone and the fight should close five seconds later.
+//   20:10:43→ 46 SECONDS OF SILENCE. The pet's hold vetoed the death-close for all of it.
+//   20:11:20  the pet re-tells (`Attacking Grandmaster R`tal Master.`) and at 20:11:24 R`tal
+//             lands the pull's first blows — which, pre-fix, joined the 20:10:02 encounter.
+// The window stops at 20:11:59, six seconds before the charm breaks and the pet turns on the
+// owner: everything after that is a different story and none of it is load-bearing here.
+slice(1505971, 1507053, 'w61-twin-mez-skirmish.log')
+
+// ---------------------------------------------------------------------------
+// W71 A RAIN CAST IS ONE CAST, NOT A CAST PLUS TWO PROCS (JOS-414, GitHub issue 39).
+// ---------------------------------------------------------------------------
+// The reporter's screenshot showed `Lava Storm` and `Lava Storm · proc` as two rows of one
+// fight. The owner casts no Lava Storm, but he casts `Poison Storm` 86 times — the same
+// mechanic and the same wave shape — and this is the tightest span carrying one clean cast.
+//
+// Thu Aug 13 14:50:09 → 14:50:30, raw 1668894..1668989. Hand-read beats:
+//   14:50:09  `You have slain a shin ghoul knight!` — the previous kill, so the fight below
+//             provably opens its own encounter.
+//   14:50:19  `You begin casting Poison Storm.`
+//   14:50:20  wave 1 — 61
+//   14:50:23  wave 2 — 61   <- the cast record already claimed 14:50:20, so before JOS-414
+//   14:50:26  wave 3 — 61   <- this pair scored `proc` and opened a `Poison Storm · proc` lane
+//   14:50:30  the knight dies; the span stops before the next pull (14:50:53) and before the
+//             one general-chat line at 14:50:43, which the shared scrub drops anyway.
+// One target throughout, so the three lines are three WAVES and nothing else — the AE breadth
+// half of the mechanic is covered by the synthetic N x M cast in the test.
+slice(1668894, 1668989, 'w71-rain-waves.log')

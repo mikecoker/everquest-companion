@@ -12,9 +12,12 @@
 //   [Wed Jul 29 15:05:14 2026] You strike a frenzied ghoul for 32 points of damage. (Critical)
 //   [Wed Jul 29 15:05:14 2026] You have become better at Dragon Punch! (84)
 //
-// The damage was always COUNTED — `meleeSkill('strike')` answers "Melee", so it folded into the
-// anonymous melee lane and no Dragon Punch row could ever exist. This module supplies the
+// The damage was always COUNTED — `meleeSkill('strike')` answered "Melee" then, so it folded into
+// the anonymous melee lane and no Dragon Punch row could ever exist. This module supplies the
 // missing half: the log's own statement of which special is live, joined to the swing by VERB.
+// (JOS-163 later gave the verb its own neutral floor — `meleeSkill('strike')` answers "Strike"
+// now — so an unnamed strike is no longer pooled with slash/crush/hit. That changed the FLOOR;
+// this module is still the only thing that can put a NAME on the lane, and it still wins.)
 //
 // ── THE LANES, AND WHY EXACTLY THESE TWO ────────────────────────────────────────────────────
 //
@@ -38,6 +41,47 @@
 //     and the Flying Kick ticks stopped dead while Kick ticks resumed. Same bug as Dragon Punch,
 //     one lane over — a Flying Kick monk's damage reads "Kick" today.
 //
+// ── THE IKSAR ARM OF THE STRIKE LANE (JOS-102, user report 01KZGADDMWEGAVPX9V95F8H4Y2) ──────
+//
+// "Tail Rake is missing from the DPS overview." It is the SAME BUG AS DRAGON PUNCH, one RACE
+// over, and it lands here rather than in `meleeSkill()` — which is worth saying plainly, because
+// the obvious reading of the report ("tail rake is a monk skill like kick and bash, so give it a
+// verb") would have added a `tail rake` alternation to MELEE_VERBS and named a lane the game has
+// never printed. THERE IS NO `tail rake` VERB. Tail Rake is an upgraded special, so like every
+// other entry in this table it lands as the generic `strike`, and the ONLY line that names it is
+// the state line:
+//
+//   You will now use Tail Rake instead of Eagle Strike while attacking.
+//
+// WHY IT GOES IN THE `strike` CHAIN AND NOWHERE ELSE — three independent sources agreeing:
+//   1. The committed class table (src/main/data/classes.json, scraped, not authored) grants
+//      `Tail Rake` to MNK at level 25 — the SAME class and the SAME level as `Dragon Punch`.
+//      A shared level in a chain whose other rungs are 10/20/25 is a race variant of one rung,
+//      not a fourth rung. (`classTables.test.mts` pins both facts.)
+//   2. The EQ Legends wiki states the identical sentence for both: Dragon Punch "replaces Eagle
+//      Strike as the Monk special punch attack", and "Iksar Monks get Tail Rake instead" — same
+//      slot, same displaced special, same level, same cap.
+//   3. The refusal test this module already applies: an entry earns its row only when the
+//      generic verb it rides is EXCLUSIVE to the chain. `strike` passed that test in wave T on
+//      the owner's own bytes (his first-ever `You strike` is three seconds after his Tiger Claw
+//      grant), and Tail Rake inherits it by occupying a seat in that chain rather than opening a
+//      new lane — no new verb is claimed, so the exclusivity evidence does not have to be re-won.
+//
+// THE OWNER IS NOT AN IKSAR, AND THIS IS THE INJECTED ARM. `tail rake` is ZERO in all three of
+// his logs and in all 103 committed fixtures, in every casing, while `better at Dragon Punch!`
+// ticks 255 times — the human arm of the very same chain. So no fixture can be cut for this and
+// a reporter's slice never becomes one (AGENTS.md); `tests/combatTailRakeLane.test.mts` injects
+// the state line instead, the petClaimWindows / mobLifetapPlayer / JOS-92 precedent, built by
+// taking the owner's OWN verbatim Dragon Punch state line and swapping the race-variant name —
+// the same "swap the name in an attested sentence" move those tests make. What is attested and
+// what is constructed is written out in that file's header.
+//
+// That also makes law 8 trivially provable and the proof was run: every committed fixture
+// replayed before and after (1,102 rows — per-segment out/in, per (source, category), per
+// (source, lane)) came back BYTE-IDENTICAL. Nothing could move, because membership in this table
+// does nothing until a `You will now use Tail Rake …` line is read, and no line in the tree says
+// that. The behaviour is proven by the injection test instead.
+//
 // ── THE LANE THAT DID *NOT* EARN A ROW (this is the point of measuring) ──────────────────────
 //
 // `You will now use Slam instead of Bash while attacking.` is a real state line and Slam NEVER
@@ -59,9 +103,17 @@
 // relabelled Dragon Punch swings "Tiger Claw". State comes from the state line (law 1).
 //
 // PRE-STATE IS HONEST BY OMISSION. Until a `You will now use` line has been seen for a lane,
-// this module returns nothing and the parser's ordinary `meleeSkill()` answer stands — "Melee"
+// this module returns nothing and the parser's ordinary `meleeSkill()` answer stands — "Strike"
 // for a strike, "Kick" for a kick. It never seeds a lane from the table's first entry, so it
 // cannot claim a special the log has not stated the character has.
+//
+// THAT OMISSION USED TO COST THE ROW ENTIRELY, AND NOW IT ONLY COSTS THE NAME (JOS-163). The
+// state line prints ONCE, at the level-up, so a log file that begins after it — fresh install,
+// rotation, `/log on` enabled later — never contains it, and before JOS-163 that meant every
+// strike a monk ever threw read "Melee" forever. `meleeSkill()` now answers "Strike" for the
+// bare verb, so the lane exists on its own evidence and this module upgrades it to the real
+// ability name whenever the log does state one. The refusal above is unchanged and load-bearing:
+// the floor is the VERB, never the table's first entry.
 //
 // SELF ONLY. The state line has no third-person grammar (a full-log sweep found zero `now use`
 // lines that are not `You will now use`), so nothing here can ever be known about a mob, a pet
@@ -75,9 +127,14 @@ import type { SpecialAttackEvent } from '../../shared/logEvents'
  * behind each row and for the shield lane that is deliberately absent. Order is the observed
  * progression; nothing reads it as an ordering today, and NOTHING may use it to guess the next
  * special — membership is the whole contract.
+ *
+ * `Tail Rake` (JOS-102) shares Dragon Punch's SEAT rather than following it: both are MNK level
+ * 25 in the class table and both displace Eagle Strike, so the strike chain is four names and
+ * three rungs. Since nothing reads the order, listing it last states the race variant without
+ * implying a fourth upgrade.
  */
 const LANES: Readonly<Record<string, readonly string[]>> = {
-  strike: ['Tiger Claw', 'Eagle Strike', 'Dragon Punch'],
+  strike: ['Tiger Claw', 'Eagle Strike', 'Dragon Punch', 'Tail Rake'],
   kick: ['Kick', 'Round Kick', 'Flying Kick']
 }
 
@@ -145,4 +202,5 @@ export class SpecialAttacks {
   reset(): void {
     this.active.clear()
   }
+
 }

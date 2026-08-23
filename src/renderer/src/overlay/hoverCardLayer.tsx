@@ -1,8 +1,9 @@
 // hoverCardLayer — places a feed hover card near its anchor and clamps it inside the overlay
 // window. Plain React + inline styles; the overlay bundle stays MUI-free.
 
-import { type JSX, useLayoutEffect, useRef, useState } from 'react'
+import { type JSX, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { overlayCssZoom } from './overlayScale'
+import { onOverlayPointerExit } from './pointerExit'
 
 /** Gap the hover card keeps from its anchor AND from every window edge. */
 const CARD_MARGIN = 4
@@ -33,10 +34,29 @@ interface Placement {
  * `pointerEvents: none` is load-bearing: the card has nothing to click (no links, no nested
  * hover), and a card that took the pointer while overlapping its own anchor would fire the
  * anchor's mouseleave, unmount itself, and flicker.
+ *
+ * IT ALSO LEAVES WITH THE POINTER, EVEN WHEN THE ROW IS NEVER TOLD (JOS-358). This card IS the
+ * feature — it survived the tooltip sweep — but it is orphaned by the same missing leave a native
+ * tooltip is: it mounts on the row's `mouseenter` and unmounts on the row's `mouseleave`, and an
+ * always-on-top window whose cursor jumps onto the game need never see that second event. So it
+ * subscribes to the ONE definition of "the pointer left this window" (overlay/pointerExit.ts)
+ * rather than growing a second opinion, and `onDismiss` is the owning row's own close path — this
+ * layer never unmounts itself behind the state that mounted it.
  */
-export function HoverCardLayer({ anchor, children }: { anchor: HTMLElement; children: React.ReactNode }): JSX.Element {
+export function HoverCardLayer({
+  anchor,
+  onDismiss,
+  children
+}: {
+  anchor: HTMLElement
+  /** the anchor row's own "no card" setter — the same one its `mouseleave` calls. */
+  onDismiss: () => void
+  children: React.ReactNode
+}): JSX.Element {
   const ref = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState<Placement | null>(null)
+
+  useEffect(() => onOverlayPointerExit(onDismiss), [onDismiss])
 
   useLayoutEffect(() => {
     const el = ref.current

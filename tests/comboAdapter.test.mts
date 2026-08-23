@@ -9,7 +9,8 @@
 //       1. an AMBIGUOUS slot prints its candidate SET (`CLR|PAL`) and never picks a member —
 //          the real log has spans where CLR is never exclusively evidenced, so "PAL" there
 //          would be fabricated;
-//       2. an UNKNOWN slot prints an em-dash — not a class, not a blank, not a zero;
+//       2. an UNKNOWN slot prints a dash (JOS-106: a normal one) — not a class, not a blank,
+//          not a zero;
 //       3. a fuzzy boundary prints a WINDOW, because a loadout swap writes nothing to the log
 //          and the events bracketing it can be a day and a half apart.
 //
@@ -36,6 +37,8 @@ import {
   overruledText,
   slotKind,
   slotLabel,
+  spanText,
+  spansText,
   startFuzzMs,
   startFuzzText
 } from '../src/renderer/src/features/profiles/ClassComboLabels'
@@ -98,7 +101,7 @@ test('an ambiguous slot prints the SET and never picks a member', () => {
   assert.ok(!/^PAL$/.test(slotLabel(s)))
 })
 
-test('an unknown slot prints an em-dash — empty and whole-roster both', () => {
+test('an unknown slot prints a dash — empty and whole-roster both', () => {
   assert.equal(slotKind(slot([])), 'unknown')
   assert.equal(slotLabel(slot([])), NONE)
   assert.equal(slotKind(slot([...CLASS_ABBRS])), 'unknown')
@@ -174,6 +177,27 @@ test('an exact boundary has no ~ annotation; a fuzzy one states its window', () 
   assert.match(text, /classes showing up in the log changed/)
 })
 
+test('a merged span states its bracket AND that it took more than one range (JOS-236)', () => {
+  // The raid roster draws ONE section per loadout, so a header can cover stretches with holes
+  // between them. Earliest start → latest end is the only true bracket; alone it would claim the
+  // hours in between, so the number of ranges is part of the sentence.
+  const early = interval({ id: 'ci1', startTs: T0, endTs: T0 + HOUR })
+  const late = interval({ id: 'ci3', startTs: T0 + 5 * HOUR, endTs: T0 + 6 * HOUR })
+
+  assert.equal(spansText([]), '', 'nothing to bracket, so no bracket is invented')
+  assert.equal(spansText([early]), spanText(early), 'one range prints exactly what it always did')
+
+  const merged = spansText([early, late])
+  assert.match(merged, /2 ranges/)
+  assert.ok(merged.startsWith(spanText(early).split(' →')[0]), 'it opens at the EARLIEST start')
+  assert.ok(merged.includes(spanText(late).split('→ ')[1]), 'and closes at the LATEST end')
+  // Order of the members must not change the answer.
+  assert.equal(spansText([late, early]), merged)
+
+  // One open member makes the union open: it is still running now.
+  assert.match(spansText([early, interval({ id: 'ci3', startTs: T0 + 5 * HOUR })]), /→ now · 2 ranges/)
+})
+
 test('every boundary reason has prose — no raw enum reaches the UI', () => {
   for (const reason of ['who', 'levelDrop', 'evidenceShift', 'overDetermined', 'user', 'logStart'] as const) {
     const label = boundaryReasonLabel(reason)
@@ -187,7 +211,7 @@ test('confidence and level range read as the panel prints them', () => {
   assert.equal(confidenceText(0), '0%')
   assert.equal(levelRangeText(interval({ id: 'ci1' })), null)
   assert.equal(levelRangeText(interval({ id: 'ci2', levelLo: 50, levelHi: 50 })), 'level 50')
-  assert.equal(levelRangeText(interval({ id: 'ci3', levelLo: 11, levelHi: 24 })), 'levels 11–24')
+  assert.equal(levelRangeText(interval({ id: 'ci3', levelLo: 11, levelHi: 24 })), 'levels 11-24')
 })
 
 // ---------------------------------------------------------------------------

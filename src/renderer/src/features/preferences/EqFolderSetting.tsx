@@ -16,6 +16,7 @@ import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import DescriptionIcon from '@mui/icons-material/Description'
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh'
 import type { EqConfig } from '@shared/types'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 
 const SOURCE_CHIP: Record<EqConfig['source'], { label: string; color: 'success' | 'info' | 'warning' }> = {
   manual: { label: 'manual', color: 'info' },
@@ -44,7 +45,7 @@ function PathRow({
         sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}
         title={path}
       >
-        {path ?? '—'}
+        {path ?? '-'}
       </Typography>
     </Box>
   )
@@ -89,7 +90,9 @@ function EqFolderPath({ config }: { config: EqConfig | null }): JSX.Element {
 /**
  * Validation feedback for the folder the app is really reading. Nothing is claimed until the
  * config has actually arrived, so a fresh mount shows no verdict rather than a momentary
- * "no logs found" that is only true because we haven't looked.
+ * "no logs found" that is only true because we haven't looked. This card said the JOS-340 law
+ * out loud years before it had a name; since JOS-340 the pane's hydration gate makes the `null`
+ * unreachable, and the branch stays as the guard it always was.
  *
  * FOUR VERDICTS, NOT TWO (JOS-82). `characterCount === 0` used to print one sentence — go turn
  * `/log on` — for three different situations, one of which is "Windows would not let me list
@@ -113,7 +116,7 @@ function EqFolderCheck({ config }: { config: EqConfig | null }): JSX.Element | n
     return (
       <Alert severity="warning" variant="standard" data-testid="eq-folder-check">
         This folder doesn&apos;t exist. Pick the folder your <code>eqlog_*.txt</code> files are
-        in — or pick one of the files itself.
+        in - or pick one of the files itself.
       </Alert>
     )
   }
@@ -125,19 +128,25 @@ function EqFolderCheck({ config }: { config: EqConfig | null }): JSX.Element | n
   ) : (
     <Alert severity="warning" variant="standard" data-testid="eq-folder-check">
       No character logs (eqlog_*.txt) found here. Make sure EverQuest logging is enabled
-      (/log on), then pick the folder those files are in — or pick one of the files itself.
+      (/log on), then pick the folder those files are in - or pick one of the files itself.
     </Alert>
   )
 }
 
 export function EqFolderSetting(): JSX.Element {
-  const [config, setConfig] = useState<EqConfig | null>(null)
+  // SEEDED from the pane's hydration snapshot (JOS-340). It used to start `null` and fill in, and
+  // this is the FIRST card anyone sees — Game is the section the rail opens on — so the pane's
+  // opening frame was a folder card with no folder in it. The subscription stays: main pushes a
+  // new config when the folder changes (including from the empty-state picker in another view),
+  // and that is a genuine change rather than a second hydration.
+  const [config, setConfig] = useState<EqConfig>(usePrefsSeed().eqConfig)
   const [busy, setBusy] = useState(false)
 
+  useEffect(() => window.eq.onEqConfigChanged(setConfig), [])
+
   useEffect(() => {
-    void window.eq.getEqConfig().then(setConfig)
-    return window.eq.onEqConfigChanged(setConfig)
-  }, [])
+    recordPref('eqConfig', config)
+  }, [config])
 
   const pick = useCallback(async () => {
     setBusy(true)

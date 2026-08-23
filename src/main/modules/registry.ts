@@ -31,6 +31,8 @@
 
 import type { EqModule, ModuleDelta } from './types'
 import type { LogBus, LogEventListener } from '../log/bus'
+// A leaf with no imports of its own (see its header), so this cannot participate in a cycle.
+import { noteReplaying } from '../telemetry/breadcrumbs'
 
 const FLUSH_THROTTLE_MS = 100
 
@@ -82,6 +84,16 @@ export class ModuleRegistry {
   register(mod: EqModule): void {
     this.modules.push(mod)
     this.byId.set(mod.id, mod)
+  }
+
+  /**
+   * Every registered module, in delivery order. Read-only, and it exists for ONE caller: the fold
+   * checkpoint (JOS-208) has to ask each module whether it can serialize itself, and asking means
+   * having the list. A getter rather than a `checkpointables()` method, because the registry has no
+   * business knowing what a checkpoint is — it owns the push loop and nothing else.
+   */
+  list(): readonly EqModule[] {
+    return this.modules
   }
 
   /**
@@ -160,6 +172,10 @@ export class ModuleRegistry {
       this.flushTimer = null
     }
     this.replaying = true
+    // AN ERROR REPORT'S `mode` READS FROM THIS BRACKET (JOS-100), not from a per-event `live`
+    // flag — the JOS-60 rule that a replay is a STATE, applied to one more consumer. Two
+    // sources of truth for "are we replaying" is how one of them ends up wrong.
+    noteReplaying(true)
   }
 
   /**
@@ -173,6 +189,7 @@ export class ModuleRegistry {
   endReplay(): void {
     if (!this.replaying) return
     this.replaying = false
+    noteReplaying(false)
     for (const mod of this.modules) mod.flushDelta()
   }
 

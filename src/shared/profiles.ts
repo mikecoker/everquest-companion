@@ -31,13 +31,13 @@ export const PROFILES: GameProfile[] = [
   {
     id: 'eqlegends',
     label: 'EverQuest Legends',
-    description: 'Daybreak EverQuest Legends server — quest data from eqlwiki.com',
+    description: 'Daybreak EverQuest Legends server - quest data from eqlwiki.com',
     available: true
   },
   {
     id: 'p99',
     label: 'Project 1999',
-    description: 'Classic EQ emulator (wiki.project1999.com) — not yet imported',
+    description: 'Classic EQ emulator (wiki.project1999.com) - not yet imported',
     available: false
   }
 ]
@@ -141,6 +141,7 @@ import {
   type ShareKind
 } from './shareSchema'
 import type { AlertMergeItem, ScalarChange } from './shareMerge'
+import { clampBgAlpha, type OverlayBgAlphaPrefs } from './overlayBgAlpha'
 
 // The re-export is EXPLICIT (never `export *`): the test suite runs these modules through
 // tsx's CJS transform, where a star re-export becomes a runtime property copy that the ESM
@@ -168,6 +169,7 @@ export type {
   ShareEnvelope,
   AlertSetBody,
   ExportableOverlayConfig,
+  ExportableBgAlphaPrefs,
   SettingsBundleBody,
   UiPrefMerge,
   UiPrefSpec,
@@ -193,6 +195,9 @@ export interface SettingsExportInput {
   alertPrefs: AlertPrefs
   /** full stored configs; only OVERLAY_EXPORT_FIELDS are read out of them */
   overlays: Partial<Record<OverlayKind, { bgAlpha: number } & Record<string, unknown>>>
+  /** the shared transparency preference (JOS-407), which is not any one kind's config. Optional so
+   *  a caller with nothing to say about it — and every test that predates it — still builds a body. */
+  overlayBgAlpha?: OverlayBgAlphaPrefs
   /** raw localStorage values the renderer collected; filtered against UI_PREF_SPECS here */
   ui?: Record<string, string>
 }
@@ -242,10 +247,25 @@ export function buildSettingsBody(input: SettingsExportInput): SettingsBundleBod
   if (alerts.length) body.alerts = alerts
   body.alertPrefs = {
     globalVolume: clamp01(input.alertPrefs?.globalVolume, 0.7),
-    muted: input.alertPrefs?.muted ?? false
+    muted: input.alertPrefs?.muted ?? false,
+    // Projected only when TRUE (JOS-222), the same rule the store writes it by: a bundle from a
+    // machine with the audio throttle on is byte-identical to one written before the preference
+    // existed, so no old share string suddenly grows a row it never carried.
+    ...(input.alertPrefs?.alwaysPlayAll === true ? { alwaysPlayAll: true } : {})
   }
   const overlays = exportableOverlays(input.overlays)
   if (Object.keys(overlays).length) body.overlays = overlays
+  // THE TRANSPARENCY PREFERENCE (JOS-407), projected field by field like everything else here and
+  // WITHOUT `seeded`: that flag is bookkeeping about this install's own history with the switch,
+  // and a stranger's answer to it would suppress the seed that keeps opting in from repainting
+  // anything. The per-kind values above still travel unchanged, so an older build reads this bundle
+  // and applies everything it knows about.
+  if (input.overlayBgAlpha) {
+    body.overlayBgAlpha = {
+      shared: clampBgAlpha(input.overlayBgAlpha.shared),
+      independent: input.overlayBgAlpha.independent
+    }
+  }
   const ui = exportableUiPrefs(input.ui)
   if (Object.keys(ui).length) body.ui = ui
   return body

@@ -54,10 +54,15 @@ import MilitaryTechIcon from '@mui/icons-material/MilitaryTech'
 import type { RangeStats } from '@shared/progressionStats'
 import type { ScopeKind } from './windowScope'
 import { formatDateTime } from '../../lib/formatDate'
+import type { RateBasis } from '@shared/rateBasis'
+// WHICH HOUR the rates below are per (JOS-288) — read where it is used, exactly as the slice's own
+// consumers read `useTimeslice`: the store is app-wide and every consumer of it is a leaf.
+import { useRateBasis } from '../timeslice/useRateBasis'
 import { fmtDuration } from './levelChartGeometry'
 import {
-  AA_RATE_TITLE,
+  aaRateTitle,
   AA_RESPEC_CAPTION,
+  ACTIVE_TIME_TITLE,
   OFFLINE_CAPTION,
   OFFLINE_TITLE,
   aaRateText,
@@ -114,6 +119,9 @@ function StatCard({ stat }: { stat: HeroStat }): JSX.Element {
       variant="outlined"
       sx={{ p: 1.25, flex: 1, minWidth: 150, borderLeft: `3px solid ${accent}`, display: 'flex', gap: 1 }}
       data-testid="leveling-range-hero"
+      // A NATIVE title, never a popper (JOS-143), and only on the card that has one: the rate
+      // card's denominator is active time and JOS-249 says so on hover.
+      title={stat.title}
     >
       <Box sx={{ color: accent, display: 'flex', alignItems: 'center' }}>{ICON[stat.id]}</Box>
       <Box sx={{ minWidth: 0 }}>
@@ -136,13 +144,13 @@ const CHIP_SX = { height: 20 } as const
  * kills (dimmed — they are context, and they enter no rate), and the AA gained with the same
  * respec reservation the "AA gained over time" panel carries.
  */
-function ChipRow({ stats }: { stats: RangeStats }): JSX.Element {
+function ChipRow({ stats, basis }: { stats: RangeStats; basis: RateBasis }): JSX.Element {
   const gaps = idleGapsText(stats)
   const witnessed = witnessedText(stats)
   const aa = aaText(stats)
   // The AA pace, beside the AA total it explains. Null together with `aa` — both are gated on
   // the range holding at least one gain line.
-  const aaRate = aaRateText(stats)
+  const aaRate = aaRateText(stats, basis)
   // Null unless a login line actually closed a logout inside the range — the offline chip and
   // its caption exist only when the log said so.
   const offline = offlineText(stats)
@@ -150,7 +158,9 @@ function ChipRow({ stats }: { stats: RangeStats }): JSX.Element {
   return (
     <Box>
       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-        <Tooltip title={gaps ?? ''} disableHoverListener={!gaps}>
+        {/* The chip PRINTS active time, so it carries the definition (JOS-249) — with the gap
+            count still leading when there is one, because that is this chip's own detail. */}
+        <Tooltip title={gaps ? `${gaps} · ${ACTIVE_TIME_TITLE}` : ACTIVE_TIME_TITLE}>
           <Chip size="small" variant="outlined" label={activeIdleText(stats)} sx={CHIP_SX} />
         </Tooltip>
         {offline && (
@@ -169,7 +179,7 @@ function ChipRow({ stats }: { stats: RangeStats }): JSX.Element {
           </Tooltip>
         )}
         {aaRate && (
-          <Tooltip title={AA_RATE_TITLE}>
+          <Tooltip title={aaRateTitle(stats, basis)}>
             <Chip size="small" variant="outlined" label={aaRate} sx={CHIP_SX} />
           </Tooltip>
         )}
@@ -200,7 +210,13 @@ function ZoneRow({ row }: { row: ZoneStatRow }): JSX.Element {
         {row.time}
         {/* '(2h 03m active)', or '(2h 03m active · 8h 12m offline)' for the camp you logged
             out of. Null — and so nothing at all — when the zone was pure activity. */}
-        <Box component="span" sx={{ opacity: 0.55 }} title={row.offline ? OFFLINE_CAPTION : undefined}>
+        <Box
+          component="span"
+          sx={{ opacity: 0.55 }}
+          // The parenthetical prints this camp's active ms, so it hovers the definition (JOS-249)
+          // — and nothing at all when there is no parenthetical to hover.
+          title={row.detail ? (row.offline ? `${OFFLINE_CAPTION} · ${ACTIVE_TIME_TITLE}` : ACTIVE_TIME_TITLE) : undefined}
+        >
           {row.detail ? ` (${row.detail})` : ''}
         </Box>
       </TableCell>
@@ -229,13 +245,18 @@ const HEAD_SX = { ...CELL_SX, fontWeight: 700, whiteSpace: 'nowrap' } as const
 
 /**
  * Per-zone rows, sorted by levels/hr (the farming-efficiency question) with a secondary
- * toggle onto time. Per the fixed-height-scroll-box law the table lives in a bounded box with
- * its OWN `overflow: auto` — a range over a long session can list every zone visited and must
- * never size to its content and squeeze the charts above it.
+ * toggle onto time.
+ *
+ * VERTICALLY IT IS AS TALL AS THE ZONES (JOS-289). It used to live in a `maxHeight: 240` box with
+ * `overflow: auto` so it could not squeeze the charts above it; with the page scrolling there is
+ * nothing to squeeze, and a range that visited nine camps was reading them six at a time through
+ * a sticky-header slot. HORIZONTALLY IT STILL OWNS A SCROLLER, and that is the other half of the
+ * same law: seven columns of numbers is genuinely wide content, and wide content scrolls in its
+ * OWN container — never by pushing the page sideways. Hence `overflowX` alone, never `overflow`.
  */
-function ZoneTable({ zones }: { zones: RangeStats['zones'] }): JSX.Element | null {
+function ZoneTable({ zones, basis }: { zones: RangeStats['zones']; basis: RateBasis }): JSX.Element | null {
   const [sort, setSort] = useState<ZoneSort>('levels')
-  const rows = zoneStatRows(zones, sort)
+  const rows = zoneStatRows(zones, sort, basis)
   if (rows.length === 0) return null
   const head = (key: ZoneSort, label: string): JSX.Element => (
     <TableSortLabel active={sort === key} direction="desc" onClick={() => { setSort(key) }}>
@@ -243,8 +264,12 @@ function ZoneTable({ zones }: { zones: RangeStats['zones'] }): JSX.Element | nul
     </TableSortLabel>
   )
   return (
-    <Box sx={{ flexGrow: 1, minHeight: 0, maxHeight: 240, overflow: 'auto' }}>
-      <Table size="small" stickyHeader>
+    // `overflowY: hidden` is stated rather than left alone ON PURPOSE: CSS computes a `visible`
+    // axis to `auto` the moment its partner is not visible, so `overflowX: 'auto'` alone would
+    // leave this box reading as a vertical scroller to anything inspecting it (the e2e layout
+    // contract does exactly that). There is no height here to clip, so it clips nothing.
+    <Box sx={{ overflowX: 'auto', overflowY: 'hidden' }} data-testid="leveling-range-zones">
+      <Table size="small">
         <TableHead>
           <TableRow>
             <TableCell sx={{ ...HEAD_SX, width: 18, pr: 0 }} />
@@ -258,10 +283,12 @@ function ZoneTable({ zones }: { zones: RangeStats['zones'] }): JSX.Element | nul
             <TableCell align="right" sx={HEAD_SX}>
               Levels
             </TableCell>
-            <TableCell align="right" sx={HEAD_SX}>
+            {/* Both rates divide by the ROW's own active time, so both headers say what that is
+                (JOS-249) — a native title on the label, no popper. */}
+            <TableCell align="right" sx={HEAD_SX} title={ACTIVE_TIME_TITLE}>
               {head('levels', 'Levels/hr')}
             </TableCell>
-            <TableCell align="right" sx={HEAD_SX}>
+            <TableCell align="right" sx={HEAD_SX} title={ACTIVE_TIME_TITLE}>
               Kills/hr
             </TableCell>
           </TableRow>
@@ -282,7 +309,12 @@ function HeaderRow({ stats, scope, onClear }: RangeStatsPanelProps): JSX.Element
       <Typography variant="subtitle2" sx={{ fontWeight: 700 }} data-testid="leveling-range-window">
         {formatDateTime(stats.t0)} → {formatDateTime(stats.t1)}
       </Typography>
-      <Typography variant="caption" color="text.secondary">
+      {/* THE ELAPSED SPAN THE NUMBERS COVER — `durationMs`, which under a zone slice is Σ of the
+          ADMITTED VISITS and therefore narrows with the tier membership (JOS-332). It carries a
+          testid because it is the number the owner's bug report was about: `elapsed 27m` over a
+          camp when only one of its tiers was selected. tests/e2e/sliceSteps.mts reads it on both
+          sides of the toggle. */}
+      <Typography variant="caption" color="text.secondary" data-testid="leveling-range-duration">
         {fmtDuration(stats.durationMs)}
       </Typography>
       {/* STATE, NOT PROCESS: one word saying these numbers are narrower than the timescale
@@ -312,22 +344,26 @@ function HeaderRow({ stats, scope, onClear }: RangeStatsPanelProps): JSX.Element
 }
 
 export function RangeStatsPanel({ stats, scope, onClear }: RangeStatsPanelProps): JSX.Element {
+  const { basis } = useRateBasis()
   const footnote = unstatedCaption(stats)
   return (
     <Paper
       variant="outlined"
-      sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1.25, flexGrow: 1, minHeight: 0 }}
+      // No `flexGrow`/`minHeight` since JOS-289: there is no leftover column height for this panel
+      // to be the one that absorbs, and growing into space it did not earn is what stretched the
+      // zone table's sticky-header slot in the first place.
+      sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1.25 }}
       data-testid="leveling-range-stats"
       data-scope={scope}
     >
       <HeaderRow stats={stats} scope={scope} onClear={onClear} />
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-        {rangeHeroes(stats).map((s) => (
+        {rangeHeroes(stats, basis).map((s) => (
           <StatCard key={s.id} stat={s} />
         ))}
       </Stack>
-      <ChipRow stats={stats} />
-      <ZoneTable zones={stats.zones} />
+      <ChipRow stats={stats} basis={basis} />
+      <ZoneTable zones={stats.zones} basis={basis} />
       {footnote && (
         <Typography variant="caption" color="text.secondary">
           {footnote}

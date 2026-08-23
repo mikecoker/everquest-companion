@@ -40,11 +40,34 @@ const KEEP = [
 ]
 const keep = (l) => l.startsWith('[') && scrubKeep(l) && KEEP.some((re) => re.test(l))
 
-function slice(fromLine, toLine, out) {
+function cut(fromLine, toLine) {
   const seg = []
   for (let i = fromLine - 1; i < toLine && i < lines.length; i++) if (keep(lines[i])) seg.push(lines[i])
+  return seg
+}
+
+function slice(fromLine, toLine, out) {
+  const seg = cut(fromLine, toLine)
   writeFileSync(join(FIXTURES, out), seg.join('\n') + '\n')
   console.log(`${out}: ${seg.length} lines (from raw ${toLine - fromLine + 1})`)
+}
+
+/**
+ * SEVERAL SMALL RANGES, IN LOG ORDER, AS ONE FIXTURE — for a shape whose defect lives in the
+ * BOUNDARIES rather than in a span of evidence (JOS-287).
+ *
+ * Every line still comes out of the real log through the same `keep` filter and the same shared
+ * scrub; what changes is that the evidence-free stretches BETWEEN the anchors are not carried.
+ * That is legitimate exactly when the assertion is about where boundaries land — a `/who` row and
+ * a level ding date themselves, so the hours between them add megabytes and no information — and
+ * it is NOT legitimate for the sustain-based fixtures above (CW2/CW5/CW6), where thinning would
+ * manufacture a silence the real session never had. Ranges must be given in ascending order.
+ */
+function splice(ranges, out) {
+  const seg = ranges.flatMap(([from, to]) => cut(from, to))
+  writeFileSync(join(FIXTURES, out), seg.join('\n') + '\n')
+  const raw = ranges.reduce((n, [from, to]) => n + (to - from + 1), 0)
+  console.log(`${out}: ${seg.length} lines (from raw ${raw} across ${ranges.length} ranges)`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,3 +141,64 @@ slice(1019360, 1040292, 'cw4-stray-cast.log')
 // MNK sustained BEFORE the ding, and the shift at Aug 04 23:38 needs BER/ROG sustained before
 // IT — thinning either side would manufacture a silence the real session never had.
 slice(1232428, 1434122, 'cw5-wizard-swap-aug6.log')
+
+// CW6 THE WHOLE ARC — Tue Aug 04 00:00:00 → the end of Sun Aug 09. CW5's span with the SWAP BACK
+// on it, and the reason it exists is that CW5's right edge is the blind spot that let JOS-79's
+// guard die silently (JOS-239).
+//
+// CW5 stops inside the wizard evening. `reinstatedDrops` asks whether a class DEPARTED across the
+// absorbed ding, and its window runs to the end of the observations — so inside CW5 the monk is
+// gone and the guard fires, while on the LIVE log the owner swapped back and MNK/ENC return, so
+// nothing departs, the Aug 06 19:31 cut is never reinstated, and one 4.5-day interval swallowed
+// two swaps. The fixture passed the whole time. A regression guard whose window ends before the
+// evidence that breaks it is not a guard.
+//
+// What the span carries, in order:
+//   * Aug 04 20:57:35 `Welcome to level 50!` — the previous ding, which is where the Aug 06
+//     drop's window opens (46.6 h wide).
+//   * Aug 04 23:38:01 the silent swap into PAL/MNK/ENC (all three capped, so no ding).
+//   * Aug 05 20:48:20 `You have slain Lord Nagafen!` at Solo 4 — the kill the ticket is about.
+//     Not in the fixture (this extractor keeps class evidence only); the test states its
+//     timestamp and joins a recorded kill to the intervals, which is what the surface does.
+//   * Aug 06 19:31:23 the NON-INCREASING ding into the level-11 wizard, and the evening that
+//     follows it (level 25 by 22:27:32).
+//   * Aug 08 the swap BACK to PAL/MNK/ENC, which dings for nothing — going back up to 50 is not
+//     a level GAIN — so only the evidence dates it.
+//   * Aug 09 10:41:31 `[50 PAL/MNK/ENC] Primitive` — the game stating the loadout on the far
+//     side, the anchor the whole arc is measured against.
+// It cannot be trimmed at either end: cut the tail and the swap-back disappears (which is CW5),
+// cut the head and the ding that opens the absorbed window is gone.
+slice(1232428, 1557569, 'cw6-swap-back-aug9.log')
+
+// CW7 THE SWAP-BOUNDARY SHAPE — five small ranges, Thu Aug 06 22:27 → Wed Aug 12 22:47 (JOS-287).
+// Located 2026-08-13; the log grows by append, so they stay valid.
+//
+// The defect this pins is a MERGE defect, so the fixture carries the lines that DATE boundaries
+// and nothing else. What the shape needs, and why each range is in it:
+//   * 1433674  `Welcome to level 25!` (Aug 06 22:27:32) — the previous ding, and therefore where
+//     the level-drop window OPENS. Without it the drop has no left edge and the defect cannot
+//     form.
+//   * 1442262  `[50 PAL/MNK/ENC] Primitive` (Aug 09 10:41:31) — THE ROW THE TRIPWIRE IS ABOUT,
+//     the loadout the owner was playing that morning.
+//   * 1561125  `[50 PAL/ROG/BER]` (Aug 10 20:13:00) — the loadout he swapped INTO, a day later.
+//   * 1594342  `[50 PAL/MNK/ENC]` (Aug 11 21:01:24) and 1628111 `[10 PAL/RNG/SHM]` (Aug 12
+//     22:42:20) — two more swaps, because the failure needs several rows under ONE window.
+//   * 1629165  `Welcome to level 11!` (Aug 12 22:47:00) — the re-roll's NON-INCREASING ding
+//     (50 → 11), whose window therefore reaches back SIX DAYS to the Aug 06 ding and overlaps
+//     every row cut above.
+//
+// That is the whole bug in one file: the six-day window overlapped four `/who` cuts,
+// `mergeBoundaries` read the overlap as one swap, kept the narrowest window and clamped the cut
+// into it — one boundary where there were four — and the surviving slice held rows that
+// contradict each other, so `slotsFor`'s last-row rule stated `PAL/ROG/BER` over the Aug 09
+// morning. A row applied BACKWARDS across a swap boundary.
+splice(
+  [
+    [1433600, 1433700],
+    [1442160, 1442360],
+    [1561000, 1561200],
+    [1594250, 1594450],
+    [1628000, 1629200]
+  ],
+  'cw7-who-swap-boundary-aug12.log'
+)

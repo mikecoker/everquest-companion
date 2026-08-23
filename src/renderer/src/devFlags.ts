@@ -103,6 +103,15 @@ export const OWNER_TOOLS: boolean = DEV_TOOLS && ownerToolsGranted(ownerToolsBri
 // futures are: an unreleased surface graduates by DELETING its gate, and folding it into the
 // dev-tools flag would make that deletion look like shipping a dev tool.
 //
+// THE PREDICTION CAME TRUE AND THE FLAG HAS NO READERS TODAY (JOS-327). The character sheet
+// graduated on 2026-08-13 exactly as described — `unreleasedCharacter.tsx` deleted, the
+// `KNOWN_VIEWS` splice made unconditional, the App branch made ordinary — and nothing in the
+// renderer reads `UNRELEASED` any more. It stays because it is the MECHANISM, not the tenant
+// (src/main/unreleased.ts says the same about its half): the next surface that has to land before
+// the owner can look at it should adopt a strip that has already been argued through, and the
+// argument is the twenty lines below. A reader wondering whether this is dead code: it is unused,
+// which is a different thing, and the day it is used again nobody has to re-derive any of this.
+//
 // IT USES THE SAME MECHANISM, WHICH IS THE POINT — `import.meta.env.DEV` is a literal `false` in
 // every `electron-vite build`, so `UNRELEASED && …` folds and rollup deletes the nav row, the
 // route and the lazily-imported component tree. Structurally absent for packaged users, not

@@ -303,10 +303,18 @@ async function runVerify(c: Clients, opts: VerifyOpts): Promise<void> {
 
 // ---- verify-telemetry -----------------------------------------------------------------
 
-/** The install row appears once the first batch has been aggregated — 60 s cadence, so this
- *  polls on the same order of magnitude as the feedback half rather than tighter. */
+/** The install row appears once the first batch has been aggregated, so this polls on the same
+ *  order of magnitude as the feedback half rather than tighter. */
 const TELEMETRY_POLL_MS = 15_000
-/** Two flush ticks of slack over the guest's own dwell. */
+/**
+ * Slack for the INGEST AND AGGREGATE, not for the client's flush.
+ *
+ * It used to be read as "two flush ticks over the guest's own dwell", which stopped being true
+ * when JOS-269 took the cadence to 5 minutes. It never needed to be: the guest sits on the app for
+ * a full flush tick (`sandbox/smoke-feedback.ps1 $telemetryDwellSec`) and only then hands over, so
+ * by the time this poll starts the batch is already on the wire. Five minutes of waiting for a
+ * Lambda and a DSQL upsert is generous and is unaffected by anything the client does.
+ */
 const TELEMETRY_TIMEOUT_SEC = 300
 
 /** Poll `analytics_install` for the guest's id until it lands or the clock runs out. */

@@ -26,21 +26,26 @@ import { Tailer } from './log/Tailer'
 import { parseEvent, parseLine } from './log/parser'
 import { installCharacterName } from './log/rulesets'
 import { scanLog } from './log/scanHistory'
+import { formatTailIoSummary, takeTailIoSummary } from './log/tailIoStats'
 import { createSlicer } from './log/replaySlicer'
 import { saveUserOverlay } from './data/overlayPersistence'
 import { loadInventory } from './inventory/parseInventory'
-import { watchOutputKind, type OutputKindWatch } from './outputs'
+import { loadAchievements, watchOutputKind, type OutputKindWatch } from './outputs'
 import {
   bus,
   buffsModule,
   characterModule,
   combat,
   epoch,
+  installHeldClickies,
   killsModule,
   levelingModule,
   lootModule,
+  outputFilesModule,
   registry,
+  resistModule,
   rosterModule,
+  sendWorldRebuilt,
   sessionDetector,
   notifyCloudSyncStateChanged,
   turnInsModule
@@ -52,17 +57,33 @@ import {
   setActiveLogPath,
   setInventory
 } from './store'
+// The achievements dump's write pair (JOS-429) — a split-out store accessor, same reason the tail
+// mark below is one: store.ts is at the factoring ceiling.
+import { setAchievements } from './storeAchievements'
+// The clean-shutdown tail mark (JOS-57 scope addition) — a split-out store accessor, for the
+// reason its own header gives: store.ts is at the factoring ceiling.
+import { getLogTailMark, setLogTailMark } from './logTailMark'
 import { markFunnelStep, noteLinesParsed } from './telemetry'
+// "Another character's log is active — switch?" (JOS-432). Three touch points in this file and
+// nothing else: stamp every tailed line, follow the character we just attached, let go on the way
+// out. The decision (and the reason it cannot nag) is src/main/log/quietSwitch.ts.
+import { noteTailLine, stopWatchingForQuietSwitch, watchForQuietSwitch } from './switchNudge'
 import { refreshPresenceEffects, suspendCursorStream } from './presenceEffects'
 import { setHistoricalReplayRunning } from './replayGate'
 import { sendToMain, setOverlaysHidden } from './windows'
 import type { CharacterRef, EqConfig } from '../shared/types'
 import type { ScanResult } from './log/scanHistory'
+import { newBytesSince } from './log/coldRead'
 import type { ReplayDutyStats } from '../shared/perf'
 
 let tailer: Tailer | null = null
 let character: CharacterRef | null = null
 let inventoryWatch: OutputKindWatch | null = null
+// The achievements dump gets the SAME treatment as the inventory one (JOS-429): read at session
+// start, followed for rewrites. A separate slot rather than a list because the two are closed
+// independently and each is armed for its own character — and because the day a third kind
+// graduates, a list would hide which one failed to close.
+let achievementsWatch: OutputKindWatch | null = null
 // Wall-clock heartbeat (Task #30): drives module onTick so real-time deadlines (the
 // buffs 15s cast-landing timeout) fire even when the log is idle. Started once the
 // live tail is running (never during replay), cleared on quit / character switch.
@@ -164,13 +185,19 @@ export async function applyEqDirChange(): Promise<EqConfig> {
     await tailer?.stop()
     tailer = null
     stopHeartbeat()
+    // Nothing is attached, so there is no "our log went quiet" to ask about (JOS-432).
+    stopWatchingForQuietSwitch()
     inventoryWatch?.close()
     inventoryWatch = null
+    achievementsWatch?.close()
+    achievementsWatch = null
     character = null
     // No character ⇒ no self-`/who` row is identifiable. Clear the name rather than let a
     // stale one attribute the next log's rows to the character we just stopped tailing.
     installCharacterName(undefined)
-    sendToMain(IPC.onCharacter, null)
+    // Every window that folds a module, not just the main one (JOS-172): an overlay left open
+    // over an install whose log went away must empty with everything else.
+    sendWorldRebuilt(null)
     // …and start looking, because the empty state's own advice is "type /log on" and that is
     // the moment the log we are missing comes into existence. See `watchForFirstLog`.
     watchForFirstLog()
@@ -246,6 +273,16 @@ function watchForFirstLog(): void {
 function resetWorldFor(ref: CharacterRef): void {
   seq = 0
   registry.reset()
+  // THE MESSAGE OVERLAY IS GAME KNOWLEDGE AND SURVIVES `reset()` — but the counts THIS log
+  // accounts for are about to be re-stated in full by the scan below, so its bucket is discarded
+  // and re-filed rather than added to (JOS-231: seeding the fold with its own previous output is
+  // what doubled every count on every launch). Before the scan, and per character, because the
+  // bucket key is the character.
+  buffsModule.beginOverlaySource(characterId(ref))
+  // Same law, same instant, for the same reason (JOS-382). What a mob resists is game knowledge
+  // and survives `reset()`; the counts THIS character's log accounts for are about to be
+  // re-stated in full, so its bucket is discarded and re-filed rather than added to.
+  resistModule.beginSource(characterId(ref))
   epoch.reset()
   // The offline-gap detector is per-LOG state (a rolling window of recent timestamps + the
   // pending camp), so it resets alongside the epoch detector: a new character's first login
@@ -267,6 +304,26 @@ function resetWorldFor(ref: CharacterRef): void {
   // so incoming self-heals ("You healed <Name> for N") attribute from the first
   // line rather than waiting for the engine to learn the name mid-scan.
   combat.setPlayerName(ref.name)
+  // …and which instant clickies they own (JOS-438), from the PERSISTED dump, for the same reason:
+  // the scan replay is where the historical log gets classified, and a clicky firing has to be
+  // called a click on the pass that folds it. `loadInventoryNow` re-installs from a fresh dump
+  // afterwards. Empty on a character who has never typed `/outputfile inventory`, which is
+  // exactly the pre-JOS-438 behaviour.
+  installClickies()
+}
+
+/**
+ * The held-clicky set, from whatever dump the store currently holds for the active character.
+ * Two callers — the pre-scan install above and every dump load — so the read has one home.
+ *
+ * IT GOES THROUGH pipeline.ts, and that indirection is LOAD-BEARING rather than tidiness: this
+ * module already imports pipeline.ts, so the call adds no module edge to the bundle. Importing the
+ * catalog from HERE instead broke JOS-431's delete-and-recreate inventory watcher — measured,
+ * deterministic, and with the derivation never called (main/itemClickies.ts carries the bisect;
+ * `tests/e2e/sky-inventory-autoload.e2e.mts` is what caught it).
+ */
+function installClickies(): void {
+  installHeldClickies(getProgress(activeCharId()).inventory)
 }
 
 /**
@@ -301,6 +358,9 @@ function noteParsed(count: number): void {
 function startTailer(logPath: string, startOffset: number): void {
   tailer = new Tailer(logPath, { startOffset })
   tailer.on('line', (raw) => {
+    // EVERY raw line, before anything can decide not to understand it (JOS-432): the quiet-switch
+    // question is whether our file is being written to at all, not whether we parsed what arrived.
+    noteTailLine()
     const line = parseLine(raw)
     if (line) sendToMain(IPC.onLine, line)
     const ev = parseEvent(raw, seq)
@@ -336,14 +396,23 @@ function stopHeartbeat(): void {
 function startHeartbeat(): void {
   stopHeartbeat()
   let overlaySaveTick = 0
+  // ONE TICK BEFORE THE INTERVAL (JOS-149). The fold judges every clock against the LOG's own
+  // last instant, so a row cast a few minutes before the log went quiet survives it — correctly,
+  // for the fold. Then the renderer re-hydrates (`registry.flushNow()` below) and draws that row
+  // against WALL time, where it may be hours past its end. The interval would have retired it,
+  // one second later; doing it here means the first snapshot the renderer ever sees is already
+  // judged against now, and a row whose expiry and timeout are long gone never materializes at
+  // all. Same call, same arguments, strictly earlier.
+  registry.tick(Date.now())
   tickTimer = setInterval(() => {
     registry.tick(Date.now())
-    // Debounced overlay persistence (Task #36): the miner accretes from the live tail; snap
-    // it to userData every ~60s so the user's learned messages survive a restart. Cheap —
-    // overlaySnapshot() builds a small object; the write is best-effort.
+    // Debounced overlay persistence (Task #36): the miner accretes from the live tail; snap the
+    // per-source REGISTER to userData every ~60s so the user's learned messages survive a restart
+    // (JOS-231 — the register, never the served view, or the next launch's fold re-imports its own
+    // output). Cheap: a small object, and the write is best-effort.
     if (++overlaySaveTick >= 60) {
       overlaySaveTick = 0
-      saveUserOverlay(buffsModule.overlaySnapshot())
+      saveUserOverlay(buffsModule.overlayRegister())
     }
   }, 1000)
 }
@@ -374,6 +443,18 @@ export interface TailResult {
    * a 2 MB log. It never leaves the process as a byte count — perf.ts turns it into a bucket.
    */
   logBytes: number
+  /**
+   * How many of those bytes were appended since this app last shut down CLEANLY (JOS-57's scope
+   * addition) — i.e. how much of this fold read pages nothing had touched since.
+   *
+   * UNDEFINED IS THE HONEST ANSWER TWICE OVER: no mark from a previous clean shutdown (a first
+   * run, or a launch after a crash), and a mark that sits PAST the log's current end, which is a
+   * rotated or truncated file rather than a negative amount of growth. Neither is a zero, and the
+   * telemetry reading drops the field rather than inventing one.
+   */
+  newBytes?: number
+  /** How long the first megabyte of that read took to arrive (`ScanResult.firstMbMs`). */
+  firstMbMs?: number
 }
 
 /**
@@ -409,6 +490,13 @@ function setReplayGate(running: boolean): void {
     suspendCursorStream()
     return
   }
+  // THE GATE UN-HIDES WHAT THE GATE HID (JOS-427). This used to be the presence pass's job as a
+  // side effect — its every-change `setOverlaysHidden(false)` was what actually re-showed these
+  // windows — but presence PARKS now (opacity on windows that never hide), so real visibility has
+  // exactly one owner again: this gate. The show comes up at the park's opacity
+  // (`setOverlaysHidden`'s show path reads it), so an auto-hide user who is alt-tabbed away when
+  // the fold ends still sees nothing — never a flash of five overlays.
+  setOverlaysHidden(false)
   refreshPresenceEffects()
 }
 
@@ -462,15 +550,24 @@ export async function tailCharacter(ref: CharacterRef): Promise<TailResult> {
   // a switch re-fired the boss/quest alerts and re-showed the announcement cards. `endReplay()`
   // DISCARDS what the fold accumulated; the renderer gets all of it from `snapshot()` the moment
   // the `onCharacter` send below makes it re-hydrate.
+  // WHERE WE HAD READ TO LAST TIME, read BEFORE the fold and never after (JOS-57 scope addition).
+  // The mark is only ever written on the way out, so nothing can move it under us — but reading it
+  // here keeps the "before" of the measurement literally before the thing being measured, and
+  // `activeCharId()` already names the character this call just switched to.
+  const mark = getLogTailMark(activeCharId())
   registry.beginReplay()
   const slicer = createSlicer()
   let scan: ScanResult
+  // `resetWorldFor` has just set `seq` to 0, so the reached seq IS the number of events folded —
+  // but the count is written as a DIFFERENCE anyway, because "what this launch folded" is what
+  // every reader of it means (the parse counter, the startup profile's `eventsReplayed`) and a
+  // difference stays honest if the scan ever starts from somewhere other than zero again.
+  const startSeq = seq
   try {
     scan = await scanLog(ref.logPath, bus, seq, { slicer })
-    // The replay's whole cost, in one call: `seq` was reset to 0 by `resetWorldFor`, so `scan.seq`
-    // IS the number of lines this scan parsed. Counted here rather than per line inside the fold so
+    // The replay's whole cost, in one call — counted here rather than per line inside the fold so
     // the replay's inner loop is untouched.
-    noteParsed(scan.seq)
+    noteParsed(scan.seq - startSeq)
     seq = scan.seq
     combat.setLive()
   } finally {
@@ -495,22 +592,55 @@ export async function tailCharacter(ref: CharacterRef): Promise<TailResult> {
 
   startTailer(ref.logPath, scan.endOffset)
   startHeartbeat()
+  // …and start the quiet clock HERE rather than at the top of this function: a multi-second
+  // historical replay is not the log going silent (JOS-432).
+  watchForQuietSwitch(ref)
 
-  // Watch this character's inventory export so a fresh /outputfile auto-reloads.
+  // READ THE DUMP, THEN FOLLOW IT (JOS-253) — the same two-step the log itself gets, in the same
+  // order. `scanHistory` above replays what the log already holds and only then hands the offset
+  // to the tailer; the inventory export had the follow half and not the read half, because the
+  // watcher is armed with `ignoreInitial: true` (outputs/watch.ts) and a file that was rewritten
+  // while the app was closed never changes again. So a player who typed `/outputfile inventory`
+  // between sessions was tailed against a dump this app had never opened, with the store still
+  // holding whatever the last run loaded — and the only way out was a button.
+  loadInventoryNow(ref, 'startup')
   startInventoryWatch(ref)
 
+  // The second graduated kind gets the identical two steps (JOS-429). It matters MORE here than it
+  // does for inventory, not less: the whole point of reading achievements is the player who did Sky
+  // content this app never saw, and that player types the command once, between sessions, expecting
+  // it to have been noticed.
+  loadAchievementsNow(ref, 'startup')
+  startAchievementsWatch(ref)
+
   // Push whatever the modules folded during replay (mainly the character module's
-  // ref + zone) so first-paint snapshots are already current, then tell the
-  // renderer the character's state was fully rebuilt so views remount/re-hydrate.
+  // ref + zone) so first-paint snapshots are already current, then tell EVERY window that
+  // folds a module the character's state was fully rebuilt, so views remount/re-hydrate.
+  //
+  // THE OVERLAYS ARE PART OF "EVERY WINDOW" SINCE JOS-172, and this is the line the whole
+  // ticket turns on. `endReplay()` above discarded what the fold accumulated, so nothing the
+  // replay rebuilt will ever arrive as a delta — and an overlay that was ALREADY OPEN when the
+  // app started hydrated part-way through that fold. Telling only the main window left a debuff
+  // that genuinely survived the rebuild (a charm, an Ensnare) on screen in the app and absent
+  // from the floating window whose entire job is to show it.
+  //
+  // AND THE GO-LIVE SWEEP IS ALREADY HERE: `startHeartbeat()` above runs ONE
+  // `registry.tick(Date.now())` before arming its interval (JOS-149's fix), and it runs BEFORE
+  // this `flushNow()` and this `sendWorldRebuilt`. So whatever real time invalidated while the app
+  // was closed is swept before the first publish, and the first snapshot the user sees is judged
+  // against now.
   registry.flushNow()
   sendToMain(IPC.onCharacter, character)
   // A character switch is a full replacement at the cloud boundary, never a cross-character
   // delta. This fires after replay disposal and hydration, when every snapshot names one owner.
   notifyCloudSyncStateChanged()
   return {
-    eventsReplayed: scan.seq,
+    eventsReplayed: scan.seq - startSeq,
     replay: { slices: slicer.slices, workMs: slicer.workMs, restMs: slicer.restMs },
-    logBytes: scan.endOffset
+    logBytes: scan.endOffset,
+    // The cold-read delta, whose "no answer" cases are the point of it (log/coldRead.ts).
+    ...(newBytes === undefined ? {} : { newBytes }),
+    ...(scan.firstMbMs === undefined ? {} : { firstMbMs: scan.firstMbMs })
   }
 }
 
@@ -533,7 +663,7 @@ function startInventoryWatch(ref: CharacterRef): void {
     { name: ref.name, server: ref.server },
     {
       onChange: () => {
-        reloadInventoryNow(ref)
+        loadInventoryNow(ref, 'watch')
       },
       onError: (err) => {
         logConsoleError('[everquest-companion] inventory watch error', err)
@@ -543,15 +673,87 @@ function startInventoryWatch(ref: CharacterRef): void {
   )
 }
 
-/** Re-read the dump and push it, guarded against a stale watcher firing after a switch. */
-function reloadInventoryNow(ref: CharacterRef): void {
+/**
+ * THE BASELINE SEAM (JOS-128): when did the log see this dump written?
+ *
+ * Exported so the manual `inventory:reload` handler (ipc/character.ts) resolves the baseline
+ * through the SAME lookup the auto-reload does — one answer to "when was this generated", the
+ * way JOS-44 gave "which file" and "how old" one answer each. `loadInventory` takes it as a
+ * parameter rather than importing the pipeline, so the fs/parse layer stays testable without
+ * one; without this seam it falls back to the file's mtime.
+ */
+export function inventoryWrittenAt(file: string): number | null {
+  return outputFilesModule.writtenAt(file)
+}
+
+/**
+ * Read the dump and push it, guarded against a stale watcher firing after a switch.
+ *
+ * ONE FUNCTION FOR BOTH HALVES OF "follows itself" (JOS-253): the read at session start and the
+ * re-read the watcher triggers are the same act on the same file, and the only thing that differs
+ * is what the log line says happened. Splitting them would be two places to forget the push.
+ *
+ * A missing dump is silence, not an error: on a machine where `/outputfile inventory` has never
+ * been typed there is nothing to load, and the surfaces already render that as the never-run
+ * state (the `/outputfile` registry's own line).
+ */
+function loadInventoryNow(ref: CharacterRef, why: 'startup' | 'watch'): void {
   if (character?.logPath !== ref.logPath) return
-  const res = loadInventory(character.name, character.server)
+  const res = loadInventory(character.name, character.server, inventoryWrittenAt)
   if (!res) return
-  setInventory(activeCharId(), res.counts, { path: res.path, loadedAt: res.loadedAt })
-  logInfo(`[everquest-companion] Inventory auto-reloaded: ${res.path}`)
+  setInventory(activeCharId(), res.counts, res.source)
+  // A dump is the ONLY evidence that a cast-less firing was a click you made (JOS-438), so a
+  // reload re-derives the set. The live tail folds against the new one from its next line; the
+  // fold that has already happened keeps whatever the persisted dump said, which is the same
+  // rule every other dump-derived surface follows.
+  installClickies()
+  logInfo(
+    `[everquest-companion] Inventory ${why === 'startup' ? 'loaded at startup' : 'auto-reloaded'}: ${res.path}`
+  )
   sendToMain(IPC.onInventoryReload, { path: res.path, loadedAt: res.loadedAt })
   sendToMain(IPC.onProgress, getProgress(activeCharId()))
+}
+
+/**
+ * THE ACHIEVEMENTS DUMP'S TWO STEPS (JOS-429), written as the two functions above are written and
+ * for the same reasons — read + follow, one function for both halves, a missing file is silence.
+ *
+ * WHAT IT PUSHES, AND WHAT IT DOES NOT. The store write lands on `ProgressState`, so `onProgress`
+ * is the whole delivery: the Sky tab already re-renders on that push and derives the completions
+ * from it on every read. There is NO second `inventory:autoReloaded`-shaped channel, deliberately —
+ * that event means "the held counts moved", and an achievements dump moves no count. The freshness
+ * line re-asks the registry on `onProgress` too (OutputKindLine), which is the one line that made a
+ * new channel unnecessary.
+ */
+function loadAchievementsNow(ref: CharacterRef, why: 'startup' | 'watch'): void {
+  if (character?.logPath !== ref.logPath) return
+  const res = loadAchievements(character.name, character.server)
+  if (!res) return
+  setAchievements(activeCharId(), res.unlocks, res.source)
+  logInfo(
+    `[everquest-companion] Achievements ${
+      why === 'startup' ? 'loaded at startup' : 'auto-reloaded'
+    }: ${res.path} (${String(res.unlocks.length)} class-unlock rewards earned)`
+  )
+  sendToMain(IPC.onProgress, getProgress(activeCharId()))
+}
+
+/** Follow the achievements dump — `startInventoryWatch`'s twin, same registry, same staleness guard. */
+function startAchievementsWatch(ref: CharacterRef): void {
+  achievementsWatch?.close()
+  achievementsWatch = watchOutputKind(
+    'achievements',
+    { name: ref.name, server: ref.server },
+    {
+      onChange: () => {
+        loadAchievementsNow(ref, 'watch')
+      },
+      onError: (err) => {
+        logConsoleError('[everquest-companion] achievements watch error', err)
+      },
+      active: () => character?.logPath === ref.logPath
+    }
+  )
 }
 
 /** Startup entry point: resolve a character and tail it, or idle quietly if there is none.
@@ -568,10 +770,58 @@ export async function startTailing(): Promise<TailResult | null> {
   return tailCharacter(ref)
 }
 
-/** Release the session's OS resources (tail, watcher, heartbeat, rescan) on the way out. */
+/**
+ * LEAVE THE MARK THE NEXT LAUNCH MEASURES ITSELF AGAINST (JOS-57 scope addition).
+ *
+ * It records the TAILER'S OWN OFFSET rather than a fresh `stat()`, because the question the next
+ * launch asks is how far WE had read, not how big the file has since become — and that offset is
+ * the file's size as of the tail's last read, which is the same quantity the next scan's frozen EOF
+ * is (see log/coldRead.ts, which subtracts them).
+ *
+ * CALLED FROM BOTH ORDERLY EXITS, and the belt-and-braces is not decoration: MEASURED (and stated
+ * in tests/e2e/telemetry.e2e.mts `closeWindows`), Electron does NOT emit `window-all-closed` when
+ * something calls `app.quit()` — an auto-updater's `quitAndInstall`, an OS logoff. Hanging the
+ * mark off that one event alone would silently skip the launch after every update, which is
+ * exactly the launch this measurement is most interested in. Writing it twice is harmless: it is
+ * one store key and the later write is the better answer.
+ *
+ * A launch that is KILLED still writes nothing, and that is intended rather than a gap — the next
+ * launch then compares itself to the last exit this app can vouch for, or to nothing at all.
+ */
+export function markTailPosition(): void {
+  if (tailer && character) setLogTailMark(activeCharId(), tailer.readOffset())
+}
+
+/**
+ * Release the session's OS resources (tail, watcher, heartbeat, rescan) on the way out — and leave
+ * the mark above, BEFORE the tail is stopped in program order.
+ */
 export function stopSession(): void {
+  markTailPosition()
   void tailer?.stop()
   inventoryWatch?.close()
+  achievementsWatch?.close()
   stopWatchingForFirstLog()
+  stopWatchingForQuietSwitch()
   stopHeartbeat()
+  logTailIo()
+}
+
+/**
+ * WHAT THE LIVE TAIL'S FILE I/O COST THIS SESSION (JOS-363), on one line, to dev stdout.
+ *
+ * The heartbeat rider that puts these numbers on the wire is a separate ticket; until it lands
+ * this line is the whole readership, and it exists so the owner reproducing the ~1s EverQuest
+ * render freezes can say what the tail was doing rather than guess. `reopens` is the claim the
+ * persistent handle makes — steady-state tailing opens once and never again — and `over100` /
+ * `over500` are the reads long enough to be the stall.
+ *
+ * `null` when the tail never read anything (the app launched, the player never typed `/log on`),
+ * and then nothing is printed: a row of zeros from a session with no tail in it describes nothing.
+ * It is the ONLY drain in the app today, so the summary's interval really is the session — a
+ * property the heartbeat ticket takes over rather than one this line may assume forever.
+ */
+function logTailIo(): void {
+  const io = takeTailIoSummary()
+  if (io) logInfo('[everquest-companion] tail io —', formatTailIoSummary(io))
 }

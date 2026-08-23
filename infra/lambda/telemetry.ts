@@ -24,13 +24,28 @@
  *   4. empty batch     -> 202 accepted:0       (legal, and costs no round trip)
  *   5. config          -> 503 closed           (kill switch `telemetry_accepting`, seeded FALSE)
  *   6. install UPSERT  -> 429 quota_exceeded   (guarded; also mints the per-day facts)
- *   7. AGGREGATE       -> counter UPSERTs, one transaction
+ *   7. AGGREGATE       -> counter + error-report UPSERTs, ONE transaction
  *   8. EMF             -> the near-real-time view
  *   9. 202
  *
  * THERE IS NO RAW EVENT STORE (T6). The batch exists in this process for the length of one
  * invocation and is then garbage; what persists is counters. Nothing here logs an analyticsId,
  * and the function's own CloudWatch log (14 days) carries counts only.
+ *
+ * THE COUNTER TABLES ARE SHARDED SINCE JOS-394, AND THE SHARD IS RANDOM. `usage_daily_sharded`
+ * and `perf_daily_sharded` carry a `shard` column drawn from `Math.random()` once per request,
+ * which spreads a hot counter over 32 rows so that DSQL's optimistic writers stop racing each
+ * other on one. It is NOT a hash of the analyticsId and must never become one — a hash is a
+ * function of the install id, and a stable per-install shard would partition a day's counters
+ * into per-install buckets, rebuilding in the counter tables the very trail this file refuses
+ * to keep. Readers never see the column: they read the merged views.
+ *
+ * ONE BOUNDED EXCEPTION SINCE JOS-100, and it is bounded by the KEY rather than by a promise:
+ * `error_report` keeps at most one EXEMPLAR per (day, cohort, version, fingerprint), first
+ * wins. That is a per-ISSUE store, not a per-user one — the row a hundred installs write is one
+ * row — and the exemplar it holds is a validated `errorReport` event, which means a redacted
+ * message (re-redacted HERE, and refused if it changes), `out/…` frames, and parser event
+ * KINDS. No analyticsId reaches it, so no row can be traced back to an install.
  */
 
 import { Buffer } from 'node:buffer'
@@ -47,11 +62,18 @@ import {
   rollupBatch,
   utcDay,
   USAGE_METRICS,
+  type ErrorReportRow,
   type FunnelCounter,
   type RollupResult,
   type UsageCohort,
   type UsageCounter
 } from '../../src/shared/telemetryRollup'
+import {
+  perfDimsFromEvents,
+  perfDimsOf,
+  type PerfCubeRow,
+  type PerfInstallDims
+} from '../../src/shared/telemetryPerfCube'
 
 /** Warm invocations reuse the CONFIG row for this long instead of re-reading it. */
 const CONFIG_CACHE_MS = 60_000
@@ -66,6 +88,39 @@ const FALLBACK_MAX_EVENTS_PER_DAY = Number(process.env.MAX_EVENTS_PER_DAY ?? '20
 const UPSERT_CHUNK = 100
 /** Funnel-step EMF documents per invocation. A dimension value is a billed metric. */
 const MAX_FUNNEL_EMF = 20
+
+/**
+ * COUNTER SHARDS (JOS-394) — how many rows one hot counter is spread across.
+ *
+ * THE PROBLEM, MEASURED on the live stack 2026-08-16: every install increments the SAME rows —
+ * `usage_daily`'s (day, cohort, 'sessionHeartbeat', '-') and the small closed set of `perf_daily`
+ * buckets — so at ~1,350 requests per 5 minutes (4.5 RPS, 3-4 concurrent Lambdas) about 5% of
+ * writes lost a commit-time race and came back 40001. DSQL takes no locks, so that rate is a
+ * function of how many writers meet on one ROW, and it only grows with the install base.
+ *
+ * THE ARITHMETIC. Two concurrent writers collide when they pick the same counter AND the same
+ * shard, so the conflict rate falls roughly linearly in the shard count: 32 shards turn a ~5%
+ * conflict rate into ~0.2%, which is comfortably inside "the system working" and leaves the
+ * retry ladder for genuine bursts. Why not 4 (too little headroom for a fleet twice this size),
+ * and why not 512: a shard costs a ROW PER DAY PER COUNTER — 32 keeps a day's counters in the
+ * hundreds of rows, where a read is still one bounded scan, and the merge view sums them anyway.
+ * At 3-4 concurrent Lambdas, 32 is ample by an order of magnitude.
+ *
+ * THE SHARD IS RANDOM PER REQUEST, AND IT MAY NEVER BE A FUNCTION OF THE analyticsId. That is
+ * this file's oldest law (see the header, and the long note over `usage_daily` in
+ * infra/schema.sql): NO function of the install id reaches a counter table, because a stable
+ * per-install shard would let anyone holding these rows partition a day's counters into per-
+ * install buckets — the per-user trail the aggregate-on-arrival design exists to not keep.
+ * `Math.random()` spreads writes exactly as well and carries no information about the sender.
+ * It is drawn ONCE per invocation, not once per row: one batch's rows then land in one shard,
+ * which is fewer distinct rows for one transaction to hold and no worse for spreading.
+ */
+const SHARD_COUNT = 32
+
+/** A shard for THIS request. Random, never derived from anything the client sent. */
+function pickShard(): number {
+  return Math.floor(Math.random() * SHARD_COUNT)
+}
 
 type TelemetryErrorCode =
   | 'too_large'
@@ -181,11 +236,24 @@ async function loadConfig(now: number): Promise<TelemetryConfig> {
  *     from a prod install, while a dev build re-asserts itself even if somebody `owner-rm`'d it.
  *   * `RETURNING cohort` hands back the RESOLVED value (postgres returns the post-update row),
  *     so the counter UPSERTs below key on the same answer this statement committed.
+ *
+ * IT ALSO CARRIES THE PERF CUBE'S TWO SETUP DIMS (JOS-372), for a sixth job and the same reason
+ * as the fifth: `machine_class` and `window_mode` are per-INSTALL facts that arrive once per
+ * launch on a `setupSnapshot`, while the stall readings they slice arrive on every session report
+ * for hours. `$8`/`$9` are what THIS batch's snapshot said, or NULL when it carried none, and
+ * `COALESCE(EXCLUDED.…, analytics_install.…)` is the whole resolution: a snapshot overwrites,
+ * anything else keeps what the row holds. `RETURNING` then hands back the resolved pair, so a
+ * batch with no snapshot of its own still folds its cube rows against the install's known box.
+ *
+ * THESE TWO COLUMNS MUST EXIST BEFORE THIS BUNDLE IS DEPLOYED. The statement names them
+ * unconditionally, and naming a column that does not exist is `42703` on EVERY batch — the trap
+ * infra/README.md's "adding a column is schema-first" section documents. Order: `migrate`, then
+ * `terraform apply`.
  */
 const INSTALL_SQL = `INSERT INTO analytics_install (
   analytics_id, first_seen_day, last_seen_day, days_seen, app_version, channel, cohort,
-  quota_day, quota_n)
-VALUES ($1, $2, $2, 1, $3, $4, $7, $2, $5)
+  quota_day, quota_n, machine_class, window_mode)
+VALUES ($1, $2, $2, 1, $3, $4, $7, $2, $5, $8, $9)
 ON CONFLICT (analytics_id) DO UPDATE
    SET last_seen_day = GREATEST(analytics_install.last_seen_day, $2),
        days_seen     = analytics_install.days_seen
@@ -194,16 +262,20 @@ ON CONFLICT (analytics_id) DO UPDATE
        channel       = EXCLUDED.channel,
        cohort        = (CASE WHEN EXCLUDED.cohort = 'owner' THEN 'owner'
                              ELSE COALESCE(analytics_install.cohort, 'user') END),
+       machine_class = COALESCE(EXCLUDED.machine_class, analytics_install.machine_class),
+       window_mode   = COALESCE(EXCLUDED.window_mode, analytics_install.window_mode),
        quota_day     = $2,
        quota_n       = (CASE WHEN analytics_install.quota_day = $2
                              THEN analytics_install.quota_n ELSE 0 END) + $5
  WHERE analytics_install.quota_day <> $2 OR analytics_install.quota_n < $6
-RETURNING first_seen_day, quota_n, cohort`
+RETURNING first_seen_day, quota_n, cohort, machine_class, window_mode`
 
 interface InstallRow {
   first_seen_day: string
   quota_n: number
   cohort: string | null
+  machine_class: string | null
+  window_mode: string | null
 }
 
 export interface InstallFacts {
@@ -213,6 +285,9 @@ export interface InstallFacts {
   upgraded: boolean
   /** Which side of the split every counter this batch produces is keyed on. */
   cohort: UsageCohort
+  /** The perf cube's two setup dims, RESOLVED (JOS-372): this batch's snapshot if it carried
+   *  one, else whatever the install row was already holding, else `unknown`. */
+  perf: PerfInstallDims
 }
 
 /**
@@ -225,13 +300,14 @@ export interface InstallFacts {
  * CTE or a column to smuggle it in. A CTE is the elegant answer and is exactly the kind of thing
  * that is not worth betting a live ingest endpoint on when the cluster is Aurora DSQL (a
  * documented SUBSET of postgres) and the only way to find out is to deploy it. One indexed
- * primary-key lookup, once per batch — i.e. once a minute per active install — is the cheap,
- * boring, verifiable option.
+ * primary-key lookup, once per batch — i.e. once every five minutes per active install since
+ * JOS-269, and it was once a minute before that — is the cheap, boring, verifiable option, and
+ * five times cheaper than the figure this paragraph was written against.
  *
  * THE RACE IS BENIGN AND BOUNDED. Two batches from one id could both read the old version and
- * both count an upgrade; that needs one client to have two flushes in flight, which the 60 s
- * serial flush loop does not do, and the cost if it ever happened is one extra count in an
- * additive counter. The alternative — a value read inside the guarded UPSERT — is not available
+ * both count an upgrade; that needs one client to have two flushes in flight, which a serial
+ * flush loop does not do at any period (and a longer one only widens the gap), and the cost if it
+ * ever happened is one extra count in an additive counter. The alternative — a value read inside the guarded UPSERT — is not available
  * without the CTE this deliberately avoids.
  *
  * NULL means "no row yet", i.e. a first-ever batch: a new install is not an upgrade.
@@ -261,6 +337,9 @@ async function touchInstall(
   prior: string | null
 ): Promise<InstallFacts | null> {
   const events = batch.events.length
+  // NULL when this batch carried no `setupSnapshot`, which is most of them — the UPSERT's
+  // `COALESCE` then keeps whatever the install row already knows about this box.
+  const stated = perfDimsFromEvents(batch.events)
   const rows = await withRetry('install', () =>
     query<InstallRow>(INSTALL_SQL, [
       batch.env.analyticsId,
@@ -269,7 +348,9 @@ async function touchInstall(
       batch.env.channel,
       events,
       config.maxEventsPerIdPerDay,
-      cohortForChannel(batch.env.channel)
+      cohortForChannel(batch.env.channel),
+      stated?.machineClass ?? null,
+      stated?.windowMode ?? null
     ])
   )
   const row = rows[0]
@@ -282,7 +363,10 @@ async function touchInstall(
     // changed build", and a rollback is the version of that fact most worth seeing. `prior ===
     // null` is a first-ever batch, which is a new install and not a change.
     upgraded: prior !== null && prior !== batch.env.appVersion,
-    cohort: cohortOf(row.cohort)
+    cohort: cohortOf(row.cohort),
+    // The POST-UPDATE row, so this is the same answer the statement just committed — the
+    // `cohort` argument above, applied to the two dims beside it.
+    perf: perfDimsOf(row.machine_class, row.window_mode)
   }
 }
 
@@ -307,21 +391,76 @@ function tuples(rows: number, columns: number, shared: number): string {
 /** The day and the cohort, in that order — `tuples`'s `shared` count and these must agree. */
 const SHARED_PARAMS = 2
 
+/**
+ * The day, the cohort AND THE SHARD, for the two sharded tables (JOS-394). A third shared
+ * parameter rather than a per-row one because the shard is drawn once per request, and it is a
+ * SEPARATE constant from `SHARED_PARAMS` because the funnel and error statements below are NOT
+ * sharded: their rows are rare (a funnel step is a user action, an error row is a distinct
+ * fingerprint) and were not in the measured contention. They ride in the same transaction, so
+ * if either ever becomes hot it gets exactly this treatment rather than a wider retry budget.
+ */
+const SHARDED_PARAMS = 3
+
 function chunk<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
   return out
 }
 
-const COUNTER_HEAD = 'INSERT INTO usage_daily (day, cohort, metric, dim, n) VALUES '
+/**
+ * THE COUNTERS GO TO THE SHARDED TABLE (JOS-394), and the column order is not cosmetic: the
+ * first three columns are `tuples`'s SHARED parameters, so (day, cohort, shard) must lead
+ * whatever order the table was declared in. The conflict target is the sharded PRIMARY KEY —
+ * it has to be exactly the key or postgres answers 42P10 and the UPSERT resolves against
+ * nothing.
+ *
+ * `usage_daily` IS NOT WRITTEN ANY MORE and is not dropped either: it freezes at cutover and
+ * `usage_daily_all` adds it back to every read. infra/schema.sql carries the whole argument.
+ */
+const COUNTER_HEAD =
+  'INSERT INTO usage_daily_sharded (day, cohort, shard, metric, dim, n) VALUES '
 const COUNTER_TAIL =
-  ' ON CONFLICT (day, cohort, metric, dim) DO UPDATE SET n = usage_daily.n + EXCLUDED.n'
+  ' ON CONFLICT (shard, day, cohort, metric, dim) DO UPDATE' +
+  ' SET n = usage_daily_sharded.n + EXCLUDED.n'
 
 const FUNNEL_HEAD =
   'INSERT INTO usage_funnel_daily (day, cohort, funnel, step, outcome, app_version, n) VALUES '
 const FUNNEL_TAIL =
   ' ON CONFLICT (day, cohort, funnel, step, outcome, app_version) DO UPDATE' +
   ' SET n = usage_funnel_daily.n + EXCLUDED.n'
+
+/**
+ * The error store (JOS-100). Two behaviours in one statement, and they are deliberately
+ * different from each other:
+ *
+ *   * `count` ACCUMULATES, like every other counter here — additive, so a retried transaction
+ *     after a commit-time abort re-adds nothing (the aborted attempt never committed).
+ *   * `exemplar` is FIRST WINS, via `COALESCE(error_report.exemplar, EXCLUDED.exemplar)`. The
+ *     row keeps the example it already has; a later batch can only FILL a NULL. So a hundred
+ *     installs hitting one bug store one stack, and the stack that is stored is stable — a
+ *     reader who looked at this issue yesterday is looking at the same example today.
+ */
+const ERROR_HEAD =
+  'INSERT INTO error_report (day, cohort, version, fingerprint, count, exemplar) VALUES '
+const ERROR_TAIL =
+  ' ON CONFLICT (day, cohort, version, fingerprint) DO UPDATE' +
+  ' SET count = error_report.count + EXCLUDED.count,' +
+  ' exemplar = COALESCE(error_report.exemplar, EXCLUDED.exemplar)'
+
+/**
+ * THE PERF CUBE (JOS-372, sharded by JOS-394). Additive like every counter here, and keyed on
+ * all five dims plus the day, the cohort and now the shard — the whole row IS the primary key,
+ * which is what makes the `ON CONFLICT` target legal and what stops one day's fullscreen rows
+ * colliding with its windowed ones. `src/shared/telemetryPerfCube.ts` holds the vocabulary and
+ * the cardinality argument; the shard multiplies that ceiling by 32 and the merge view sums it
+ * back down, which is the trade the OCC-conflict measurement bought.
+ */
+const PERF_HEAD =
+  'INSERT INTO perf_daily_sharded (day, cohort, shard, window_mode, machine_class, locked,' +
+  ' stall_bucket, tail_bucket, n) VALUES '
+const PERF_TAIL =
+  ' ON CONFLICT (shard, day, cohort, window_mode, machine_class, locked, stall_bucket,' +
+  ' tail_bucket) DO UPDATE SET n = perf_daily_sharded.n + EXCLUDED.n'
 
 /**
  * Every counter for this batch, in ONE transaction so a batch is counted completely or not at
@@ -331,18 +470,34 @@ const FUNNEL_TAIL =
  * The UPSERTs are additive (`n = existing + EXCLUDED.n`), so a retried transaction after a
  * commit-time abort re-adds nothing: the aborted attempt never committed. That is the only
  * at-most-once property this path needs, and it is the database's, not a flag's.
+ *
+ * ONE SHARD FOR THE WHOLE TRANSACTION (JOS-394), drawn here rather than per row or per chunk:
+ * this is the unit that either commits or aborts, so spreading its rows over several shards
+ * would widen the set of rows a racer could collide with for no gain. A retry re-runs this
+ * function's body with the SAME shard — the retry lives in `withRetry` one level up — which is
+ * what keeps the UPSERT additive rather than scattering a re-added count across shards.
  */
 async function writeCounters(day: string, cohort: UsageCohort, roll: RollupResult): Promise<void> {
+  const shard = pickShard()
   const counterChunks = chunk<UsageCounter>(roll.counters, UPSERT_CHUNK)
   const funnelChunks = chunk<FunnelCounter>(roll.funnels, UPSERT_CHUNK)
-  if (counterChunks.length === 0 && funnelChunks.length === 0) return
+  const errorChunks = chunk<ErrorReportRow>(roll.errors, UPSERT_CHUNK)
+  const perfChunks = chunk<PerfCubeRow>(roll.perf, UPSERT_CHUNK)
+  if (
+    counterChunks.length === 0 &&
+    funnelChunks.length === 0 &&
+    errorChunks.length === 0 &&
+    perfChunks.length === 0
+  ) {
+    return
+  }
   await withRetry('counters', () =>
     transaction(async (c) => {
       for (const rows of counterChunks) {
-        const params: unknown[] = [day, cohort]
+        const params: unknown[] = [day, cohort, shard]
         for (const r of rows) params.push(r.metric, r.dim, r.n)
         await c.query(
-          `${COUNTER_HEAD}${tuples(rows.length, 3, SHARED_PARAMS)}${COUNTER_TAIL}`,
+          `${COUNTER_HEAD}${tuples(rows.length, 3, SHARDED_PARAMS)}${COUNTER_TAIL}`,
           params
         )
       }
@@ -353,6 +508,26 @@ async function writeCounters(day: string, cohort: UsageCohort, roll: RollupResul
           `${FUNNEL_HEAD}${tuples(rows.length, 5, SHARED_PARAMS)}${FUNNEL_TAIL}`,
           params
         )
+      }
+      // IN THE SAME TRANSACTION as the counters, for the reason the header gives: a batch is
+      // counted completely or not at all, and an error row with no `errors` counter beside it
+      // would make the panel's per-build rate disagree with its own issue list.
+      for (const rows of errorChunks) {
+        const params: unknown[] = [day, cohort]
+        for (const r of rows) {
+          params.push(r.appVersion, r.fingerprint, r.n, JSON.stringify(r.exemplar))
+        }
+        await c.query(`${ERROR_HEAD}${tuples(rows.length, 4, SHARED_PARAMS)}${ERROR_TAIL}`, params)
+      }
+      // …and the cube, in the SAME transaction for the same reason: its rows are a slice of the
+      // very `liveStallP95` histogram the counters above carry, so a batch that landed one and
+      // not the other would make the panel's cross-tab disagree with its own fleet-wide totals.
+      for (const rows of perfChunks) {
+        const params: unknown[] = [day, cohort, shard]
+        for (const r of rows) {
+          params.push(r.windowMode, r.machineClass, r.locked, r.stallBucket, r.tailBucket, r.n)
+        }
+        await c.query(`${PERF_HEAD}${tuples(rows.length, 6, SHARDED_PARAMS)}${PERF_TAIL}`, params)
       }
     })
   )
@@ -381,10 +556,18 @@ function emitMetrics(batch: TelemetryBatch, roll: RollupResult, now: number): vo
     [
       { name: 'Batches', value: 1 },
       { name: 'EventsAccepted', value: batch.events.length },
-      // Heartbeats are the "is anyone in the app RIGHT NOW" signal: one per session per 5 min.
+      // Heartbeats are the "is anyone in the app RIGHT NOW" signal: one per session per HEARTBEAT
+      // PERIOD, which the client sets and this Lambda only counts (10 min since JOS-269). Anything
+      // reading this as a concurrency figure must bucket it at that same period - see
+      // src/main/triage/liveSessions.ts, which is the reader that does.
       { name: 'Heartbeats', value: counterOf(roll, USAGE_METRICS.heartbeats) },
       { name: 'SessionsStarted', value: counterOf(roll, USAGE_METRICS.sessions) },
-      { name: 'ActiveInstalls', value: counterOf(roll, USAGE_METRICS.activeInstalls) }
+      { name: 'ActiveInstalls', value: counterOf(roll, USAGE_METRICS.activeInstalls) },
+      // JOS-100. A NEW METRIC NAME on the dimension set that already exists — adding one is
+      // free, and it is adding a DIMENSION that would orphan the dashboard's widgets (the note
+      // below about the cohort split). It is the "is the fleet on fire right now" signal the
+      // stored per-fingerprint rows cannot be, because those are keyed on a DAY.
+      { name: 'ErrorsReported', value: counterOf(roll, USAGE_METRICS.errors) }
     ],
     now
   )
@@ -429,6 +612,12 @@ async function accept(batch: TelemetryBatch, now: number): Promise<HttpResult> {
     events: batch.events.length,
     counters: roll.counters.length,
     funnels: roll.funnels.length,
+    // A COUNT OF CUBE ROWS, never their dims: a machine class plus a timestamp in a log line is a
+    // narrower description of one install than this log is allowed to carry.
+    perf: roll.perf.length,
+    // A COUNT OF ISSUES, never a fingerprint: a fingerprint plus a timestamp in a log line is
+    // a join key back to one install's crash, which is the thing this log does not carry.
+    errors: roll.errors.length,
     firstOfDay: facts.firstOfDay,
     // A BOOLEAN, never the two versions: this log is counts only, and a version pair plus a
     // timestamp is a good deal more identifying than a count.

@@ -43,6 +43,7 @@ import { parentPort, workerData } from 'node:worker_threads'
 import * as ort from 'onnxruntime-node'
 import { phonemize } from 'phonemizer'
 import { encodeWav } from './cache'
+import { kokoroSessionOptions } from './engine'
 import { normalizeEspeakPhonemes, phonemeCount, tokenizePhonemes } from './phonemes'
 import { KOKORO_MAX_TOKENS, kokoroVoiceLang } from './pinned'
 import { decodeNpyFloat32, parseVoicePack, styleVectorFor } from './voicePack'
@@ -73,11 +74,20 @@ const styleTables = new Map<string, Float32Array>()
 /** The serialization chain — every job appends itself to it. */
 let queue: Promise<unknown> = Promise.resolve()
 
-/** Create (once) the inference session and work out what it calls its tensors. */
+/**
+ * Create (once) the inference session and work out what it calls its tensors.
+ *
+ * The session options are BOUNDED ON PURPOSE — one intra-op thread, one inter-op thread,
+ * sequential — because this app runs on the machine that is running EverQuest. Left at its
+ * defaults onnxruntime sized its pool to the physical core count and burned ~21 seconds of CPU
+ * to produce 1.4 seconds of speech; at one thread it produces the same wav, in the same wall
+ * time, on one core. The measurement and the full reasoning live above `kokoroSessionOptions`
+ * in engine.ts, where the numbers are pinned by a unit.
+ */
 function loadSession(): Promise<LoadedSession> {
   const existing = sessionPromise
   if (existing) return existing
-  const created = ort.InferenceSession.create(init.modelPath).then((session): LoadedSession => {
+  const created = ort.InferenceSession.create(init.modelPath, kokoroSessionOptions()).then((session): LoadedSession => {
     const [tokens, style, speed] = session.inputNames
     const [audio] = session.outputNames
     if (!tokens || !style || !speed || !audio) throw new Error('unexpected model signature')

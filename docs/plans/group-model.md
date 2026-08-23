@@ -7,6 +7,21 @@ Triggered by feedback 01KZA9BVNYDKN9FDVT2N6ZVYPS (group member missing from
 meters); the PARSE half of that report is a separate fix already in flight —
 this model is the presentation-layer half, and neither depends on the other.
 
+**JOS-430 (owner ruling 2026-08-20) MADE §0 TRUE.** For the whole life of this
+plan §0 described an intent the build contradicted: `classify()`'s admission
+gate meant the roster decided whether a bystander's damage was RECORDED, so a
+wrong or empty roster did corrupt a number — it deleted one. The ruling
+("Everyone means ANY fight the log can see; participation not required") moved
+recording out from behind the roster: every player-vs-mob row is recorded, as
+`SourceKind 'other'` when nothing claims the name, and the roster's remaining
+jobs are the ENGAGEMENT LICENCE (a member's target is a mob YOUR fight is
+engaged with; a stranger's is not) and the Group allowlist. Read
+`src/main/combat/otherCombatants.ts` for the refusal ladder and its whole-log
+measurements, `otherRouting.ts` for the aggregate-only discipline a recorded row
+keeps, and `tests/combatRecordEveryone.test.mts` for the pins. §3.5 below is
+kept verbatim as the diagnosis it was; the sentence in it that begins "So G2's
+exact surface is" describes a build that has now been superseded.
+
 ## 0. The one rule that protects everything else
 
 THE ROSTER NEVER TOUCHES THE PARSER. The combat engine records every entity's
@@ -79,12 +94,13 @@ and is labeled unverified in a comment.
 Three, on the combat dashboard AND each damage/heal overlay:
 
 - **You** — you + your pets (today's drill default, unchanged)
-- **Group** (NEW DEFAULT when a roster exists) — you + roster members + pets
-  ATTRIBUTED BY THE EXISTING pet-ownership logic (petRows) to any of those.
-  Charm pets follow whatever attribution already decides; this plan changes
-  no attribution.
-- **Everyone** — every recorded source (today's behavior; "open it up to all
-  the people around you" is this one click)
+- **Group** — you + roster members + pets ATTRIBUTED BY THE EXISTING
+  pet-ownership logic (petRows) to any of those. Charm pets follow whatever
+  attribution already decides; this plan changes no attribution.
+- **Everyone** (THE DEFAULT, JOS-229) — every recorded source. Since JOS-430
+  that means EVERY COMBATANT THE LOG NAMED, including everyone the roster never
+  heard of; before it, "every recorded source" was a much smaller set than it
+  sounded, because the roster gated what got recorded.
 
 Defaulting: if the roster is EMPTY or the model has seen no signal this
 session, Group scope is not silently wrong — it falls back to rendering as
@@ -92,17 +108,53 @@ Everyone with the scope chip showing `Group (no roster yet)`. Law 1: an empty
 roster means unknown, and unknown must not hide people. The moment a signal
 lands, the allowlist engages.
 
+**JOS-229 MOVED THE DEFAULT TO EVERYONE.** This plan shipped Group as the
+default (G2 below) on the strength of that fallback: an empty roster can hide
+nobody, so the narrow answer looked free. It is free only for the EMPTY
+roster, not the WRONG one — membership here is inferred from lines the game
+prints once, so a join the log never carried, a group formed before the app
+was open, or a break EQ never announced leaves a roster the model has "seen"
+and that is missing a real player. Group then hides that player's bars with no
+fallback to explain it, and the report the owner receives is that the damage
+meter is broken. So the opening answer is the one that filters nobody, and
+Group is a deliberate narrowing a user asks for. It is a FRESH-STATE default
+only: `eq.combat.meterScope` is written exclusively by the Preferences control,
+so a stored 'group' is a choice and is handed back untouched — no migration.
+The deeper fix (making membership detection less lossy) is separate work.
+
 "What you're battling" needs no new model — fights/targets are already
 segmented; scope only filters SOURCES, never targets.
 
 ## 3. UI
 
-- Scope control: compact three-state chip on the combat toolbar + overlay
-  headers (persisted per surface — overlay config field, combat pref).
-- Roster visibility: a small popover from the scope chip listing members with
-  provenance (joined · confirmed · instance · added by you · stale), each
-  removable; an add box (name entry) for the member whose join message the log
-  never carried. User edits persist per character until epoch.
+- Scope control: **one preference, in Preferences > Combat** (JOS-115). It
+  shipped as a compact three-state chip repeated on the combat toolbar and on
+  every overlay header, each persisting its own key; the owner retired that —
+  a selector on every surface is clutter answering a question you set once,
+  and three surfaces holding three answers was the common case rather than the
+  useful one. One key (`eq.combat.meterScope`, default Everyone since
+  JOS-229), read by the Combat tab, the Overview damage card and every
+  floating meter.
+- Scope visibility: the surfaces keep the WORD, read-only — the Combat tab's
+  lens line and, on the floating meters, the PANEL FLOOR (JOS-121). A meter
+  that is filtering rows out has to be able to say so where the rows are
+  missing, and `Group (no roster yet)` is the sentence that explains the law-1
+  fallback. On an overlay the word started in the title bar beside the kind
+  tag; that row is also the fight selector's whole width budget and the
+  window's only drag handle, so it moved down to an understated, low-contrast,
+  `pointerEvents: none` watermark in a reserved band at the bottom of the bars
+  pane (`src/renderer/src/overlay/scopeFloor.tsx`). Two consequences worth
+  stating: the band is reserved rather than shared, so a bar can never cover
+  the long form; and unlike the header tag it replaced, it does NOT vanish
+  when the overlay is locked — a pinned meter has no selector, no controls and
+  no tooltip left, so it is the one that most needs to be able to say why a
+  name is missing.
+- Roster visibility: a small popover from the group icon beside that readout,
+  listing members with provenance (joined · confirmed · instance · added by
+  you · stale), each removable; an add box (name entry) for the member whose
+  join message the log never carried. Still a CONTROL: correcting a
+  mis-inferred group is a different act from choosing a scope. User edits
+  persist per character until epoch.
 - Nothing about the roster is ever transmitted: names stay local (same law as
   everything else; telemetry carries no names, slices already scrub group
   social lines).
@@ -130,7 +182,8 @@ sources first, one wave at a time.
 - **G1 — the module**: shapes swept from corpus, roster module + deltas +
   tests (join/leave/confirm/instance/stale/epoch), no UI. Ships dark.
 - **G2 — scope filtering**: meters + overlays consume the snapshot; scope
-  chip + persistence; Group default with the no-roster fallback; e2e coverage
+  chip + persistence; Group default with the no-roster fallback (JOS-229 later
+  moved that default to Everyone — see §2); e2e coverage
   via the E2 fixture-append driver (write join lines into the tailed fixture,
   assert the allowlist engages live).
 - **G3 — roster popover + user edits** (provenance ladder, add/remove).

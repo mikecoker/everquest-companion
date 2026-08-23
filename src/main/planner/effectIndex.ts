@@ -68,6 +68,7 @@
 // and "you cannot pull an effect off this" is not "this does not exist". See `excludedDonor`.
 
 import { itemKey, type ItemDbEntry, type ItemDbFile } from '../itemsDb'
+import { renamedItems } from '../../shared/itemRenames'
 // The committed spell DB, for V6's one-liners. Imported here rather than injected from the
 // handler for the same reason the curated research layer is (below): it is committed data with
 // one right answer, and a builder that only gets its facts when a caller remembers to pass them
@@ -215,8 +216,17 @@ export function buildSpellFacts(spells: readonly SpellEntry[]): SpellFactsIndex 
   return out
 }
 
-/** The committed join, built once for this process (the corpus cannot change while it runs). */
-const SPELL_FACTS: SpellFactsIndex = buildSpellFacts((spellsJson as SpellDbFile).spells)
+/**
+ * The committed join, built once for this process (the corpus cannot change while it runs).
+ *
+ * EXPORTED because the gear index (JOS-283, `gearIndex.ts`) states the same one-liners on its own
+ * effect rows, and a second `buildSpellFacts` call there would be a second answer to "which spell
+ * page does this effect name join" — one home, one first-wins ordering.
+ */
+export const COMMITTED_SPELL_FACTS: SpellFactsIndex = buildSpellFacts(
+  (spellsJson as SpellDbFile).spells
+)
+const SPELL_FACTS = COMMITTED_SPELL_FACTS
 
 /**
  * The `Summoned:` NAME PREFIX — the one automatic exclusion rule (V9), and it is not an inference:
@@ -257,8 +267,12 @@ function excludedDonor(name: string, research: ResearchedKnowledge['research']):
  * words as the source, and the entry REPLACES the scraped list rather than merging with it — see
  * the field's doc. Nothing here matches on a flag: the layer is the only thing entitled to say a
  * page states a slot the parser could not key.
+ *
+ * EXPORTED for the gear index (JOS-283), which decides what "equippable" means by asking exactly
+ * this question. Two callers, one seam — a second copy of this precedence would let the two
+ * indices disagree about which items exist.
  */
-function slotsOf(k: ResearchedKnowledge, scraped: readonly EquipSlot[]): EquipSlot[] {
+export function slotsOf(k: ResearchedKnowledge, scraped: readonly EquipSlot[]): EquipSlot[] {
   const curated = k.research?.slots
   return curated === undefined ? [...scraped] : [...curated]
 }
@@ -413,7 +427,10 @@ export function buildPlannerIndex(
   spells: SpellFactsIndex = SPELL_FACTS
 ): PlannerIndex {
   const acc = newAcc()
-  for (const entry of Object.values(file.items ?? {})) addPage(acc, entry, research, spells)
+  // Through the rename overlay (JOS-415), so a donor's row carries the name the wiki uses now.
+  // The alias key it adds costs nothing here: `addPage` already dedupes by `entry.page`, which is
+  // exactly the mechanism items.json's own two-keys-per-page shape relies on.
+  for (const entry of Object.values(renamedItems(file.items ?? {}))) addPage(acc, entry, research, spells)
   const donors = [...acc.donors.values()]
   return {
     donors,

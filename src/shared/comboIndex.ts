@@ -17,7 +17,54 @@
 // discriminated-union narrowing would have to carry — an enormous blast radius for a derived
 // fact that changes under them.
 
-import type { ComboInterval } from './classCombo'
+import type { ClassAbbr, ComboInterval } from './classCombo'
+
+/**
+ * THE CONFIDENCE GATE (JOS-239): may this interval's loadout be read as FACT, or has the model
+ * already said it cannot explain the span?
+ *
+ * THE DEFECT IT EXISTS FOR. The roster showed Lord Nagafen defeated at D4 under a crisp
+ * `ENC / WIZ / MNK` header — a trio the owner never ran, over a 4.5-day interval that swallowed two
+ * loadout swaps. Every fact needed to refuse that sentence was ALREADY on the interval: it carried
+ * `overDetermined` (five classes clearing the sustained-exclusive bar against three slots) and a
+ * level range of 11-50 that no single loadout can produce. The surfaces printed the trio anyway.
+ * The boundary fix (modules/comboIntervals.ts) is what stops that span existing; this is what stops
+ * the NEXT one being stated as fact, and it is cheap enough to be worth having on its own.
+ *
+ * TWO CONDITIONS, both already modeled:
+ *   * `overDetermined` — more classes cleared the sustained-exclusive bar than the loadout has
+ *     slots, so at least one resolved slot is the ranking's opinion rather than the log's word.
+ *   * `levelRegressed` — the displayed level went BACKWARDS inside the span, which under
+ *     min-of-loadout only a swap does.
+ *
+ * AND IT APPLIES ONLY TO INFERENCE. A `/who` row is the game naming the loadout outright and a user
+ * correction is the owner naming it; neither is a guess that surplus evidence can undermine, and
+ * gating them would answer "the game said PAL/MNK/ENC" with "we are not sure". Provenance is per
+ * slot, so the test is "no slot was ever stated" — a mixed-provenance interval keeps its statement.
+ */
+export function loadoutUncertain(interval: ComboInterval): boolean {
+  if (interval.slots.some((s) => s.provenance !== 'inferred')) return false
+  return interval.startAlso?.includes('overDetermined') === true || interval.levelRegressed === true
+}
+
+/**
+ * COULD THIS LOADOUT STILL BE RUNNING `abbr`? (JOS-305.)
+ *
+ * The question is deliberately asked in the PERMISSIVE direction, and the asymmetry is the whole
+ * point. A slot is a SET of candidates (classCombo.ts `ComboSlot`): resolved when it holds one,
+ * ambiguous when it holds several, and UNKNOWN when it holds all sixteen. So "the combo contains
+ * ROG" is a claim this model frequently cannot make, while "no slot of this loadout can possibly
+ * be ROG" is one it can — every slot has to have RULED ROG OUT for that to come back false.
+ *
+ * Written this way because the one caller acts on the NEGATIVE (the combat engine strips a
+ * rogue's blade coats when the answer is no, JOS-305/coatClass.ts), and a caller that acts on
+ * "not known to be ROG" would strip a live rogue's poisons the moment the model went quiet. An
+ * unknown slot carries all sixteen candidates, so silence answers YES here and nothing happens —
+ * which is the correct behaviour for an inference that is allowed to destroy state.
+ */
+export function comboMayInclude(interval: ComboInterval, abbr: ClassAbbr): boolean {
+  return interval.slots.some((s) => s.candidates.includes(abbr))
+}
 
 /**
  * The interval whose ESTIMATE covers `ts`, or null.

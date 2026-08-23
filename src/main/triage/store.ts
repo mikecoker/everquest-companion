@@ -46,52 +46,51 @@
 import pg from 'pg'
 import type { Client as PgClient, QueryResultRow } from 'pg'
 import { DsqlSigner } from '@aws-sdk/dsql-signer'
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3'
+import { S3Client } from '@aws-sdk/client-s3'
 import { fromTemporaryCredentials } from '@aws-sdk/credential-providers'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { gunzipSync } from 'node:zlib'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { TriageReport } from '../../../scripts/triageCluster.mjs'
 import type { AppChannelTag, FeedbackType, ReportStatus, Severity } from '../../shared/feedback'
 import { sanitizeMultiline } from '../../shared/sanitizeText'
-import { rescrubSlice, type SliceRescrub } from './rows'
+// `applySchema` below needs the binding, and the re-export further down is what keeps every
+// existing `import { splitStatements } from '…/store'` working. A bare `export … from` creates no
+// local binding, which is why both lines exist.
+import { splitStatements } from '../../shared/analyticsSchema'
+import { INFRA_DIR, TRIAGE_DIR } from './paths'
+import type { InventoryDownload, SliceRescrub } from './rows'
 
-export type { SliceRescrub }
+export type { InventoryDownload, SliceRescrub }
+
+// The S3 half — which objects a report owns, how they are downloaded and cleaned, and how they
+// are deleted — lives in ./attachments.ts (see its header for why it is a half worth naming).
+// Re-exported by NAME, never `export *`: the star form becomes a runtime property copy under
+// tsx's CJS interop that cjs-module-lexer cannot see, and every named import through this file
+// stops resolving (the lesson the analytics re-export block below records at length).
+export {
+  achievementsKeyOf,
+  attachmentKeysOf,
+  attachmentReports,
+  deleteSlice,
+  downloadAchievements,
+  downloadInventory,
+  downloadSlice,
+  inventoryKeyOf,
+  logKeyOf,
+  logObjectExists,
+  type AttachmentReport
+} from './attachments'
 
 const { Client, types } = pg
 
-/**
- * The repo root — where `.triage/` and `infra/schema.sql` live.
- *
- * This used to be `resolve(import.meta.dirname, '..')`, one fixed hop up from `scripts/`. That
- * stopped being a single rule the moment the module gained a second caller: under `tsx` it
- * sits at `src/main/triage/`, and inside the dev app it has been bundled into `out/main/`.
- * Walking UP for the marker file is the one rule true for both, and it also survives a CLI
- * invocation from a subdirectory (which the old form handled and a bare `process.cwd()` would
- * not).
- */
-function findRepoRoot(): string {
-  let dir = process.cwd()
-  for (;;) {
-    if (existsSync(join(dir, 'infra', 'schema.sql'))) return dir
-    const up = dirname(dir)
-    if (up === dir) return process.cwd()
-    dir = up
-  }
-}
+// Where things live moved to ./paths.ts when `attachments.ts` became a second consumer of
+// TRIAGE_DIR (JOS-296) — a value import from here into a module this file re-exports would be a
+// runtime cycle. Re-exported so every consumer keeps importing from the one store module.
+export { SCHEMA_FILE, TRIAGE_DIR } from './paths'
 
-const ROOT = findRepoRoot()
-export const TRIAGE_DIR = join(ROOT, '.triage')
 const STACK_FILE = join(TRIAGE_DIR, 'stack.json')
-const SLICE_DIR = join(TRIAGE_DIR, 'slices')
-export const SCHEMA_FILE = join(ROOT, 'infra', 'schema.sql')
 
 /**
  * Same reasoning as the Lambda's db.ts: int8 comes back as a STRING by default,
@@ -107,6 +106,8 @@ export interface Stack {
   triage_role_arn: string
   lambda_role_arn: string
   telemetry_lambda_role_arn: string
+  /** JOS-398: the nightly export function's role, mapped to the read-only `analytics_export`. */
+  export_lambda_role_arn: string
   api_url: string
 }
 
@@ -135,6 +136,10 @@ const STACK_KEYS = [
   // it — the cache is read back without re-validating, deliberately (it is a cache, not a
   // contract), so `migrate` checks for an unsubstituted placeholder and says `--refresh`.
   'telemetry_lambda_role_arn',
+  // Added by JOS-398, on the same terms as the key above it: a stack.json cached before this
+  // output existed simply has no value for it, and `migrate` catches the unsubstituted
+  // `${EXPORT_LAMBDA_ROLE_ARN}` and says `--refresh` rather than mapping a role to nothing.
+  'export_lambda_role_arn',
   'api_url',
 ] as const
 
@@ -147,7 +152,7 @@ export function loadStack(refresh = false): Stack {
     return JSON.parse(readFileSync(STACK_FILE, 'utf8')) as Stack
   }
   const raw = execFileSync('terraform', ['output', '-json'], {
-    cwd: join(ROOT, 'infra'),
+    cwd: INFRA_DIR,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit'],
   })
@@ -156,7 +161,7 @@ export function loadStack(refresh = false): Stack {
   for (const key of STACK_KEYS) {
     const value = outputs[key]?.value
     if (typeof value !== 'string') {
-      throw new Error(`terraform output is missing "${key}" — has the stack been applied?`)
+      throw new Error(`terraform output is missing "${key}" - has the stack been applied?`)
     }
     stack[key] = value
   }
@@ -300,26 +305,15 @@ export function makeClients(stack: Stack, options: AccessOptions): Clients {
 // ---- schema ------------------------------------------------------------------------
 
 /**
- * Statement splitter for infra/schema.sql: a statement ends at the first line whose
- * last character is `;`. That is enough because the file is authored for it (no
- * string literal ends a line with a semicolon, and DSQL has no PL/pgSQL to
- * dollar-quote) — the rule is written down at the top of schema.sql.
+ * The statement splitter MOVED to `src/shared/analyticsSchema.ts` (JOS-398) and is re-exported
+ * here BY NAME, so every existing import path is unchanged. It moved because a third caller
+ * appeared that cannot reach this module: the nightly S3 export Lambda needs the same statement
+ * count for its manifest, and importing this file into a Lambda would bundle S3 clients, IAM role
+ * assumption and a `terraform` shell-out into a function that only reads rows. The rule it
+ * implements — a statement ends at the first line whose last character is `;` — is unchanged and
+ * is written down at the top of schema.sql.
  */
-export function splitStatements(sql: string): string[] {
-  const out: string[] = []
-  let buffer: string[] = []
-  for (const line of sql.split(/\r?\n/)) {
-    const code = line.replace(/^\s*--.*$/, '')
-    if (code.trim().length === 0) continue
-    buffer.push(code)
-    if (code.trimEnd().endsWith(';')) {
-      out.push(buffer.join('\n').trimEnd().replace(/;$/, ''))
-      buffer = []
-    }
-  }
-  if (buffer.join('').trim().length > 0) throw new Error('schema.sql ends mid-statement')
-  return out
-}
+export { splitStatements } from '../../shared/analyticsSchema'
 
 /**
  * Already-exists codes: duplicate_table (also index), duplicate_object (role/grant),
@@ -400,6 +394,12 @@ export function toTriageReport(row: Row): TriageReport {
     spamScore: num(row.spam_score),
     receivedAt: num(row.received_at),
     hasLog: row.log_json !== null && row.log_json !== undefined,
+    // DECLARED, exactly like `hasLog` — whether the object actually landed costs a HeadObject
+    // and is a separate question the list deliberately does not ask (rows.ts's tri-state note).
+    // A row written before the column existed reads `undefined`, i.e. no dump, which is true.
+    hasInventory: row.inventory_json !== null && row.inventory_json !== undefined,
+    /** The third attachment (JOS-441), declared the same way and read the same way. */
+    hasAchievements: row.achievements_json !== null && row.achievements_json !== undefined,
   }
 }
 
@@ -481,23 +481,28 @@ export function listInstallProfiles(c: Clients, limit = 200): Promise<Row[]> {
 // ---- usage analytics (docs/plans/usage-analytics.md §4) -----------------------------
 //
 // The analytics half lives in usageStore.ts — split out when two independent waves composed
-// this file past the 400-line ceiling. Re-exported here so every consumer keeps importing
-// from the one store module; the split moved code, not import paths.
+// this file past the 400-line ceiling. Re-exported here so every consumer keeps importing from
+// the one store module; the split moved code, not import paths.
+//
+// IT HAS TO BE AN EXPLICIT LIST, AND THAT IS MEASURED, NOT STYLE. JOS-100 tried
+// `export * from './usageStore'` here — one line instead of eighteen, when adding
+// `readErrorReports` pushed this file back over the ceiling the split existed to get it under —
+// and `tests/triageConnection.test.mts` went red with
+// `does not provide an export named 'unreachable'`. Under tsx these modules link through CJS
+// interop, and a star re-export becomes a RUNTIME property copy that cjs-module-lexer cannot
+// see, so every named import through this file stops resolving. The names are therefore
+// GROUPED rather than one-per-line: same explicitness, and the grouping says which half of the
+// analytics store each name belongs to.
 export {
-  missingTable,
-  missingColumn,
-  unreachable,
-  USAGE_ROW_LIMIT,
-  INSTALL_ROW_LIMIT,
-  OWNER_ROW_LIMIT,
-  readUsageDaily,
-  readUsageFunnelDaily,
-  readAnalyticsInstalls,
-  readAnalyticsInstall,
-  readOwnerInstalls,
-  setInstallCohort,
-  deleteAnalyticsInstall,
-  setTelemetryAccepting,
+  // failure classifiers, shared with the backend's degradation arms
+  missingTable, missingColumn, unreachable,
+  // read caps
+  USAGE_ROW_LIMIT, INSTALL_ROW_LIMIT, OWNER_ROW_LIMIT,
+  // reads
+  readUsageDaily, readUsageFunnelDaily, readAnalyticsInstalls, readAnalyticsInstall,
+  readReportVersions, readErrorReports, readOwnerInstalls, readPerfDaily,
+  // writes
+  setInstallCohort, deleteAnalyticsInstall, setTelemetryAccepting,
 } from './usageStore'
 
 // ---- writes ------------------------------------------------------------------------
@@ -592,75 +597,4 @@ export async function stampRedacted(c: Clients, reportId: string): Promise<void>
 
 export async function deleteReportRow(c: Clients, reportId: string): Promise<void> {
   await c.execute('DELETE FROM report WHERE report_id = $1', [reportId])
-}
-
-// ---- the log objects ---------------------------------------------------------------
-
-export function logKeyOf(row: Row): string | null {
-  const key = str(row.log_key)
-  return key.length > 0 ? key : null
-}
-
-/** Did the upload actually land? One HeadObject, which is why no S3 event Lambda exists. */
-export async function logObjectExists(c: Clients, key: string): Promise<boolean> {
-  try {
-    await c.s3.send(new HeadObjectCommand({ Bucket: c.stack.bucket_name, Key: key }))
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * A CACHE HIT. A copy written BEFORE re-scrub-on-read existed has no sidecar, and reporting
- * zeros for it would be claiming a measurement nobody took — so it is flagged instead, and the
- * fix is to delete the cached file and read it again.
- */
-function cachedRescrub(path: string, metaFile: string): SliceRescrub {
-  const unknown = { path, dropped: 0, cleaned: 0, fromLegacyCache: true }
-  if (!existsSync(metaFile)) return unknown
-  try {
-    const m = JSON.parse(readFileSync(metaFile, 'utf8')) as Partial<SliceRescrub>
-    return { path, dropped: num(m.dropped), cleaned: num(m.cleaned), fromLegacyCache: false }
-  } catch {
-    return unknown
-  }
-}
-
-/**
- * Download + gunzip a slice to .triage/slices/<reportId>.log, RE-SCRUBBED ON READ.
- *
- * `rescrubSlice` (./rows.ts, pure and tested without AWS) is the third leg of "nothing a client
- * sends is trusted": the presign policy pins an upload's key, size and content-type and CANNOT
- * pin its content, so what landed in the bucket is only as scrubbed as the uploader chose to
- * be. The downloaded bytes go through the app's own shared scrubber and text sanitizer BEFORE
- * they touch the owner's disk, and what that removed is reported back to the caller.
- *
- * THE ORIGINAL S3 OBJECT IS NOT TOUCHED. It is the evidence; `forget` is the only thing that
- * deletes it. What is re-scrubbed is the owner's local copy.
- *
- * CACHED: a second call re-reads the sidecar rather than S3. The file is gitignored twice over
- * (`.triage/` and the blanket `*.log`) and its contents never reach a public issue.
- */
-export async function downloadSlice(
-  c: Clients,
-  reportId: string,
-  key: string,
-): Promise<SliceRescrub> {
-  mkdirSync(SLICE_DIR, { recursive: true })
-  const dest = join(SLICE_DIR, `${reportId}.log`)
-  // The sidecar remembers a download's counts, so a cache hit can still report them.
-  const metaFile = join(SLICE_DIR, `${reportId}.rescrub.json`)
-  if (existsSync(dest)) return cachedRescrub(dest, metaFile)
-  const res = await c.s3.send(new GetObjectCommand({ Bucket: c.stack.bucket_name, Key: key }))
-  if (!res.Body) throw new Error(`S3 returned no body for ${key}`)
-  const gz = Buffer.from(await res.Body.transformToByteArray())
-  const { text, dropped, cleaned } = rescrubSlice(gunzipSync(gz).toString('utf8'))
-  writeFileSync(dest, text)
-  writeFileSync(metaFile, `${JSON.stringify({ dropped, cleaned })}\n`)
-  return { path: dest, dropped, cleaned, fromLegacyCache: false }
-}
-
-export async function deleteSlice(c: Clients, key: string): Promise<void> {
-  await c.s3.send(new DeleteObjectCommand({ Bucket: c.stack.bucket_name, Key: key }))
 }

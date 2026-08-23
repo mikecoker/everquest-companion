@@ -54,8 +54,9 @@ import type {
   KillsSnap,
   MobEntry
 } from '@shared/types'
-import { killsBaselineStale, mergeKillsDelta } from '@shared/kills'
+import { killIndex, killsBaselineStale, killsFor, mergeKillsDelta } from '@shared/kills'
 import type { NavBack } from '../../appRouting'
+import { useBackTarget } from '../../appBack'
 import { useModule } from '../../lib/useModule'
 import { MobPage } from './MobPage'
 import { RecentlyConsidered, applyConsiderDelta } from './RecentlyConsidered'
@@ -67,9 +68,15 @@ import type { MobTarget } from './mobTarget'
  * The kills module: per-mob WHOLESALE replace plus the shape guard (shared/kills.ts) — a delta
  * written under a different kill-record shape re-hydrates the baseline instead of merging into
  * it, so a stale narrow entry cannot outlive an update in a running window.
+ *
+ * WHAT IT RETURNS IS THE JOIN INDEX, not the raw snapshot map (JOS-350): re-keyed by `mobKey`,
+ * so every reader below — the search row's "N killed", the roster's, and the mob page itself —
+ * looks a mob up through the ONE fold in `shared/kills.killsFor`. Memoized on the snapshot
+ * object, which `useModule` replaces exactly when the map can have changed.
  */
 function useKills(): KillMap {
-  return useModule<KillsSnap, KillsDelta>('kills', mergeKillsDelta, killsBaselineStale)?.mobs ?? {}
+  const snap = useModule<KillsSnap, KillsDelta>('kills', mergeKillsDelta, killsBaselineStale)
+  return useMemo(() => killIndex(snap?.mobs ?? {}), [snap])
 }
 
 /** The character module's delta is a partial merge (see main/modules/character.ts). */
@@ -88,7 +95,9 @@ function MobResultRow({
   onOpen: (t: MobTarget) => void
 }): JSX.Element {
   const drops = entry.drops?.length ?? 0
-  const kill = kills[entry.name.trim().toLowerCase()]
+  // THE ONE JOIN (JOS-350). The catalog spells `Innoruuk's Chosen` with an apostrophe and the log
+  // spells it with a backtick; `killsFor` folds both, so this row and the page it opens agree.
+  const kill = killsFor(kills, entry.name)
   return (
     <Stack
       direction="row"
@@ -96,9 +105,10 @@ function MobResultRow({
       alignItems="baseline"
       role="button"
       tabIndex={0}
-      onClick={() => onOpen({ mob: entry.name, entry, kill })}
+      data-testid="mobs-result-row"
+      onClick={() => onOpen({ mob: entry.name, entry })}
       onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onOpen({ mob: entry.name, entry, kill })
+        if (e.key === 'Enter' || e.key === ' ') onOpen({ mob: entry.name, entry })
       }}
       sx={{
         py: 0.4,
@@ -184,7 +194,7 @@ function ZoneRoster({
         In {zone}{' '}
         {rows.length > 0 && (
           <Typography component="span" variant="caption" color="text.secondary">
-            — {rows.length} in the catalog
+            - {rows.length} in the catalog
           </Typography>
         )}
       </Typography>
@@ -233,7 +243,7 @@ function NoZoneYet({ hasConsidered }: { hasConsidered: boolean }): JSX.Element {
       <Typography variant="body2" sx={{ maxWidth: 460 }}>
         {hasConsidered
           ? 'Zone into somewhere and this becomes an overview of what lives there. Until then, search the catalog by name or zone.'
-          : `Your zone, cons and kills show up here as you play — a roster of whatever you're standing in. Meanwhile, search ${MOB_CATALOG.length.toLocaleString()} creatures by name or zone: levels, zones and full drop tables, all offline.`}
+          : `Your zone, cons and kills show up here as you play - a roster of whatever you're standing in. Meanwhile, search ${MOB_CATALOG.length.toLocaleString()} creatures by name or zone: levels, zones and full drop tables, all offline.`}
       </Typography>
       <Typography variant="caption" color="text.disabled">
         Anything you <code>/con</code> in game shows up here too.
@@ -253,29 +263,32 @@ function NoZoneYet({ hasConsidered }: { hasConsidered: boolean }): JSX.Element {
  */
 function MobDrill({
   target,
+  kills,
   nav,
   onClose
 }: {
   target: MobTarget
+  kills: KillMap
   nav?: NavBack
   onClose: () => void
 }): JSX.Element {
+  // ONE expression, read by TWO things (JOS-201): the button below, and the mouse's Back button,
+  // which registers it for as long as this page is on screen. The browse surface behind it
+  // registers nothing, so a press there falls through to the app-level origin walk.
+  const back = (): boolean => {
+    if (!nav?.back()) onClose()
+    return true
+  }
+  useBackTarget(back)
   return (
     <Stack spacing={1} sx={{ height: '100%' }}>
       <Box>
-        <Button
-          size="small"
-          data-testid="mobs-back"
-          startIcon={<ArrowBackIcon />}
-          onClick={() => {
-            if (!nav?.back()) onClose()
-          }}
-        >
+        <Button size="small" data-testid="mobs-back" startIcon={<ArrowBackIcon />} onClick={back}>
           {nav?.origin?.label ?? 'Mobs'}
         </Button>
       </Box>
       <Box sx={{ flexGrow: 1, minHeight: 0, overflow: 'auto' }}>
-        <MobPage key={`${target.mob}#${target.entry?.page ?? ''}`} target={target} />
+        <MobPage key={`${target.mob}#${target.entry?.page ?? ''}`} target={target} kills={kills} />
       </Box>
     </Stack>
   )
@@ -338,7 +351,7 @@ export default function MobsView({
   // when you zone, so memoize on the zone string.
   const zoneRows = useMemo(() => (zone ? mobsInZone(zone, MOB_CATALOG) : []), [zone])
 
-  if (drill) return <MobDrill target={drill} nav={nav} onClose={() => setDrill(null)} />
+  if (drill) return <MobDrill target={drill} kills={kills} nav={nav} onClose={() => setDrill(null)} />
 
   return (
     <Stack spacing={1.5} sx={{ height: '100%' }}>
@@ -347,6 +360,7 @@ export default function MobsView({
         placeholder="Search mobs…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
+        slotProps={{ htmlInput: { 'data-testid': 'mobs-search' } }}
         sx={{ maxWidth: 420 }}
       />
 
@@ -384,15 +398,15 @@ export default function MobsView({
               <ZoneRoster zone={zone} rows={zoneRows} kills={kills} onOpen={openNative} />
               {zoneRows.length === 0 ? (
                 <Box sx={{ flexGrow: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-                  <RecentlyConsidered rows={considered} kills={kills} onOpen={openNative} />
+                  <RecentlyConsidered rows={considered} onOpen={openNative} />
                 </Box>
               ) : (
-                <RecentlyConsidered rows={considered} kills={kills} onOpen={openNative} />
+                <RecentlyConsidered rows={considered} onOpen={openNative} />
               )}
             </>
           ) : (
             <>
-              <RecentlyConsidered rows={considered} kills={kills} onOpen={openNative} />
+              <RecentlyConsidered rows={considered} onOpen={openNative} />
               <NoZoneYet hasConsidered={considered.length > 0} />
             </>
           )}

@@ -15,7 +15,7 @@
 //       is worth 2^n (D0=1 … D4=16) AND arrives pre-plussed at +n.
 
 import { EXALTATION_SLOT_TYPES, expToNextTier } from '../itemStats'
-import { equipSlotOf, planSlotLabel } from './types'
+import { hostSlotsOf, planSlotLabel } from './types'
 import type { ClassAbbr } from '../classCombo'
 import type {
   EquipSlot,
@@ -150,18 +150,18 @@ export interface PlanWarning {
 export type DonorIndex = ReadonlyMap<string, readonly PlannerDonor[]>
 
 interface WarnCtx {
-  /** the cell being linted; `equipSlotOf` is what R2 is actually asked about */
+  /** the cell being linted; `hostSlotsOf` is what R2 is actually asked about */
   cell: PlanSlotId
   classes: readonly ClassAbbr[]
   donors: DonorIndex
 }
 
 const REASON_MESSAGE: Record<IncompatibleReason, (donor: PlannerDonor, ctx: WarnCtx) => string> = {
-  haste: (d) => `${d.name} — haste can't be moved`,
+  haste: (d) => `${d.name} - haste can't be moved`,
   // Named by CELL, because "can't go in FINGER 2" is what the user is looking at; the RULE it
   // failed is about the slot, and `socketCompatibility` below is asked in those terms.
   slot: (d, ctx) => `${d.name} can't go in ${planSlotLabel(ctx.cell)}`,
-  class: (d, ctx) => `${d.name} — no class overlap with ${ctx.classes.join('/')}`
+  class: (d, ctx) => `${d.name} - no class overlap with ${ctx.classes.join('/')}`
 }
 
 function socketWarning(ctx: WarnCtx, socket: SocketType, planned: PlanSocket): PlanWarning | null {
@@ -172,10 +172,13 @@ function socketWarning(ctx: WarnCtx, socket: SocketType, planned: PlanSocket): P
       socket,
       kind: 'unknown-donor',
       donorKey: planned.donorKey,
-      message: `${planned.effect} — no donor item in the database`
+      message: `${planned.effect} - no donor item in the database`
     }
   }
-  const compat = socketCompatibility(donor, [equipSlotOf(ctx.cell)], ctx.classes)
+  // `hostSlotsOf`, not the cell's own slot: an any-cell (JOS-104) constrains no slot, so it hands
+  // R2 all eighteen and the slot half simply cannot fail there. The class half is untouched — an
+  // any-slot is a place to wear something, never a permit to socket a Ranger proc into a robe.
+  const compat = socketCompatibility(donor, hostSlotsOf(ctx.cell), ctx.classes)
   if (compat.ok) return null
   return {
     slot: ctx.cell,

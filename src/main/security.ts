@@ -28,28 +28,76 @@
 import { sep } from 'node:path'
 
 /**
- * The complete set of hosts a link in this app may open in the user's browser.
+ * One entry in the external-link allowlist: a host, and OPTIONALLY the one subtree of that host
+ * links may point into.
+ *
+ * A rule with no `pathPrefix` is host-wide — every path on that host is openable. A rule WITH
+ * one is scoped: the URL's (already WHATWG-normalized) pathname must BE that prefix or sit
+ * under it, segment-aware, so `…-evil` is not "under" `…-companion` any more than
+ * `rendererEVIL` is inside `renderer` (isInsideDir, below, is the same idea for the disk).
+ */
+export interface ExternalLinkRule {
+  /** Exact hostname, lowercase ASCII — compared against `new URL().hostname`, never matched. */
+  readonly host: string
+  /** Absolute path, NO trailing slash. Omitted = the whole host. */
+  readonly pathPrefix?: string
+}
+
+/**
+ * The complete set of links this app may open in the user's browser.
  *
  *   eqlwiki.com          — every in-app external link today (`shared/wiki.ts wikiPageUrl`):
  *                          the item dialog's Source link, PoskyView's class-quest links and
- *                          the event-log overlay's headline links.
+ *                          the event-log overlay's headline links. Host-wide: the producer is
+ *                          a page TITLE, so the path is exactly the part this app cannot
+ *                          predict, and the wiki is the whole point of the link.
  *   www.eqlwiki.com      — same site; the wiki answers on both.
  *   wiki.project1999.com — the other wiki this app already talks to (boss portraits, see
  *                          imageCache.ts's IMAGE_URL_ALLOWLIST). Listed so a future boss link
  *                          works, not because one exists today.
+ *   github.com           — REPO-SCOPED (owner ruling, JOS-263), reviewing the widening JOS-254
+ *                          made for the What's new panel's releases link. github.com is not one
+ *                          site the way a wiki is: it is every repo anyone has ever pushed,
+ *                          including whatever a "download this fix" page would be. The app has
+ *                          exactly ONE reason to send anybody there — its own project — and the
+ *                          ONE link that uses it is a constant in the renderer bundle
+ *                          (`GITHUB_RELEASES_URL`), not text this app did not author. So the
+ *                          entry is written as the thing it is for: this repo's subtree, where
+ *                          every build of this app already comes from (the updater's own feed,
+ *                          src/main/updater.ts). github.com's ROOT, and every other owner and
+ *                          repo on it, is refused like any host that is not on this list.
  *
- * Adding a host here is a deliberate decision to let renderer-supplied text cause the OS to
- * open something. Deliberately NOT shared with imageCache's list: that one governs what the
- * MAIN process will fetch bytes from, this one governs what the OS will be asked to open —
- * two different powers that should be widened independently.
+ * Adding an entry here is a deliberate decision to let renderer-supplied text cause the OS to
+ * open something, and the narrowest entry that serves the link is the one to write. Deliberately
+ * NOT shared with imageCache's list: that one governs what the MAIN process will fetch bytes
+ * from, this one governs what the OS will be asked to open — two different powers that should be
+ * widened independently.
  */
-export const EXTERNAL_LINK_ALLOWLIST: readonly string[] = [
-  'eqlwiki.com',
-  'www.eqlwiki.com',
-  'wiki.project1999.com'
+export const EXTERNAL_LINK_ALLOWLIST: readonly ExternalLinkRule[] = [
+  { host: 'eqlwiki.com' },
+  { host: 'www.eqlwiki.com' },
+  { host: 'wiki.project1999.com' },
+  { host: 'github.com', pathPrefix: '/jmoyers/everquest-companion' }
 ]
 
-const ALLOWED_LINK_HOSTS = new Set(EXTERNAL_LINK_ALLOWLIST)
+const ALLOWED_LINK_RULES = new Map(EXTERNAL_LINK_ALLOWLIST.map((r) => [r.host, r] as const))
+
+/**
+ * Is `pathname` the allowed subtree itself, or something inside it?
+ *
+ * SEGMENT-AWARE, never a bare `startsWith`: `/jmoyers/everquest-companion-evil/x` shares the
+ * prefix's characters and is a DIFFERENT repo, so the boundary is the separator. The prefix
+ * itself passes (the repo's own front page is the same page the releases link's parent is).
+ *
+ * Nothing here has to defend against traversal: `new URL()` has already resolved `..` — and its
+ * `%2e%2e` spellings — out of `pathname` before we see it, so `…/everquest-companion/../../x`
+ * arrives as `/x` and never matches. The href we hand back is that same normalized URL, so what
+ * we return is always what we tested. Case-SENSITIVE by design: the one producer is a lowercase
+ * constant, and GitHub's own case-insensitive redirect is not a reason for this list to guess.
+ */
+function isUnderPathPrefix(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`)
+}
 
 /** Longest URL we will even look at. Real links are ~60 chars; this only exists so a
  *  megabyte of `<a href>` can't be pushed through `new URL()`. */
@@ -71,6 +119,10 @@ const MAX_LINK_LEN = 2048
  *                            `evil-eqlwiki.com` must fail, and they do. `new URL()`
  *                            lowercases + punycodes the host, so a homoglyph domain can
  *                            never compare equal to an ASCII entry.
+ *   * the entry's PATH SCOPE — for an entry that has one (github.com, JOS-263): the host is
+ *                            necessary but not sufficient, and the path must be inside the one
+ *                            subtree the entry names. A host-wide entry skips this check
+ *                            because it has nothing to say about paths.
  *
  * The href is returned rather than the caller's raw string so what we open is what we
  * validated (WHATWG normalization already applied), never the original spelling.
@@ -86,7 +138,9 @@ export function allowedExternalUrl(raw: unknown): string | null {
   if (u.protocol !== 'https:') return null
   if (u.username !== '' || u.password !== '') return null
   if (u.port !== '') return null
-  if (!ALLOWED_LINK_HOSTS.has(u.hostname)) return null
+  const rule = ALLOWED_LINK_RULES.get(u.hostname)
+  if (!rule) return null
+  if (rule.pathPrefix !== undefined && !isUnderPathPrefix(u.pathname, rule.pathPrefix)) return null
   return u.toString()
 }
 
@@ -195,4 +249,76 @@ export function isInsideDir(path: string, dir: string): boolean {
  */
 export function isSafePackId(id: unknown): id is string {
   return typeof id === 'string' && id.length > 0 && id.length <= 128 && /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(id)
+}
+
+// ---- registry `source_*` fields: same registry, same trust as the pack name ----------
+//
+// A registry row also carries three strings that flow straight into a URL or an archive path,
+// and the registry is the same untrusted producer as `name`:
+//
+//   * `source_repo` → `https://github.com/{source_repo}/archive/refs/tags/{ref}.tar.gz` and
+//     `https://raw.githubusercontent.com/{source_repo}/{ref}` — a `..` or an extra `/` here
+//     re-points the download/preview at another repo or walks the URL path.
+//   * `source_ref`  → the `{ref}` in both of those — a `/` or `..` walks the same paths.
+//   * `source_path` → the pack-root PREFIX inside the extracted archive (and the raw-preview
+//     subpath) — a `..` or an absolute/drive path escapes the archive root.
+//
+// Same posture as isSafePackId: tight ALLOWLISTS of the shapes the honest registry actually
+// uses (`utensils/openpeon-alan-rickman-soundpack`, `v1.1.2`, `.` or `sounds/foo`), not a
+// blocklist of traversal spellings. Total over arbitrary input, unit-tested without Electron.
+
+/** GitHub `owner/repo`: exactly one slash, GitHub-shaped owner + repo, no `..`, no extra path. */
+export function isSafeSourceRepo(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length === 0 || v.length > 140) return false
+  const parts = v.split('/')
+  if (parts.length !== 2) return false
+  const [owner, repo] = parts
+  // Owner: 1–39 chars, starts alphanumeric, then alphanumerics and hyphens anywhere.
+  //
+  // JOS-162: this used to also forbid a TRAILING hyphen (and therefore, with the leading-hyphen
+  // anchor, any pair the shape produced) because that is what GitHub's SIGNUP form enforces
+  // today. GitHub's real namespace is older than that form: `heron--` is a live account, and its
+  // 45 Overwatch voice packs were 45 of the 47 rows the live openpeon registry lost at ingest.
+  // Encoding someone else's current signup policy as a security rule made honest data
+  // unreachable, so the rule now encodes only what the boundary needs.
+  //
+  // What the boundary needs is unchanged and is carried entirely by the CHARSET: `[A-Za-z0-9-]`
+  // admits no `/` (so `owner/repo` can never grow a third segment past the `parts.length !== 2`
+  // check) and no `.` (so no `.`, `..`, or any traversal spelling can exist in an owner at all).
+  // The leading-alphanumeric anchor stays — no evidence asks for a leading-hyphen owner, and it
+  // keeps an owner from ever being all-punctuation.
+  if (owner.length > 39 || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(owner)) return false
+  // Repo: 1–100 chars of the GitHub repo-name set, but never `.`/`..` alone.
+  if (repo.length > 100 || repo === '.' || repo === '..') return false
+  return /^[A-Za-z0-9._-]+$/.test(repo)
+}
+
+/** A git tag/ref used verbatim in a URL path: no separators, no `..`, no leading dot/dash. */
+export function isSafeSourceRef(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length === 0 || v.length > 100) return false
+  if (v.includes('..')) return false
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)
+}
+
+/**
+ * A safe relative subpath (the pack root within the archive): `.` (or its empty-string alias)
+ * for repo root, else slash-separated segments of the allowlisted set. No `..`, no absolute
+ * path, no drive letter, no backslash, no NUL, no empty segment. A single trailing slash is
+ * tolerated (the installer already strips one) but nothing else.
+ *
+ * JOS-162: `''` IS `.`, and always was everywhere but here. The registry's convention is a dot,
+ * but two live rows publish an empty string, and every consumer already collapses the two
+ * (`pack.source_path && pack.source_path !== '.' ? … : ''` in packRegistry's tar reader and raw
+ * previewer, and in defaultPacks) — so rejecting `''` dropped two honest packs to enforce a
+ * distinction the code below the validator does not make. It is also the SAFEST value in the
+ * domain: it names the archive root and contains no character at all, let alone a separator.
+ */
+export function isSafeSourcePath(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length > 200) return false
+  if (v === '' || v === '.') return true
+  if (v.includes('\\') || v.includes('\0')) return false
+  if (v.startsWith('/') || /^[A-Za-z]:/.test(v)) return false
+  const trimmed = v.replace(/\/+$/, '')
+  if (trimmed === '') return false
+  return trimmed.split('/').every((s) => s !== '' && s !== '.' && s !== '..' && /^[A-Za-z0-9._-]+$/.test(s))
 }

@@ -13,6 +13,12 @@
 // logging) while still folding historical events into their snapshot state.
 
 import type { LogEvent } from '../../shared/logEvents'
+// THE ONE CHOKE POINT (JOS-100). Both feeders and the derived drain pass through `emit`, which
+// makes it the only place a breadcrumb ring can see everything exactly once. `breadcrumbs.ts`
+// imports NOTHING — it has to, to be callable from here — and a push is three slot writes into
+// preallocated arrays with no clock read and no allocation, which is what the hot path's
+// discipline requires (see that file's header, and `linesPending` in telemetry/collector.ts).
+import { noteEventKind } from '../telemetry/breadcrumbs'
 
 export type LogEventListener = (ev: LogEvent, live: boolean) => void
 
@@ -74,6 +80,9 @@ export class LogBus {
 
   /** Synchronously deliver an event to all subscribers in registration order. */
   emit(ev: LogEvent, live: boolean): void {
+    // BEFORE the listeners, so a crumb exists for the event a listener is about to throw on —
+    // which is precisely the event a reader of that crash most wants to see.
+    noteEventKind(ev.kind, ev.ts)
     for (const fn of this.listeners) fn(ev, live)
     // Drain any derived events synthesized during this delivery (and any they in turn
     // synthesize — though in practice buffs never derives from a derived event). The
@@ -97,6 +106,9 @@ export class LogBus {
   private drain(): void {
     let next: DerivedEvent | undefined
     while ((next = this.derived.shift()) !== undefined) {
+      // Derived events get a crumb too (`epoch` is one of the most informative there is), and
+      // for the same reason as above: before the listeners that might throw on it.
+      noteEventKind(next.ev.kind, next.ev.ts)
       for (const fn of this.listeners) fn(next.ev, next.live)
     }
   }
@@ -111,6 +123,9 @@ export class LogBus {
     let next: DerivedEvent | undefined
     while ((next = this.derived.shift()) !== undefined) {
       count += 1
+      // Derived events get a crumb too (`epoch` is one of the most informative there is), and
+      // for the same reason as above: before the listeners that might throw on it.
+      noteEventKind(next.ev.kind, next.ev.ts)
       for (const fn of this.listeners) fn(next.ev, next.live)
     }
     probe.end(count, performance.now() - t0)

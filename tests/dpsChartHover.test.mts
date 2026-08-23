@@ -66,8 +66,11 @@ function mkChart(out: number[], live = false): DpsChart {
   return chart
 }
 
-/** The polyline point string, back as numbers — the drawing, read as data. */
-function parsePts(s: string): { x: number; y: number }[] {
+/** The polyline point string, back as numbers — the drawing, read as data. `outLine` is nullable
+ *  since JOS-264 (a hidden line is not drawn); every case here draws it, so an absent one is a
+ *  broken fixture rather than something to branch on. */
+function parsePts(s: string | null): { x: number; y: number }[] {
+  assert.ok(s, 'the fixture must draw this line')
   return s.split(' ').map((p) => {
     const [x, y] = p.split(',').map(Number)
     return { x, y }

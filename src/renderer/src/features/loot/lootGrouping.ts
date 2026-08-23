@@ -1,7 +1,9 @@
 import type { LootDisposition, LootEvent } from '@shared/types'
+import { isAcquisition } from '@shared/lootDisposition'
 import type { InventoryRow } from '../inventory/reconcile'
 import { questItemNames } from './lootItemData'
 import { DEFAULT_LOOT_SORT, sortLootRows, type LootSortKey } from './lootSort'
+import { buildOwnedRows } from './ownedItems'
 
 // A loot event with two precomputed keys — computed ONCE per history change so the
 // per-keystroke filter is a plain substring test (never re-lowercasing thousands of rows
@@ -25,6 +27,9 @@ export interface GroupRow {
   disposition?: LootDisposition
   /** Held per the inventory export but never looted this epoch — no loot columns. */
   invOnly?: boolean
+  /** What the EXPORT vouches for on this key. Set on inventory-only rows, which have no loot
+   *  history to count and whose reconciled `net` is 0 under the `log` count source (JOS-160). */
+  owned?: number
 }
 
 /** The active filters, most recent first. */
@@ -54,9 +59,20 @@ interface Group {
   dispositions: Set<LootDisposition | undefined>
 }
 
+/**
+ * ONE ROW PER ITEM, over the LOOT rows only.
+ *
+ * A destroy is honest bag history and the flat chronological ledger keeps it, wearing its own chip
+ * (JOS-401) — but this table's columns are `Times looted`, `Top source` and `Zones`, and a destroy
+ * answers none of them: it names no mob, and adding its stack size to a times-looted count would
+ * make emptying a bag look like farming. So the grouped table is built from acquisitions, and an
+ * item this character ONLY ever destroyed has no group row (its flat rows are still in the ledger,
+ * and the inventory-only tail is where a held-but-never-looted item is reported).
+ */
 function tallyGroups(events: KeyedLoot[]): Map<string, Group> {
   const map = new Map<string, Group>()
   for (const e of events) {
+    if (!isAcquisition(e)) continue
     const key = e.itemKey
     let cur = map.get(key)
     if (!cur) {
@@ -82,15 +98,16 @@ function tallyGroups(events: KeyedLoot[]): Map<string, Group> {
 }
 
 /**
- * One row per item, in the reader's chosen order (lootSort.ts), favorites pinned on top.
+ * One row per item, in the reader's chosen order (lootSort.ts) — and in nothing else.
  *
- * The pin is a SECOND pass on purpose: Array#sort is stable, so favorites keep the chosen order
- * among themselves and so does everything below them. Swapping sort keys therefore re-orders
- * both blocks and moves nothing between them.
+ * IT USED TO CARRY A SECOND PASS (JOS-345). Favorited items were re-sorted into a block on top,
+ * stably, so the chosen order survived inside each block. The star that set the flag has left this
+ * window on the owner's ruling, and the pin left with it: an order the reader has no control over
+ * is an order the reader cannot account for. One comparator, one order, and every comparator in
+ * lootSort.ts is total — so the list is deterministic without the pass that used to follow it.
  */
 export function groupLootRows(
   events: KeyedLoot[],
-  isFavorite: (name: string) => boolean,
   sort: LootSortKey = DEFAULT_LOOT_SORT
 ): GroupRow[] {
   const list: GroupRow[] = [...tallyGroups(events).entries()].map(([key, g]) => {
@@ -109,38 +126,26 @@ export function groupLootRows(
       disposition
     }
   })
-  const sorted = sortLootRows(list, sort)
-  // Pin favorites to the top (stable).
-  return sorted.sort((a, b) => Number(isFavorite(b.item)) - Number(isFavorite(a.item)))
+  return sortLootRows(list, sort)
 }
 
 /**
- * The opt-in tail of items the inventory export knows about but that were never looted this
- * epoch (bank stock, pre-epoch gear). Kept OUT of the default view so the Loot table stays a
- * loot table. Already net-desc from reconcile, so only the favorites pin re-sorts it.
+ * The tail of items the inventory export knows about but that were never looted this epoch (bank
+ * stock, pre-epoch gear, anything acquired before this log started). Shown when the chip is lit or
+ * whenever a search is running — `showsInvOnly`.
+ *
+ * The RULE is `ownedItems.ts` (JOS-160); this is the binding that hands it the Sky quest-item set.
+ * The split is not decoration: this module cannot be loaded by node (`lootItemData` → `data/index`
+ * → a `@shared/profiles` value import the bundler alone resolves), and the rule needed a unit test.
  */
 export function buildInvOnlyRows({
   source,
   questOnly,
-  q,
-  isFavorite
+  q
 }: {
   source: InventoryRow[]
   questOnly: boolean
   q: string
-  isFavorite: (name: string) => boolean
 }): GroupRow[] {
-  let list = source
-  if (questOnly) list = list.filter((r) => questItemNames.has(r.key))
-  if (q) list = list.filter((r) => r.name.toLowerCase().includes(q))
-  const rows: GroupRow[] = list.map((r) => ({
-    key: `inv:${r.key}`,
-    countKey: r.key,
-    item: r.name,
-    count: 0,
-    last: 0,
-    zoneCount: 0,
-    invOnly: true
-  }))
-  return rows.sort((a, b) => Number(isFavorite(b.item)) - Number(isFavorite(a.item)))
+  return buildOwnedRows({ source, questOnly, q, isQuestItem: (k) => questItemNames.has(k) })
 }

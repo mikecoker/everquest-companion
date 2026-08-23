@@ -87,10 +87,18 @@ async function stepDropsPanel(page: Page, log: FixtureLog): Promise<string | nul
   // Its COUNT is asserted exactly, because the harness wrote it.
   check('…ordered by observed drops — the item that dropped three times is the top row', top.includes(DROP_ITEM), top)
   check(`…stating its in-window count exactly (${String(DROP_COUNT)} of them were written)`, top.includes(`${String(DROP_COUNT)}×`), top)
-  // A RATE NEVER APPEARS WITHOUT ITS SPAN: the panel's single caption is the active time every
-  // row divides by, and the row itself carries either a rate or the em-dash.
+  // A RATE NEVER APPEARS WITHOUT ITS SPAN, AND THE SPAN NAMES ITS HOUR: the panel's single caption
+  // is the denominator every row divides by, and the row itself carries either a rate or the
+  // em-dash. Since JOS-288 that hour is the tab's basis pick rather than always the active one —
+  // the default is `elapsed`, the toggle is `leveling-basis`, and `tests/rateBasis.test.mts` pins
+  // which number each word produces. What this spec asserts is the honesty rule itself: a span is
+  // stated, and it says WHICH hour it is, so a rate can never appear as a bare "per hour".
   const panel = (await textOf(page, DROPS)).replace(/\s+/g, ' ')
-  check('…over a STATED active span (a rate without its denominator is a claim, not a measurement)', /over .+ active/.test(panel), panel.slice(0, 120))
+  check(
+    '…over a STATED span that names its hour (a rate without its denominator is a claim, not a measurement)',
+    /over .+ (elapsed|active)/.test(panel),
+    panel.slice(0, 120)
+  )
   check('…and every row carries a rate or an honest em-dash, never a bare count', /drops\/hr|—/.test(top), top)
   return top
 }

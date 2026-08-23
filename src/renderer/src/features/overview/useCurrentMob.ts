@@ -7,9 +7,12 @@
 // catalog offline, an uncatalogued mob falls through to the live wiki. Scraper etiquette is a
 // LAW here (AGENTS.md → Data sources), so all THREE mitigations are present and none is optional:
 //
-//   1. CANONICAL KEY — `trim().toLowerCase()`, so 'A Sphinx' and 'a sphinx ' are one subject.
-//      (Main's `mobKey` additionally folds backtick variants and whitespace runs; moving it to
-//      src/shared is a named future seam. This key only has to dedupe lookups.)
+//   1. CANONICAL KEY — `mobKey` (src/shared/mobKey.ts), the SAME fold main applies before it
+//      answers, so 'A Sphinx' and 'a sphinx ' are one subject and so are 'an elemental capturer'
+//      and 'an elemental capturer (14)'. That seam is closed as of JOS-350; until then this was
+//      an inline `trim().toLowerCase()` that could not strip the spawn-generation suffix
+//      `CurrentTarget.name` carries, so a suffixed target both asked main twice for one mob and
+//      never found its own consider seed (the ring's names never carry the suffix).
 //   2. DEBOUNCE — mid-pull target flapping resolves to ONE lookup.
 //   3. PER-KEY MEMO for the component's life — the `requested` ref discipline
 //      `features/loot/useNotablePickups.ts:54` already uses, so a mob is asked for at most once.
@@ -21,14 +24,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CombatSnapshot, CurrentTarget } from '@shared/combat'
 import type { ConsiderDelta, ConsiderSnap, MobKnowledge } from '@shared/types'
+import { mobKey } from '@shared/mobKey'
 import { useModule } from '../../lib/useModule'
 
 /** How long the target must hold still before we ask main about it. */
 const LOOKUP_DEBOUNCE_MS = 750
 
-/** The canonical dedupe key for a mob name. Display stays RAW (law 2). */
+/**
+ * The canonical dedupe key for a mob name — THE app-wide one (`shared/mobKey`), not a local
+ * spelling of it. Display stays RAW (law 2).
+ */
 export function mobLookupKey(name: string): string {
-  return name.trim().toLowerCase()
+  return mobKey(name)
 }
 
 /**

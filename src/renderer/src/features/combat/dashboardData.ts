@@ -23,6 +23,8 @@
 // RELATIVE value import, like procRows.ts and mobSearch.ts: this module is imported by node
 // tests (tests/combatPerMobGhosts.test.mts), which resolve no `@shared/*` alias for values.
 import { LIVE_FIGHT } from '../../../../shared/fightSelection'
+import { abilityMultiAttack, abilityRiposte, type AbilityMulti, type AbilityRiposte } from './abilityStats'
+import { groupSpellComponents, mergeGroup, rankRows } from './skillGroups'
 import type {
   DamageCategory,
   SegmentSummary,
@@ -37,11 +39,23 @@ export type FlatSkill = SkillView & { category: DamageCategory }
 
 /**
  * A row of the flat level-2 list. Identical to a FlatSkill except that a GROUP row also carries
- * the per-skill rows it stands for (`children`) — today only the Slay Undead aggregate does.
- * Consumers that just render a bar can ignore `children` entirely; the ones that expand a row
- * use it as the inline breakdown.
+ * the rows it stands for (`children`) — the Slay Undead aggregate and the spell-component merge —
+ * and that a row may carry its own per-ability multi-attack reading (`multi`, JOS-113: the
+ * double/triple that used to live one level down, attached to the ability it belongs to). Both
+ * are optional; consumers that just render a bar ignore them, the ones that expand a row use them.
  */
-export type SkillRow = FlatSkill & { children?: FlatSkill[] }
+export type SkillRow = FlatSkill & {
+  children?: FlatSkill[]
+  multi?: AbilityMulti | null
+  /** The share of this ability's damage that came from riposte counter-swings (JOS-354). Present
+   *  on the auto-attack ability only — see `abilityRiposte` for why it is a subset, not a row. */
+  riposte?: AbilityRiposte | null
+  /** What a GROUP row's children are, for the two labels that name them ("· 2 skills" on the bar
+   *  face, "By skill" over the expansion). Absent ⇒ 'skill', which is what the Slay Undead group
+   *  has always said. A spell group's children are the message SHAPES one cast printed, not
+   *  separate abilities, so it says 'component' instead. */
+  childKind?: 'skill' | 'component'
+}
 
 /**
  * Label for the aggregated slay row. Mirrors `CATEGORY_LABEL.slay` in @shared/combat, spelled
@@ -59,10 +73,9 @@ const SLAY_LABEL = 'Slay Undead'
  * different weapons. The user reads them as one ability, so the list shows one row; the weapon
  * split is one click down, inside the row's own expansion (no new nav level).
  *
- * Aggregation is a plain sum over counts/damage with `max` = the largest single proc across all
- * weapons and `min` = the smallest LANDED one (0/absent minima are skipped — a resist/miss-only
- * lane carries no amount and must never pull the group minimum to 0). Rows are re-sorted and
- * every bar pct re-based on the new global max, since the merged row is usually the biggest one.
+ * Aggregation, child ranking and the list's re-scaling are `skillGroups.mergeGroup`/`rankRows` —
+ * shared with the spell-component merge (JOS-244), so the two groups this list can hold behave
+ * identically and there is one place to read what a group row's numbers mean.
  *
  * A single slay skill is left EXACTLY as it is: a group of one is a wrapper around nothing, and
  * the per-weapon row ("Backstab · Slay Undead") is strictly more informative than a "Slay Undead"
@@ -71,54 +84,81 @@ const SLAY_LABEL = 'Slay Undead'
 export function groupSlay(rows: SkillRow[]): SkillRow[] {
   const slay = rows.filter((r) => r.category === 'slay')
   if (slay.length < 2) return rows
-  const children = [...slay].sort((a, b) => b.total - a.total || b.hits - a.hits || a.name.localeCompare(b.name))
-  const sum = (pick: (s: FlatSkill) => number): number => children.reduce((n, s) => n + pick(s), 0)
-  const minima = children.map((s) => s.min ?? 0).filter((m) => m > 0)
-  const childMax = Math.max(1, ...children.map((s) => s.total))
-  const group: SkillRow = {
-    name: SLAY_LABEL,
-    category: 'slay',
-    total: sum((s) => s.total),
-    pct: 0,
-    hits: sum((s) => s.hits),
-    crits: sum((s) => s.crits),
-    max: Math.max(0, ...children.map((s) => s.max)),
-    min: minima.length > 0 ? Math.min(...minima) : undefined,
-    misses: sum((s) => s.misses ?? 0),
-    resists: sum((s) => s.resists ?? 0),
-    lands: sum((s) => s.lands ?? 0),
-    // Children bar widths are relative to the LARGEST slay skill, so the nested list reads as
-    // its own ranking rather than as slivers of the parent's width.
-    children: children.map((s) => ({ ...s, pct: (s.total / childMax) * 100 }))
-  }
-  const out: SkillRow[] = [...rows.filter((r) => r.category !== 'slay'), group]
-  out.sort((a, b) => b.total - a.total || b.hits - a.hits || a.name.localeCompare(b.name))
-  const max = Math.max(1, ...out.map((r) => r.total))
-  return out.map((r) => ({ ...r, pct: (r.total / max) * 100 }))
+  const group = mergeGroup(slay, SLAY_LABEL, 'slay', 'skill')
+  return rankRows([...rows.filter((r) => r.category !== 'slay'), group])
 }
 
 /**
- * Drill-down selection (union). `entity` = the level-2 flat skill list for one source
- * (the existing meter drill). `target` = the level-2 flat skill list for everything you
- * and your pet landed on ONE mob (driven by the Damage-by-mob panel). They are mutually
- * exclusive by construction: picking either replaces the other, so the main panel always
- * has exactly one level-2 subject and one breadcrumb.
+ * Drill-down selection (union) — ONE token, one mechanic, every damage surface (JOS-105), now TWO
+ * levels (JOS-113: the owner rejected the level-3 CATEGORY drill; per-ability stats expand INLINE
+ * within the level-2 list instead — see abilityStats.ts / combatShared.SkillBar).
+ *
+ * `entity`   = level 2, the flat ONE-BAR-PER-ABILITY list for one source (the meter drill).
+ * `target`   = the flat skill list for everything you and your pet landed on ONE mob (driven by
+ *              the Damage-by-mob panel; Combat tab only).
+ *
+ * They are mutually exclusive by construction: picking either replaces the other, so the panel
+ * always has exactly one subject and one breadcrumb.
+ *
+ * `name` IS THE IDENTITY THAT CROSSES FIGHTS (JOS-240), and it is why the entity arm carries two
+ * fields for one subject. A `SourceView.id` is only as stable as what minted it: 'you',
+ * `member:<key>` and `heal:<key>` are the same string in every fight, but `pet:<instanceId>` and
+ * an incoming mob's id are WORLD INSTANCES — one spawn, one summon — so the same pet after a
+ * re-summon, or the same fight after a restart re-folded the log, is a different id for what the
+ * user reads as the same row. The name is what they clicked; the id is what they clicked it on.
+ * Resolution prefers the id and falls back to the name (`petRows.meterPanel`), so an exact match
+ * always wins and the name only ever rescues a drill that would otherwise have degraded.
+ *
+ * OPTIONAL, not required: a token written by a build before JOS-240 carries no name, and reads
+ * exactly as it always did. The `target` arm needs none — a mob drill was always keyed by NAME.
  */
-export type Drill = { kind: 'entity'; entityId: string } | { kind: 'target'; target: string }
+export type Drill = { kind: 'entity'; entityId: string; name?: string } | { kind: 'target'; target: string }
+
+/**
+ * The drill token as the ROW BUILDER wants it (`petRows.meterPanel`). The mob arm is not a source
+ * drill at all, so it resolves to `null` — level 1 — exactly as an explicit un-drill does.
+ *
+ * This is the one translation between the Combat tab's union and the shape the overlay already
+ * persists (`OverlayDrill`), which is why the overlay hands its stored value straight to the
+ * builder and needs no translation of its own. The overlay passes no `name` and so keeps the
+ * pure id resolution it has always had.
+ */
+export function meterDrill(drill: Drill | null): { entityId: string; name?: string } | null {
+  if (!drill) return null
+  if (drill.kind === 'entity') return { entityId: drill.entityId, name: drill.name }
+  return null
+}
 
 /**
  * Flatten a source's per-category skill lists into ONE list ranked by damage desc, and
  * re-base each row's bar pct on the global max (the engine's `pct` is relative to the
  * skill's own category max, which would make small categories render full-width here).
- * The slay rows then collapse into a single grouped row (`groupSlay`) — the ONE place the
- * flat list departs from "one row per engine skill", so every surface that renders this
- * list (meter drill, overlay drill, breakdown preview) groups identically.
+ * The slay rows then collapse into a single grouped row (`groupSlay`), and the two message
+ * shapes of one spell into another (`groupSpellComponents`, JOS-244) — the TWO places the flat
+ * list departs from "one row per engine skill", so every surface that renders this list (meter
+ * drill, overlay drill, breakdown preview, copy-to-clipboard) groups identically.
  */
 export function flattenSkills(e: SourceView): SkillRow[] {
   const rows: FlatSkill[] = e.categories.flatMap((c) => c.skills.map((s) => ({ ...s, category: c.category })))
   rows.sort((a, b) => b.total - a.total || b.hits - a.hits || a.name.localeCompare(b.name))
   const max = Math.max(1, ...rows.map((r) => r.total))
-  return groupSlay(rows.map((r) => ({ ...r, pct: (r.total / max) * 100 })))
+  // Each row carries its OWN multi-attack reading (JOS-113): the double/triple that used to live
+  // one drill level down, attached to the ability it belongs to. `abilityMultiAttack` reads the
+  // engine's round lanes and files each to exactly one ability (auto-attack "Melee" pools its
+  // weapon verbs; a named special is its own lane). groupSlay spreads it through onto any child.
+  return groupSlay(
+    groupSpellComponents(
+      rows.map((r) => ({
+        ...r,
+        pct: (r.total / max) * 100,
+        multi: abilityMultiAttack(e, r.name, r.category),
+        // Riposte damage is a SUBSET of the ability it rides (JOS-354): stated inside the
+        // auto-attack row's expansion, never given a bar of its own, because the damage is
+        // already in that bar's total.
+        riposte: abilityRiposte(e, r.name, r.category)
+      }))
+    )
+  )
 }
 
 /**
@@ -265,10 +305,17 @@ export function buildDpsSeries(tl: TimelineView, live = false): DpsSeries {
     else if (e.kind === 'pet') {
       rawPet[i] += e.amount
       hasPet = true
-    } else if (e.kind === 'member') {
+    } else if (e.kind === 'member' || e.kind === 'allyPet' || e.kind === 'other') {
       // EXPLICIT, not an `else`. Before the group model the final branch was "everything that is
       // not you or your pet is incoming", which is exactly the assumption a fourth source kind
-      // breaks: a group-mate's 300-damage nuke would have been drawn as damage taken.
+      // breaks: a group-mate's 300-damage nuke would have been drawn as damage taken. JOS-250's
+      // FIFTH kind is the same trap again, so it is named here rather than left to fall through:
+      // an ally's charm pet is somebody else's outgoing damage, which is what this band already
+      // means. It shares the band rather than growing a sixth one because the curve answers "how
+      // much is coming from where", and the row list beneath it is where the WHOSE is spelled out.
+      // JOS-430's SIXTH kind ('other') is the trap a third time, and the most dangerous of the
+      // three: it is the kind that fires on an ungrouped session, so a missing branch here would
+      // have drawn a stranger's whole raid as damage TAKEN on the most common configuration there is.
       rawGroup[i] += e.amount
       hasGroup = true
     } else {
@@ -520,11 +567,11 @@ export function skillsForTarget(tl: TimelineView, target: string): TargetDetail 
   const max = Math.max(1, ...rows.map((r) => r.total))
   for (const r of rows) r.pct = (r.total / max) * 100
   return {
-    // Same slay grouping as the source drill — the per-mob list is the same flat list, filtered
-    // to one defender, so it must not regrow the per-weapon slay duplicates. Grouping runs AFTER
-    // the sample scaling above, so a downsampled ring's group sums the same estimates its
-    // children show (all of them wear the panel's `~`).
-    rows: groupSlay(rows),
+    // Same grouping as the source drill — the per-mob list is the same flat list, filtered to one
+    // defender, so it must not regrow the per-weapon slay duplicates NOR the two-shapes-of-one-
+    // spell duplicates (JOS-244). Grouping runs AFTER the sample scaling above, so a downsampled
+    // ring's group sums the same estimates its children show (all of them wear the panel's `~`).
+    rows: groupSlay(groupSpellComponents(rows)),
     total: t.total * scale,
     hits: Math.round(t.hits * scale),
     crits: Math.round(t.crits * scale),
@@ -619,7 +666,7 @@ export function fightScopeOptions(segments: SegmentSummary[]): ScopeOptions {
     value: LIVE_SELECTION,
     // State, not process: while a fight is open this row IS the current fight; between pulls it
     // is plainly the last one. It must never read "live" for a finished encounter.
-    label: open ? 'Current fight (live)' : `Last fight — ${headSeg.name}`,
+    label: open ? 'Current fight (live)' : `Last fight - ${headSeg.name}`,
     name: headSeg.name,
     dps: headSeg.dps,
     startTs: headSeg.startTs,
@@ -638,12 +685,29 @@ export function fightScopeOptions(segments: SegmentSummary[]): ScopeOptions {
   return { head, rest }
 }
 
+/**
+ * THE WORD A ZONE-SESSION ROW IS CALLED BY (JOS-322) — the renderer's mirror of the engine's
+ * `lifecycle.zoneSessionWord`, over the serialized summary.
+ *
+ * A stay the WORLD ended is that zone's `overall`; a stay the USER ended with the app-wide
+ * "New session" mark is that zone's `session`, which is the word the loot ledger and the leveling
+ * surfaces already print for the very same click. The live row has no `closedBy` at all and is
+ * always `overall` — it has not ended, so nothing has decided anything about it yet.
+ *
+ * A MIRROR AND NOT A SECOND OPINION: the engine names the SegmentView it hands back with its own
+ * copy of this rule, so the picker row and the header title of the thing it selects agree by
+ * construction. Both read the same field of the same record.
+ */
+function zoneSessionWord(z: ZoneSessionSummary): string {
+  return z.closedBy === 'mark' ? 'session' : 'overall'
+}
+
 /** Overall scope: the live zone session, then the finalized zone-session history. NO fights. */
 export function overallScopeOptions(zoneSessions: ZoneSessionSummary[]): ScopeOptions {
   const toRow = (z: ZoneSessionSummary): ScopeOption => ({
     value: z.id,
-    label: `${z.zone} — overall`,
-    name: `${z.zone} — overall`,
+    label: `${z.zone} - ${zoneSessionWord(z)}`,
+    name: `${z.zone} - ${zoneSessionWord(z)}`,
     dps: z.dps,
     startTs: z.startTs,
     durationSec: z.live ? 0 : Math.max(1, (z.endTs - z.startTs) / 1000),
@@ -660,13 +724,26 @@ export function overallScopeOptions(zoneSessions: ZoneSessionSummary[]): ScopeOp
  * reach is finished: a `zs<n>` zone session you have left, a fight id from history, or the head
  * row between pulls, which is honestly labelled "Last fight — X" and is a finalized encounter.
  *
- * TWO SURFACES READ IT, which is why it lives here beside `scopeOptions` rather than in either
- * one (panel/overlay parity is house law):
- *   - the DPS curve's scrolling window only follows `now` for a live selection — a finished
- *     fight must not scroll as if time were still passing in it;
- *   - the pet-claim OFFER renders only for a live selection (JOS-49) — "is this thing yours?"
- *     is a question about the fight in front of you, and asking it above a meter showing last
- *     Tuesday's zone session is the surface half of the wall the currency gate closed in main.
+ * ONE SURFACE READS IT TODAY: the DPS curve's scrolling window, which follows `now` only for a
+ * live selection — a finished fight must not scroll as if time were still passing in it.
+ *
+ * IT USED TO BE TWO. The second was the pet-claim OFFER ("<Name> — your pet?", with Yes and No),
+ * which rendered only for a live selection because "is this thing yours?" is a question about the
+ * fight in front of you. JOS-49 DELETED THE QUESTION — the owner's ruling was that ordering a pet
+ * once is cheaper than a guess the app can get wrong — and nothing asks the user about a pet
+ * anywhere in the product now (`tests/e2e/combatSteps.mts stepPetNeverAsked` asserts the absence,
+ * including that the snapshot carries no `petClaims` for a surface to render).
+ *
+ * WHAT BINDS A PET INSTEAD lives entirely in main, in `src/main/combat/petClaims.ts`, and never
+ * involves the user: three log lines, one state transition, no UI. The private `… Master.` tell
+ * (JOS-47), the public `/pet who leader` answer (JOS-52), and your own pet-only buff landing
+ * (JOS-188 — the route that costs the player nothing). The accepted blind spot is stated there
+ * rather than papered over here: a player who neither orders nor buffs their pet has one the log
+ * cannot bind, and that is the trade JOS-49 chose over asking.
+ *
+ * This function still lives here beside `scopeOptions` rather than in its one caller, because
+ * panel/overlay parity is house law and "which selection is the live one" is the kind of question
+ * a second surface asks the moment one appears.
  */
 export function isLiveSelection(head: ScopeOption | null, selection: string): boolean {
   return !!head && selection === head.value && head.live

@@ -16,14 +16,19 @@ import type { JSX } from 'react'
 import { TEXT_SCALE_MAX, TEXT_SCALE_MIN, TEXT_SCALE_STEP, clampTextScale } from '@shared/types'
 import type { OverlayChrome } from './useOverlayChrome'
 
+// NO HOVER, AN ARIA NAME INSTEAD (JOS-358). These two sit in the FOOTER, and the owner's ruling is
+// that the overlay windows carry tooltips only in the title bar. `A−` / `A+` state what they do;
+// the percentage the hover used to add is the one thing lost, and it is a number you read off the
+// text in front of you the moment you press either one.
 function StepButton({
   label,
-  title,
+  name,
   onClick,
   disabled
 }: {
   label: string
-  title: string
+  /** the accessible name — never a tooltip. */
+  name: string
   onClick: () => void
   disabled: boolean
 }): JSX.Element {
@@ -32,8 +37,7 @@ function StepButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title={title}
-      aria-label={title}
+      aria-label={name}
       style={{
         background: 'rgba(255,255,255,0.06)',
         color: 'inherit',
@@ -76,13 +80,13 @@ export function TextScaleStepper({
     <span style={{ ...noDrag, display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
       <StepButton
         label="A−"
-        title={`Smaller text (${pct})`}
+        name={`Smaller text (${pct})`}
         onClick={() => step(-1)}
         disabled={textScale <= TEXT_SCALE_MIN}
       />
       <StepButton
         label="A+"
-        title={`Larger text (${pct})`}
+        name={`Larger text (${pct})`}
         onClick={() => step(1)}
         disabled={textScale >= TEXT_SCALE_MAX}
       />

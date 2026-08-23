@@ -23,6 +23,7 @@ import type {
   TriageAnalyticsData,
   TriageDownloads,
   TriageMixRow,
+  TriageStartupRow,
   UsageDayPoint
 } from '@shared/triage'
 import { sparklinePoints } from '@shared/perf'
@@ -148,15 +149,44 @@ export function HealthSection({ data }: { data: TriageAnalyticsData }): JSX.Elem
  * storage never had. `—` is "no launch on this build reported one", which is a different fact
  * from a fast launch and must not share a rendering with it.
  */
+/**
+ * THE MACHINE'S HALF OF ONE BUILD'S ROW (JOS-57 scope addition) — a string rather than a nested
+ * ternary in JSX, which is also what keeps the row's own renderer inside the complexity ceiling.
+ *
+ * A build with NEITHER reading says so in words. Rendering six dashes would look like a build that
+ * was measured and found blameless, and the whole reason these numbers exist is that "not
+ * measured" and "fine" were previously indistinguishable.
+ */
+function stutterText(r: TriageStartupRow): string {
+  if (r.stutterLaunches === 0 && r.p95FirstMbLabel === null) {
+    return 'no stutter or cold-read reading on this build'
+  }
+  const late = r.stutterLatePct === null ? '-' : pctLabel(r.stutterLatePct)
+  return (
+    `${formatNum(r.stutterLaunches)} measured · timer drift p50 ${r.p50StutterLabel ?? '-'}` +
+    ` · p95 ${r.p95StutterLabel ?? '-'} · ${late} of ticks late` +
+    ` · first MB p50 ${r.p50FirstMbLabel ?? '-'} · p95 ${r.p95FirstMbLabel ?? '-'}`
+  )
+}
+
 export function StartupSection({ data }: { data: TriageAnalyticsData }): JSX.Element {
   const s = data.startup
   return (
-    <Section title="Startup replay — per build">
+    <Section title="Startup replay - per build">
       <Typography variant="caption" color="text.secondary">
         One reading per launch, from the machines that run it: how long reading the log history
         took, the worst single main-loop block while it did, and the duty the fold actually
-        achieved (measured, never the setting). Percentiles are bucket ranges — the counters keep a
+        achieved (measured, never the setting). Percentiles are bucket ranges - the counters keep a
         histogram, so an exact figure would be invented. Character-switch replays are not measured.
+        The second line of each row is the MACHINE&apos;s half: the drift of a fixed heartbeat that
+        ran through the same fold, and how long the first megabyte took to arrive. Drift that
+        climbs while the block figures hold still is a healthy process on a stuttering computer -
+        neither number claims that alone, the pair does. The third line is the startup
+        CHECKPOINT&apos;s backstop: how often a client re-folded its log the slow way in the
+        background and compared the answer to the remembered one. Divergences are expected to be
+        zero forever - a non-zero here is the reason to switch the shortcut off, not a number to
+        interpret. It never says WHICH part of the fold differed; that stays on the user&apos;s own
+        machine.
       </Typography>
       {s.byVersion.length === 0 ? (
         <Typography variant="caption" color="text.secondary" data-testid="analytics-startup-empty">
@@ -174,21 +204,98 @@ export function StartupSection({ data }: { data: TriageAnalyticsData }): JSX.Ele
               <Box component="span" sx={{ fontFamily: 'monospace' }}>
                 {r.version}
               </Box>{' '}
-              {formatNum(r.launches)} launches · replay p50 {r.p50ReplayLabel ?? '—'} · p95{' '}
-              {r.p95ReplayLabel ?? '—'} · worst block p50 {r.p50BlockLabel ?? '—'} · p95{' '}
-              {r.p95BlockLabel ?? '—'} · duty {pctLabel(r.dutyAchieved ?? 0)} ·{' '}
-              {r.meanEventsReplayed === null ? '—' : formatNum(Math.round(r.meanEventsReplayed))}{' '}
+              {formatNum(r.launches)} launches · replay p50 {r.p50ReplayLabel ?? '-'} · p95{' '}
+              {r.p95ReplayLabel ?? '-'} · worst block p50 {r.p50BlockLabel ?? '-'} · p95{' '}
+              {r.p95BlockLabel ?? '-'} · duty {pctLabel(r.dutyAchieved ?? 0)} ·{' '}
+              {r.meanEventsReplayed === null ? '-' : formatNum(Math.round(r.meanEventsReplayed))}{' '}
               events/launch · {formatNum(r.blocksOver50)} stalls over 50 ms
+              <Box component="span" sx={{ display: 'block', pl: 2, opacity: 0.8 }}>
+                {stutterText(r)}
+              </Box>
             </Typography>
           ))}
         </Stack>
       )}
       <Stack spacing={0.5}>
         <Typography variant="caption" color="text.secondary">
-          Log size of the measured launches (all builds — a log&apos;s size is a fact about the
+          Log size of the measured launches (all builds - a log&apos;s size is a fact about the
           player, and the context every row above is read in)
         </Typography>
         <MixList rows={s.logSizes} empty="No launch has reported a log size yet." />
+        <Typography variant="caption" color="text.secondary">
+          …and how much of it was NEW - bytes appended since that install last exited cleanly. Two
+          launches reading the same log are not the same launch if one of them is reading pages the
+          machine has never seen.
+        </Typography>
+        <MixList rows={s.newBytes} empty="No launch has reported a cold-read delta yet." />
+      </Stack>
+    </Section>
+  )
+}
+
+/**
+ * THE LIVE SESSION (JOS-367) — Startup asks how launches went; this asks what happened for the
+ * hours afterwards, and it is the first readout in this tab that can answer the freeze reports.
+ *
+ * THE TWO RATES ARE THE SECTION, which is why they are on one line and in that order. Both count
+ * per report, so the same interval is under both: late moments a second idle thread ALSO saw are
+ * the machine (paging, a driver reset, a disk that stopped answering), and the gap between them
+ * is us. A dash on the machine rate means no session ran a second clock — not a clean bill.
+ */
+export function LiveSection({ data }: { data: TriageAnalyticsData }): JSX.Element {
+  const l = data.live
+  const rate = (v: number | null): string => (v === null ? '-' : v.toFixed(2))
+  return (
+    <Section title="Live sessions - how smoothly it ran">
+      <Typography variant="caption" color="text.secondary">
+        Two clocks, all session: the main thread&apos;s own 250 ms timer and the same timer on a
+        worker thread that does nothing else. A window BOTH went late in is the machine stalling -
+        paging, a driver reset, a disk - and the app was a victim beside the game; a window only
+        main saw is ours. Compare machine/report against late/report below: the gap is the part
+        this app is answerable for. Percentiles are bucket ranges, not exact figures. A dash is
+        never a clean bill - it means nothing reported.
+      </Typography>
+      {l.reports === 0 ? (
+        <Typography variant="caption" color="text.secondary" data-testid="analytics-live-empty">
+          No session has reported a stall reading yet.
+        </Typography>
+      ) : (
+        <Stack spacing={0.25} sx={{ fontVariantNumeric: 'tabular-nums' }}>
+          <Typography variant="caption" data-testid="analytics-live-stalls">
+            {formatNum(l.reports)} reports · {formatNum(l.samples)} probe ticks · lateness p50{' '}
+            {l.p50StallLabel ?? '-'} · p95 {l.p95StallLabel ?? '-'} · worst tick p95{' '}
+            {l.maxStallLabel ?? '-'}
+          </Typography>
+          <Typography variant="caption" data-testid="analytics-live-verdict">
+            {formatNum(l.over100)} ticks over 100 ms · {formatNum(l.over500)} over 500 ms ·{' '}
+            {rate(l.latePerReport)} late/report - of which {formatNum(l.coincident)} were seen by
+            BOTH clocks over {formatNum(l.verdicts)} reports that could answer ·{' '}
+            {rate(l.machinePerReport)} machine/report
+          </Typography>
+          <Typography variant="caption" data-testid="analytics-live-tail">
+            {l.tailReports === 0
+              ? 'No session has reported a tail read yet.'
+              : `${formatNum(l.tailReads)} tail reads over ${formatNum(l.tailReports)} reports · ` +
+                `${formatNum(l.tailReopens)} reopens · read p95 ${l.p95TailLabel ?? '-'} · worst ` +
+                `${l.maxTailLabel ?? '-'} · ${formatNum(l.tailOver100)} over 100 ms · ` +
+                `${formatNum(l.tailOver500)} over 500 ms`}
+          </Typography>
+        </Stack>
+      )}
+      <Stack spacing={0.5}>
+        <Typography variant="caption" color="text.secondary">
+          The fattest single read of each interval, and the size of the logs being tailed - the
+          game appends to that same file from its render thread, so this is the cost we could be
+          charging it.
+        </Typography>
+        <MixList rows={l.tailDeltas} empty="No session has reported a read yet." />
+        <MixList rows={l.tailLogSizes} empty="No session has reported a log size yet." />
+        <Typography variant="caption" color="text.secondary">
+          …and what was switched on while all of it was measured. A LOCKED overlay is the one to
+          watch: it arms a process-wide mouse hook, so every system mouse event waits on our
+          message loop.
+        </Typography>
+        <MixList rows={l.state} empty="No session has reported its state yet." />
       </Stack>
     </Section>
   )
@@ -215,10 +322,10 @@ export function VersionsSection({ data }: { data: TriageAnalyticsData }): JSX.El
                 peak {pctLabel(v.peakShare)}
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                first seen {v.firstSeenDay ?? '—'} ·{' '}
+                first seen {v.firstSeenDay ?? '-'} ·{' '}
                 {v.daysToAdopt === null
                   ? 'never reached a majority'
-                  : `${String(v.daysToAdopt)} days to majority (${v.majorityDay ?? '—'})`}
+                  : `${String(v.daysToAdopt)} days to majority (${v.majorityDay ?? '-'})`}
               </Typography>
             </Box>
           ))}
@@ -258,7 +365,7 @@ function DownloadRows({ rows }: { rows: TriageDownloads }): JSX.Element {
             {formatNum(r.totalDownloads)} all assets
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            published {r.publishedAt?.slice(0, 10) ?? '—'}
+            published {r.publishedAt?.slice(0, 10) ?? '-'}
           </Typography>
         </Box>
       ))}
@@ -280,11 +387,11 @@ function DownloadRows({ rows }: { rows: TriageDownloads }): JSX.Element {
 export function DownloadsSection({ downloads }: { downloads?: TriageDownloads }): JSX.Element | null {
   if (downloads === undefined) return null
   return (
-    <Section title="GitHub downloads — updater-inflated, NOT installs">
+    <Section title="GitHub downloads - updater-inflated, NOT installs">
       <Typography variant="caption" color="text.secondary">
         Release asset fetches, per tag, from the public GitHub API. The auto-updater downloads the
-        installer again on every install it updates — v0.5.0 took 61 downloads within hours of
-        publication — so read this as fetches, not as new users. The install answer is the
+        installer again on every install it updates - v0.5.0 took 61 downloads within hours of
+        publication - so read this as fetches, not as new users. The install answer is the
         Versions table above, off <code>analytics_install</code>. Global: never split by cohort.
       </Typography>
       <DownloadRows rows={downloads} />

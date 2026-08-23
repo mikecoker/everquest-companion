@@ -53,6 +53,19 @@ const RANK_VALUE: Record<string, number> = {
   x: 10
 }
 
+/**
+ * The INVERSE of the table above — ordinal → the numeral EQ prints (`4` → `IV`).
+ *
+ * It lives here rather than beside its one caller because `RANK_VALUE` is the ladder's single
+ * definition and a second numeral table is a second opinion about what rank 9 is called. Out of
+ * range answers the ordinal in digits: no source in this repo states a rank above X, so the
+ * honest output for an eleventh is the number itself rather than an invented `XI`.
+ */
+export function romanRank(rank: number): string {
+  const found = Object.entries(RANK_VALUE).find(([, v]) => v === rank)
+  return found ? found[0].toUpperCase() : String(rank)
+}
+
 /** One RANK within a line: its display name (suffix intact) and its ordinal. */
 export interface SpellRank {
   /** display name exactly as the log/DB spells it ("Mesmerization III", "Clarity"). */
@@ -272,6 +285,15 @@ export function spellLineLevel(
 // into the next rank — it simply stops firing, silently. The offer strip is the fix, and it
 // is an OFFER: nothing is ever rewritten without a click (AGENTS.md "state, never process";
 // world-model law 1).
+//
+// RANK-SENSITIVE ON PURPOSE, AND IT IS THE LAST PLACE THAT IS (JOS-276 sweep). The owner's law —
+// "we should not use spell ranks for anything in the alert system - it should be compatible with
+// any rank" — is about whether an alert FIRES, and nothing below decides that: since JOS-259 a
+// literal spell matcher already covers every rank of its line, so a def here never goes stale and
+// an offer never has to rescue one. What survives is the convenience it always also was: a chip
+// that names the rank you just started casting, for a user who wants an alert whose NAME says
+// "Mesmerization IV". `rankedDefs` therefore still reads the suffix, and reading it is the feature.
+// The offer's own dedupe folds, though — see `suggestionCoverageId` in the wizard.
 //
 // TWO ACTIONS, and ADD-ALONGSIDE IS THE DEFAULT (owner decision). EQ Legends' loadout system
 // means you can be a level-50 Paladin in one trio and a low-level Paladin in another; a swap
@@ -522,7 +544,7 @@ export function addRankAlongsideDef(def: AlertDef, from: string, to: string): Al
   return {
     ...replaceRankInDef(def, from, to),
     id: `${def.id}::rank:${spellIdFragment(to)}`,
-    note: `Added alongside ${def.name} — same alert for ${to}.`
+    note: `Added alongside ${def.name} - same alert for ${to}.`
   }
 }
 

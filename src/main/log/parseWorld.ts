@@ -6,23 +6,66 @@
 import type { ConsiderFaction, LogEvent, LootDisposition } from '../../shared/logEvents'
 import { CONSIDER_FACTION_RUNGS } from '../../shared/logEvents'
 import { itemTierFromName } from '../../shared/itemStats'
+import { TIER_OPEN_WORLD, TIER_UNKNOWN } from '../../shared/kills'
 import { cleanMob, norm, type ClassifyCtx } from './parseCommon'
 
-// EQ Legends encodes instance difficulty in the zone name:
-//   base (no suffix) = d0, "(Awakened)" = d1, "(Adaptive)" = d2,
-//   "(Fused)" = d3, "(Refined)" = d4. Also strips "- Solo"/"- Group N".
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ZONE NAME IS THE ONLY THING THAT STATES A DIFFICULTY (JOS-166)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// EQ Legends encodes instance difficulty in the zone name, and nowhere else: no kill line, no
+// lockout line and no instance-creation notice carries one (the sweep is quoted in the header of
+// renderer/features/bosses/lockout.ts). So `zoneTier` is where the app decides what a kill's
+// difficulty was, and everything downstream inherits whatever it decides here.
+//
+// THE THREE WORLDS. A full-log sweep of every `You have entered <X>.` in the owner's 1.4M-line
+// log (2026-08-09, read-only) yields exactly these shapes, and they fall into three kinds:
+//
+//   INSTANCED, DIFFICULTY NAMED — the adjective is the whole rule (d1..d4):
+//     You have entered The Plane of Hate - Solo 4 (Refined).
+//     You have entered Nagafen's Lair - Group 3 (Fused).
+//     You have entered Najena 4 (Refined).                  ← no Solo/Group word, still instanced
+//     You have entered The Plane of Sky 1 (Awakened).
+//
+//   INSTANCED, NO ADJECTIVE — the BASE difficulty, d0, and a real one (7 in the log):
+//     You have entered The Plane of Hate - Solo.
+//     You have entered Nagafen's Lair - Solo.
+//     You have entered The Permafrost Caverns - Solo.
+//
+//   NOT INSTANCED — the open world, which carries no lockout of any kind:
+//     You have entered The Plane of Hate.
+//     You have entered Innothule Swamp.
+//
+// WHY d0 IS NOW ITS OWN ANSWER (owner decision, 2026-08-09, corroborated by the community wiki):
+// a raid target has FIVE weekly lockouts, d0 through d4, and the owner clears all five most
+// weeks. The base instance is a difficulty like any other; what it is NOT is the open world, and
+// the suffix is what tells them apart. Until this ticket all three kinds decoded to 0, so an
+// open-world kill and a base-instance clear were the same fact to every consumer.
+//
+// FOUR ANSWERS, NOT FIVE. `TIER_UNKNOWN` covers both "no zone line has been seen yet" (an empty
+// string — the kills module's state before the scan reaches one) and "an instance whose
+// adjective this app has never decoded". The second used to fall through to 0; a parenthetical
+// the table does not know is still unmistakably an INSTANCE (the base difficulty never prints
+// one), so calling it d0 would be inventing the one fact the line failed to state (law 1).
 const TIER_ADJ: Record<string, number> = { awakened: 1, adaptive: 2, fused: 3, refined: 4 }
+
+/** Difficulty names, indexed by the five DIFFICULTY tier keys; the two non-difficulties have
+ *  no entry here (the renderer spells them in lib/tierChip.ts, where the chips live). */
 export const TIER_LABELS = ['d0', 'd1 · Awakened', 'd2 · Adaptive', 'd3 · Fused', 'd4 · Refined']
 
+/** A `- Solo` / `- Group N` suffix: the word that makes a zone an INSTANCE of itself. */
+const INSTANCE_SUFFIX_RE = /\s-\s*(Solo|Group)\b/i
+
 export function zoneTier(zone: string): { base: string; tier: number } {
-  const adj = /\(([A-Za-z]+)\)\s*$/.exec(zone)
-  const tier = adj ? TIER_ADJ[adj[1].toLowerCase()] ?? 0 : 0
   const base = zone
     .replace(/\s*-\s*(Solo|Group)\b.*$/i, '')
     .replace(/\s+\d+\s*\([^)]*\)\s*$/, '')
     .replace(/\s+\([^)]*\)\s*$/, '')
     .trim()
-  return { base, tier }
+  const adj = /\(([A-Za-z]+)\)\s*$/.exec(zone)
+  if (adj) return { base, tier: TIER_ADJ[adj[1].toLowerCase()] ?? TIER_UNKNOWN }
+  if (INSTANCE_SUFFIX_RE.test(zone)) return { base, tier: 0 }
+  return { base, tier: base ? TIER_OPEN_WORLD : TIER_UNKNOWN }
 }
 
 // ----- content matchers (verbatim regexes from the two old parsers) -----
@@ -59,6 +102,26 @@ const LOOT_CURRENCY_RE = /^You looted (?:(\d+) |an? )?(.+?) from (.+?) corpse an
 const LOOT_SOLD_RE = /^You looted (?:(\d+) |an? )?(.+?) from (.+?) corpse and sold it for (?:free|[\d,]+ (?:platinum|gold|silver|copper).*?)\.?$/
 const LOOT_STORED_RE = /^You looted (?:(\d+) |an? )?(.+?) from (.+?) corpse and stored it in your (Dragon Hoard|tradeskill depot)\.?$/
 const LOOT_COMBINE_RE = /^You looted (?:(\d+) |an? )?(.+?) from (.+?) corpse to create (?:an? )?(.+?)\.?$/
+// THE ONE LINE THAT SUBTRACTS (JOS-401):
+//   You successfully destroyed 1 Enchanted Fine Steel Morning Star +3.
+//   You successfully destroyed 38 Bone Chips.
+//   You successfully destroyed 3 Mosquito Rations*.
+// FULL-LOG SWEEP (read-only, 2026-08-16, eqlog_Primitive_freeport.txt): 356 lines, and every one
+// of them matches this shape — a count that is always stated (stacks say the stack size), the
+// item name verbatim, a trailing period. It joins the loot family as `disposition: 'destroyed'`
+// with NO source, because a destroy happens in your bags and names no mob.
+//
+// ANCHORED AT BOTH ENDS, like every other family here, and that is what keeps player chat out of
+// it: seven other lines in the log contain "destroyed" and six are quoted speech (`'i just
+// destroyed …'`), which ends in a quote rather than a period and never starts the message.
+//
+// THE ` +N` AND THE TRAILING `*` ARE KEPT VERBATIM, exactly as the loot family keeps a `+N`:
+// `itemCountKey` folds the `+N` at the counting boundary downstream (law 2). The `*` is NOT
+// folded, and that is measured rather than overlooked — no loot line in the whole log carries one
+// (0 of 6,216), while the `/outputfile inventory` dump writes the same six items with the same
+// star (`Backpack*`, `Bandages*`), so keeping it verbatim is what makes a destroy line and a dump
+// row land on ONE counting key. Stripping it would invent a fold neither source asked for.
+const DESTROY_RE = /^You successfully destroyed (\d+) (.+?)\.$/
 
 const ZONE_RE = /^You have entered (.+?)\.$/
 // Pseudo-zone notices that share the "You have entered <X>." grammar but are NOT
@@ -94,6 +157,24 @@ const PLAYER_DEATH_RE = /^You have been slain by (.+?)!$/
 // fires once where the player survived, and "Returning to <bind>. Please wait..." is a
 // redundant echo whose text varies by server (JOS-88).
 const YOU_DIED = 'You died.'
+
+// The MOB twin of `You died.`: `<Name> died.` — the killerless THIRD-PERSON death, and the
+// reason a boss killed by a damage-over-time tick reads as "0 kills" (JOS-101). Same cause as
+// the player form above: with no attacker to name, the client prints this INSTEAD of a slain
+// sentence, never as well as one.
+//
+// FULL-LOG SWEEP (read-only, 2026-08-08, eqlog_Primitive_freeport.txt, 1.44M lines): 21 lines
+// end in " died." — 2 are `You died.`, claimed above by exact equality before this regex is
+// ever reached, and the other 19 are mob names ("An azarack died.", "A froglok gaz shaman
+// died.", "Soldier of V`Zher died."). NOT ONE of the 21 has a `slain` line within ±3 lines, so
+// this shape never duplicates a slain sentence and cannot double-count a kill. 15 of the 19
+// carry `You gain experience!` on the line immediately before — the join that credits them
+// (shared/kills.ts KILL_EXP_JOIN_MS). The sibling log eqlog_Primitive_halas.txt has 0.
+//
+// The pattern looks wide open but player CHAT cannot be claimed by it: a say/tell/group line
+// wraps its text in quotes, so it ends `died.'` and not `died.` — which is why a sweep this
+// broad finds zero chat lines. Anchored at both ends for the same reason EXP_RE is.
+const MOB_DIED_RE = /^(.+?) died\.$/
 
 // Turn-ins: "You offered 1 Sphinx Claw to Dason Goldblade." then
 //           "You complete the trade with Dason Goldblade."
@@ -159,6 +240,13 @@ const AA_IMPROVED_RE = /^You have improved (.+?) (\d+) at a cost of/
 //     1×  `The item you are trying to add will not work, you cannot merge two different
 //         types of items.`                                           (no item named)
 //     1×  `Request to merge items canceled, both items remain unmodified.` (no item named)
+//   356×  `You successfully destroyed <N> <Item>[ +N][*].` — PARSED SINCE JOS-401, as a loot event
+//         with disposition 'destroyed' (see DESTROY_RE above). It was in the not-parsed list below
+//         for two releases on the reasoning "a destroy can only retire tier evidence we never
+//         claimed to be current inventory" — which was true of TIERS, the only thing this sweep was
+//         about, and false of held counts, which is the whole of the Sky tracker. The item-tier
+//         module still ignores it (it folds 'combined' rows only) and that reasoning still holds
+//         there; what changed is that something else now needs the line.
 //
 //   EXISTS, DELIBERATELY NOT PARSED (nothing to model — see the reason on each)
 //   302×  `You looted <item> from <mob>'s corpse to create a <item> +N` — an AUTO-merge on
@@ -170,8 +258,6 @@ const AA_IMPROVED_RE = /^You have improved (.+?) (\d+) at a cost of/
 //         A socketed exaltation FIRING. It names the exaltation's SOURCE item, never the
 //         host it is socketed into, and carries no tier, so it can neither identify the
 //         item in front of you nor advance any tier state.
-//    ~30× `You successfully destroyed 1 <Item> +N.` — the item is GONE; a destroy can only
-//         retire tier evidence we never claimed to be current inventory.
 //   Motes appear ONLY inside ordinary loot lines (`--You have looted a Mote of
 //   Infinitesimal Potential …--`), which the loot family already parses.
 //   NOTHING anywhere reports item EXP within a tier, socket CONTENTS, or the tier of an
@@ -279,6 +365,19 @@ export function classifyDeath({ text, ts, seq, raw }: ClassifyCtx): LogEvent | n
     m = SLAIN_BY_RE.exec(text)
     if (m) return { kind: 'death', seq, ts, raw, name: norm(m[1]), bySelf: false, killer: m[2].trim() }
   }
+  // The killerless MOB death, gated on a cheap suffix test so the common path pays nothing.
+  // `bySelf:false` with NO killer is the honest shape and a deliberate one: the line names no
+  // attacker, and law 1 forbids inventing one. `bySelf:true` would credit you with a stranger's
+  // kill and make the combat engine attribute the killing blow to you; a synthesized killer
+  // would be a fabricated entity. Every consumer already spells the no-killer case — combat/
+  // ingest.ts computes `killerKey: undefined`, reducers.ts `isCountedKill` short-circuits to
+  // true (it IS a kill of that mob), kills.ts credits it purely from the experience join, and
+  // progression.ts files it as NEITHER credited nor witnessed, because "somebody else killed
+  // it" is exactly the claim this line does not make.
+  if (text.endsWith(' died.')) {
+    const m = MOB_DIED_RE.exec(text)
+    if (m) return { kind: 'death', seq, ts, raw, name: norm(m[1]), bySelf: false }
+  }
   return null
 }
 
@@ -293,9 +392,15 @@ export function classifyZone({ text, ts, seq, raw }: ClassifyCtx): LogEvent | nu
   return null
 }
 
-/** Self-loot, including the auto-disposition variants. */
+/** Self-loot, including the auto-disposition variants — and the destroy, which is the negative. */
 export function classifyLoot(c: ClassifyCtx): LogEvent | null {
   const { text } = c
+  // The destroy (JOS-401). Its own probe rather than a branch of the loot gate below, because the
+  // sentence never says "looted"; a `startsWith` costs one length-guarded compare on the hot path.
+  if (text.startsWith('You successfully destroyed ')) {
+    const d = DESTROY_RE.exec(text)
+    if (d) return loot(c, { item: d[2], source: undefined, disposition: 'destroyed', countStr: d[1] })
+  }
   if (text.includes('looted')) {
     const m = LOOT_RE.exec(text) ?? LOOT_RE_PLAIN.exec(text)
     if (m) return loot(c, { item: m[2], source: cleanMob(m[3]), disposition: undefined, countStr: m[1] })

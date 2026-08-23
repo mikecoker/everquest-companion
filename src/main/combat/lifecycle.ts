@@ -19,7 +19,8 @@ import {
   encounterName,
   type Encounter,
   type StanceRaw,
-  type ZoneSession
+  type ZoneSession,
+  type ZoneSessionClose
 } from './encounter'
 import type { EngineState } from './state'
 import { isSlowCapable } from '../../shared/poisons'
@@ -100,7 +101,7 @@ function hostilePresence(st: EngineState, enc: Encounter, now: number): { hostil
  * `now`, so startTs/lastTs/duration reflect the real fight, not the eval moment.
  *
  * Rules:
- *  - CC-hold: if any engaged instance is still CC-held (ccActiveUntil > now), veto the
+ *  - CC-hold: if any engaged HOSTILE instance is still CC-held (ccActiveUntil > now), veto the
  *    DEATH-CLOSE (a mez'd mob is alive, and the mez-and-wait gap is not the end of a pull).
  *  - Death-close: once every engaged hostile instance is GONE — retired (dead/zoned),
  *    or alive but unseen for PRESENCE_GONE_MS — and LINGER_MS has passed since the last
@@ -117,6 +118,24 @@ function hostilePresence(st: EngineState, enc: Encounter, now: number): { hostil
  * stamps `lastActivityTs`, so an ACTIVELY refreshed mez still holds the fight open exactly as
  * before (its own refreshes keep `sinceActivity` small). What can no longer happen is a single
  * unrefreshed hold outliving a minute of total silence.
+ *
+ * AND THE HOLD ONLY EVER SPEAKS FOR AN ENGAGED HOSTILE (JOS-176). It answers exactly one
+ * question — "is this engaged instance still alive and still in the fight?" — so the two
+ * entities that can never be an answer to it are excluded, both for reasons this file already
+ * states about `hostilePresence`:
+ *   RETIRED — the hold is unredeemable the instant the world model retires the instance, because
+ *     a later sighting of that name mints a fresh `nameKey#gen` and can never re-enter this
+ *     stamp. Handled at the RETIREMENT SITE (`WorldModel.onRetire`, wired in EngineState) rather
+ *     than by a check here, so the stamp is simply gone and every retirement path agrees. It used
+ *     to be a delete inside ingestDeath, which meant a mob aged out by STALENESS went on vetoing
+ *     for the rest of its 120 seconds (measured: 614 such retirements in the owner's whole log).
+ *   A LIVE PET — never something we are killing, so a hold on one must not pin a fight open any
+ *     more than its presence may. This is the case the owner actually hit: in the Plane of Hate
+ *     his charmed pet and the mobs he is killing share ONE name, so when the last hostile twin
+ *     died, `Your Dazzle spell has worn off of <name>` (a CC refresh, JOS-161) resolved to the
+ *     only instance of that name still live — the pet — and stamped a 120s hold on it. The
+ *     skirmish could not close, and the Grandmaster R`tal pull 78 seconds later joined it
+ *     (tests/combatCcHoldWindows.test.mts replays that window).
  */
 export function evalClosure(st: EngineState, now: number): void {
   if (!st.current) return
@@ -144,9 +163,11 @@ function evalClosureInner(st: EngineState, now: number): void {
     return
   }
 
-  // CC-hold: any engaged instance still under an unexpired CC hold vetoes the death-close.
-  for (const until of enc.ccActiveUntil.values()) {
-    if (until > now) return
+  // CC-hold: any engaged instance still under an unexpired CC hold vetoes the death-close —
+  // EXCEPT one of your own live pets, for the reason hostilePresence() states three lines up
+  // about the very same judgement (JOS-176).
+  for (const [id, until] of enc.ccActiveUntil) {
+    if (until > now && !st.world.isLivePet(id)) return
   }
 
   const { hostiles, allGone } = hostilePresence(st, enc, now)
@@ -203,7 +224,7 @@ export function finalizeCurrent(st: EngineState): void {
  * it. Also finalizes any still-open current encounter's duration into the session totals via the
  * caller ordering (finalizeCurrent runs first in the zone handler).
  */
-export function finalizeZoneSession(st: EngineState): void {
+export function finalizeZoneSession(st: EngineState, closedBy: ZoneSessionClose = 'zone'): void {
   if (st.zoneAgg.out.size === 0 && st.zoneAgg.inc.size === 0) return
   const id = `zs${++st.zoneSeq}`
   const zone = st.zone ?? 'Session'
@@ -213,6 +234,7 @@ export function finalizeZoneSession(st: EngineState): void {
     id,
     zone,
     agg: st.zoneAgg,
+    closedBy,
     startTs: st.zoneStartTs,
     lastTs: st.zoneLastTs,
     finalizedMs: st.zoneFinalizedMs,
@@ -220,6 +242,7 @@ export function finalizeZoneSession(st: EngineState): void {
     summary: {
       id,
       zone,
+      closedBy,
       startTs: st.zoneStartTs,
       endTs: st.zoneLastTs,
       total,
@@ -229,6 +252,37 @@ export function finalizeZoneSession(st: EngineState): void {
   }
   st.zoneHistory.push(session)
   if (st.zoneHistory.length > ZONE_HISTORY_CAP) st.zoneHistory.shift()
+}
+
+/**
+ * MINT FRESH ZONE ACCUMULATORS — the second half of every stay boundary, extracted (JOS-322)
+ * because there are now TWO callers and one of them must not be allowed to drift: the zone line
+ * (ingest.ts) and the SESSION MARK (engine.sessionMark).
+ *
+ * THE MARK IS THIS AND NOTHING ELSE. Everything the zone case does BESIDES this pair — retiring
+ * the world's mobs, breaking charm, zoning the ally model, stamping the ring — is a statement
+ * about the ROOM changing, and the mark makes no such statement: you did not leave, so your pet
+ * survives, the mez holds, the coats stay on the blades and the session-level state timeline runs
+ * straight through the boundary (segment views clip spans to the record's own span at read time,
+ * so a stance running across a mark reads correctly in BOTH records).
+ */
+export function resetZoneAccumulators(st: EngineState): void {
+  st.zoneAgg = new Agg()
+  st.zoneFinalizedMs = 0
+  st.zoneActiveMs = 0
+  st.zoneStartTs = 0
+  st.zoneLastTs = 0
+}
+
+/**
+ * THE ONE WORD A ZONE SESSION IS CALLED BY (JOS-322). A stay the WORLD ended is that zone's
+ * `overall`; a stay the USER ended with the app-wide "New session" mark is that zone's `session`,
+ * which is the word loot and leveling already print for the very same click. One concept, one
+ * vocabulary, decided from the record so the picker, the overlay header and the panel crumb can
+ * never disagree about it.
+ */
+export function zoneSessionWord(closedBy: ZoneSessionClose | undefined): string {
+  return closedBy === 'mark' ? 'session' : 'overall'
 }
 
 /**
@@ -288,7 +342,7 @@ export function zoneSummary(st: EngineState): SegmentSummary {
   return {
     id: 'zone',
     kind: 'zone',
-    name: `${st.zone ?? 'Session'} — overall`,
+    name: `${st.zone ?? 'Session'} - overall`,
     zone: st.zone,
     durationSec: dur,
     total,

@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import type { AlertAudio, AlertDef } from '../src/shared/types'
 import { speechPlan } from '../src/renderer/src/lib/speech'
 import { previewDef, previewPlan } from '../src/renderer/src/features/alerts/preview'
+import { alertBannerText, alertShowsOnScreen } from '../src/shared/alertBanner'
 
 function def(over: Partial<AlertDef> = {}): AlertDef {
   return {
@@ -36,22 +37,26 @@ const CHANNELS: (AlertAudio | undefined)[] = [undefined, 'sound', 'speech', 'bot
 
 test('▶ on a VOICE row SPEAKS — it does not play the pack sound (the bug)', () => {
   const plan = previewPlan(def({ audio: 'speech' }), false)
-  assert.deepEqual(plan, { sound: false, speak: 'Charm break', after: false })
+  assert.deepEqual(plan, { sound: false, speak: 'Charm break' })
 })
 
-test('▶ on a SOUND + VOICE row plays the sound, then queues the speech behind it', () => {
-  assert.deepEqual(previewPlan(def({ audio: 'both' }), false), {
-    sound: true,
-    speak: 'Charm break',
-    after: true
-  })
+test('▶ on a row still STORING the retired combined channel previews what it will play', () => {
+  // JOS-362 retired "Sound + voice", and the resolution rule (`resolveAlertAudio`) is a READ: the
+  // def keeps saying 'both' until it is next edited. ▶ has to preview the resolution, or the row
+  // auditions a channel the firing will not use — the exact split-brain this file exists for.
+  assert.deepEqual(
+    previewPlan(def({ audio: 'both', speech: { mode: 'custom', phrase: 'Charm break' } }), false),
+    { sound: false, speak: 'Charm break' },
+    'a phrase ⇒ spoken, and nothing plays alongside it'
+  )
+  assert.deepEqual(previewPlan(def({ audio: 'both' }), false), { sound: true, speak: null })
 })
 
 test('▶ on a sound row is unchanged — the pack sound, as it always was', () => {
   for (const audio of [undefined, 'sound'] as const) {
     assert.deepEqual(
       previewPlan(def(audio ? { audio } : {}), false),
-      { sound: true, speak: null, after: false },
+      { sound: true, speak: null },
       `audio:${String(audio)}`
     )
   }
@@ -71,7 +76,7 @@ test('MUTE is not an exception: ▶ makes no noise while the app is muted', () =
   for (const audio of CHANNELS) {
     assert.deepEqual(
       previewPlan(def(audio ? { audio } : {}), true),
-      { sound: false, speak: null, after: false },
+      { sound: false, speak: null },
       `audio:${String(audio)} must be silent while muted`
     )
   }
@@ -125,6 +130,35 @@ test('preview forces exactly two fields — enabled and alwaysPlay — and touch
     { ...original, alwaysPlay: original.alwaysPlay },
     'every other field comes through untouched'
   )
+})
+
+// ------------------------------------------------------------ the ON-SCREEN channel (JOS-378)
+//
+// THE BANNER IS THE THIRD CHANNEL, and it inherits this file's equality for free — `previewDef`
+// carries every field but two, and `playAlertNow` sends the banner from the def it is handed. The
+// tests below pin that inheritance rather than restating it in prose, because the banner is the
+// one channel whose whole purpose is POSITIONING the window: a ▶ that showed no line would leave
+// the user dragging a strip they cannot see.
+
+test('▶ shows the SAME line a real firing would — same words, same swatch, same switch', () => {
+  const original = def({
+    speech: { mode: 'custom', phrase: 'Charm broke on {target}' },
+    bannerColor: 'red'
+  })
+  const preview = previewDef(original)
+  assert.equal(alertBannerText(preview), alertBannerText(original), 'one derivation')
+  assert.equal(preview.bannerColor, original.bannerColor, 'the swatch is not a preview decision')
+  assert.equal(alertShowsOnScreen(preview), alertShowsOnScreen(original))
+})
+
+test('…and an alert TAMED off the screen previews silently there too — preview IS the firing', () => {
+  const original = def({ showOnScreen: false })
+  assert.equal(alertShowsOnScreen(previewDef(original)), false, 'no line, because a firing shows none')
+})
+
+test('an On-screen override is auditioned, not bypassed', () => {
+  const original = def({ speech: { mode: 'custom', phrase: 'a long spoken sentence' }, bannerText: 'CHARM' })
+  assert.equal(alertBannerText(previewDef(original)), 'CHARM')
 })
 
 test('preview never mutates the def the row is rendering', () => {

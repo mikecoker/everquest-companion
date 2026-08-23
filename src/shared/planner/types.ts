@@ -12,9 +12,10 @@
 //     There is deliberately NO CHARM: zero pages in the corpus name one, and a slot no item can
 //     ever occupy would render as a permanently empty cell claiming a game fact we never observed.
 //   * …and a PLAN is keyed by `PlanSlotId`, which is those 18 plus the SECOND ear, wrist and ring
-//     (JOS-67). Two different questions: an item states which SLOT it occupies, a character has
-//     how many PLACES to wear one. See the block above `PairedSlot` for the evidence and the
-//     additive-store argument.
+//     (JOS-67) plus the TWO ANY SLOTS (JOS-104). Two different questions: an item states which SLOT
+//     it occupies, a character has how many PLACES to wear one. See the block above `PairedSlot`
+//     for the evidence and the additive-store argument, and the block above `AnyCell` for the
+//     place that constrains no slot at all.
 //   * SocketType omits Ornamentation (R5 — cosmetic, token-gated, not in game) and folds
 //     `kind:'combat'` into 'proc' (D2 — the wiki spells procs `Combat Effect:`; measured
 //     proc 0 / combat 453).
@@ -102,16 +103,96 @@ export type PairedSlot = 'EAR' | 'FINGER' | 'WRIST'
 
 export const PAIRED_SLOTS: readonly PairedSlot[] = ['EAR', 'WRIST', 'FINGER']
 
-/** The SECOND cell of each paired slot — the only plan keys that are not equip-slot names. */
+/** The SECOND cell of each paired slot. */
 export type SecondCell = 'EAR2' | 'WRIST2' | 'FINGER2'
 
-/**
- * One cell of a plan: an equip slot, or the second of a pair. This is what `ExaltPlan.slots` is
- * keyed by and what the Inventory board draws — never what a donor states about itself.
- */
-export type PlanSlotId = EquipSlot | SecondCell
+// ---- the two places that constrain no slot at all (JOS-104) -----------------------------
+//
+// THE GAME GIVES YOU TWO "ANY SLOT" PLACES, and the planner gave you none — reported by a v0.12.0
+// player as "missing 2x any slots" (feedback 01KZGHFSF6TW32TA4SMJQNWJE9).
+//
+// THE SLOT IS OFFICIAL. Daybreak's own 2026-07-28 update notes describe an Improved Bash AA
+// choosing gear from "the primary, secondary, or Any slots" — the devs enumerate it as a peer of
+// the two hands, capitalized as a proper slot name.
+// (https://www.everquestlegends.com/patch-notes/eql-update-notes-7-28-2026)
+// A community FAQ states the count and the kind in one line — "Two slots that take any item type"
+// (https://www.everquestguides.com/everquest-articles/everquest-legends-the-new-player-faq/), and
+// it is UNOFFICIAL, so it is cited as corroboration rather than as the basis. eqlwiki.com has no
+// page, category or sentence about the slot at all (searched 2026-08-08); its `Equipment_By_Slot`
+// page is stale classic-EQ data that says so itself, so its silence proves nothing either way.
+//
+// THE BASIS IS THE GAME'S OWN INVENTORY DUMP, same witness JOS-67 rested on and read the same
+// way. In the committed 295-line dump (`tests/fixtures/Primitive_freeport-Inventory.txt`) the
+// client writes `Any Slot` TWICE at top level — once as the FIRST equipment row and once between
+// `Waist` and `Ammo` — and both rows hold real gear that is not empty:
+//
+//     Any Slot   Brigandine Tunic +1        (the corpus states its slot: CHEST)
+//     …
+//     Chest      Red Dragonscale Armor +1   (CHEST)
+//     …
+//     Any Slot   Midnight Clad Straps +2    (CHEST)
+//
+// Three chest-slot items worn at once, in three different places, with the Chest row filled
+// separately — so these are two EXTRA places to wear something, not another spelling of a slot the
+// eighteen already have. `shared/outputs/inventory.ts` has carried the token in `EQUIP_LOCATIONS`
+// since the outputs model landed, and `inventorySlots.ts` mapped it to `null` and said in writing
+// that it was "a real place to wear something and it is not one of the eighteen". That was true;
+// what was missing was the cell.
+//
+// AND ITS SOCKETS ARE REAL — which is the one thing NO source states, in either direction. The
+// dump prints `Any Slot-Slot2`, `-Slot7`, `-Slot8` children under both rows, the same `-Slot<n>`
+// shape every other equipped item's exaltation sockets take (`Face-Slot7  Polished Mithril Mask
+// (Exaltation)`). The client is printing exaltation sockets on an any-slot item, so a planner cell
+// here plans exactly what the other cells plan, and the measurement stands in for the missing doc.
+//
+// AN ANY CELL NAMES NO EQUIP SLOT, AND THAT IS THE MODEL GAP. `equipSlotOf` was TOTAL — every cell
+// answered with one of the eighteen — and R2 was asked `[equipSlotOf(cell)]`. There is no eighteen
+// to answer with here: the client's own name for the place is "Any Slot", and the wiki corpus
+// states ZERO items with an `ANY` slot token (normalize.ts's measured 32-token inventory), so ANY
+// is a property of the PLACE and never of an item. So `equipSlotOf` now returns `null` here and
+// `hostSlotsOf` is what R2 asks — the eighteen for an any-cell, exactly one for everything else.
+//
+// …AND R2 IS ABOUT TWO ITEMS ANYWAY, WHICH IS WHY THIS COSTS NOTHING. eqlwiki's Exaltations page
+// puts the restriction on the donor: an exaltation carries "the equipment slot restrictions of
+// their source item" (https://eqlwiki.com/Exaltations), and the destination it must match is the
+// HOST ITEM. For the other twenty-one cells the cell's slot and the host's slot are the same fact,
+// so asking the cell was a free shortcut; here the shortcut has nothing to return, and the cell
+// correctly constrains nothing while the host still constrains everything.
+//
+// WHAT IS NOT CLAIMED: both any-slot rows in the one dump we hold happen to carry CHEST items, so
+// "any equip slot is legal here" rests on the client's own token NAME (and the FAQ's wording)
+// rather than on a measurement covering all eighteen. That is stated rather than hidden, and it
+// errs the safe way — a cell that declines to constrain lets the user plan what they can see
+// themselves wearing, where a guessed constraint would refuse a socket the game allows
+// (awaiting-sample law).
 
-/** Every cell, in character-sheet order, each pair adjacent — the board's grid order. */
+/** The two slot-agnostic places a character wears something. Measured from the game's own dump. */
+export type AnyCell = 'ANY1' | 'ANY2'
+
+export const ANY_CELLS: readonly AnyCell[] = ['ANY1', 'ANY2']
+
+const ANY_CELL_SET: ReadonlySet<string> = new Set<string>(ANY_CELLS)
+
+/** True for the two cells that constrain no equip slot. The one runtime test of `AnyCell`. */
+export function isAnyCell(cell: PlanSlotId): cell is AnyCell {
+  return ANY_CELL_SET.has(cell)
+}
+
+/**
+ * One cell of a plan: an equip slot, the second of a pair, or one of the two any-slots. This is
+ * what `ExaltPlan.slots` is keyed by and what the Inventory board draws — never what a donor
+ * states about itself.
+ */
+export type PlanSlotId = EquipSlot | SecondCell | AnyCell
+
+/**
+ * Every cell, in character-sheet order, each pair adjacent — the board's grid order.
+ *
+ * The two any-slots come LAST rather than where the dump prints them (first, and between Waist and
+ * Ammo). The dump's order is the client's equipment indexing, this list is the board's reading
+ * order, and the two have never matched; appending leaves all twenty-one existing cells exactly
+ * where the user already found them and reads as what these are — the extra places.
+ */
 export const PLAN_SLOTS: readonly PlanSlotId[] = [
   'HEAD',
   'FACE',
@@ -133,7 +214,9 @@ export const PLAN_SLOTS: readonly PlanSlotId[] = [
   'PRIMARY',
   'SECONDARY',
   'RANGE',
-  'AMMO'
+  'AMMO',
+  'ANY1',
+  'ANY2'
 ]
 
 /** `EAR2` → `EAR`. The table, not a suffix strip: three facts beat a regex over a key space. */
@@ -144,25 +227,54 @@ const EQUIP_OF_CELL: Record<SecondCell, PairedSlot> = {
 }
 
 /**
- * The equipment slot a cell occupies — what every compatibility question is really about (R2).
- * The eighteen answer themselves; only the three second cells consult the table.
+ * The equipment slot a cell occupies, or `null` for the two that occupy none (JOS-104).
+ *
+ * The eighteen answer themselves, the three second cells consult the table, and an any-cell
+ * answers NULL — which is a fact about the place, not a missing value: nothing about ANY 1 says
+ * whether the thing in it is a ring or a breastplate. Callers that want the R2 question answered
+ * ask `hostSlotsOf` instead; callers that want a FILTER (the browser's slot select) take the null
+ * as "no slot filter", which is the same word that control already uses.
  */
-export function equipSlotOf(cell: PlanSlotId): EquipSlot {
+export function equipSlotOf(cell: PlanSlotId): EquipSlot | null {
+  if (isAnyCell(cell)) return null
   return EQUIP_OF_CELL[cell as SecondCell] ?? (cell as EquipSlot)
 }
 
-/** The cells one equip slot occupies, in board order — one for most, two for the paired three. */
+/**
+ * The equip slots a cell may host — what R2 is really asked (rules.ts `socketCompatibility`).
+ *
+ * One slot for the twenty-one named cells; ALL EIGHTEEN for an any-cell, because the place states
+ * no restriction and the restriction that does apply belongs to the host item. A donor whose page
+ * stated no slot at all still fails, there as everywhere: it shares a slot with nothing.
+ */
+export function hostSlotsOf(cell: PlanSlotId): readonly EquipSlot[] {
+  const slot = equipSlotOf(cell)
+  return slot === null ? EQUIP_SLOTS : [slot]
+}
+
+/**
+ * The cells one equip slot occupies, in board order — one for most, two for the paired three.
+ *
+ * The any-cells are deliberately NOT returned: this answers "where does a FINGER item naturally
+ * go", and the honest answer is the finger cells. They are reachable from the board instead (see
+ * `features/planner/plannerReplace.ts`), which is where they exist and where they fill themselves.
+ */
 export function cellsForSlot(slot: EquipSlot): PlanSlotId[] {
   return PLAN_SLOTS.filter((c) => equipSlotOf(c) === slot)
 }
 
+/** What an any-cell is CALLED — the client's own words for the place, numbered like a pair. */
+const ANY_LABEL: Record<AnyCell, string> = { ANY1: 'ANY SLOT 1', ANY2: 'ANY SLOT 2' }
+
 /**
  * What a cell is CALLED. A paired slot's two cells are numbered ("FINGER 1", "FINGER 2") because a
- * board that drew "FINGER" twice would read as a bug; every other cell is its own slot name.
+ * board that drew "FINGER" twice would read as a bug; the two any-cells are numbered for the same
+ * reason and keep the client's own noun; every other cell is its own slot name.
  */
 export function planSlotLabel(cell: PlanSlotId): string {
+  if (isAnyCell(cell)) return ANY_LABEL[cell]
   const slot = equipSlotOf(cell)
-  if (!(PAIRED_SLOTS as readonly string[]).includes(slot)) return slot
+  if (slot === null || !(PAIRED_SLOTS as readonly string[]).includes(slot)) return cell
   return `${slot} ${cell === slot ? '1' : '2'}`
 }
 
@@ -308,9 +420,10 @@ export interface ExaltPlan {
   createdAt: number
   updatedAt: number
   /**
-   * The plan's cells, keyed by `PlanSlotId` (JOS-67 — twenty-one, because you wear two ears, two
-   * rings and two wrists). Widened ADDITIVELY from `EquipSlot`: every key a past build could write
-   * is still a legal key, so nothing needs migrating.
+   * The plan's cells, keyed by `PlanSlotId` — twenty-three: the eighteen equip slots, the second
+   * ear/wrist/ring (JOS-67, because you wear two of each), and the two any-slots (JOS-104).
+   * Widened ADDITIVELY both times: every key a past build could write is still a legal key, so
+   * nothing needs migrating and `tests/plannerStore.test.mts` pins the round trip.
    */
   slots: Partial<Record<PlanSlotId, PlanSlot>>
 }

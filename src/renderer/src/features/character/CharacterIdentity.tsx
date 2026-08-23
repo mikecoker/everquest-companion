@@ -3,11 +3,13 @@
 // THREE FACTS, THREE SOURCES, AND EACH ONE IS ALLOWED TO BE ABSENT.
 //   * NAME + SERVER — the `character` module, i.e. the log file being tailed. Always known
 //     when there is a log at all.
-//   * LEVEL — `currentLevel()` over the progression snapshot: the TAIL of the level series,
-//     never max(). EQ Legends gives one level to a three-class loadout and swapping a class in
-//     drops the level with no log line, so the latest value is the only honest answer (the rule
-//     already written down in overviewLevelingData.ts). Null before the first ding this log has
-//     seen — and then the chip is omitted rather than guessing one.
+//   * LEVEL — the `character` module's STATED level fact (JOS-192): the later of your last ding
+//     and your own `/who` row, read through `currentLevelRead` so the chip can also say which
+//     one said it and how long ago. EQ Legends gives one level to a three-class loadout and
+//     swapping a class in drops the level with NO log line, so the tail of the dings alone is
+//     silent for exactly as long as it matters — and a `/who` on yourself is the one move that
+//     fixes it. Null before anything has stated a level — and then the chip is omitted rather
+//     than guessing one.
 //   * CLASS TRIO — the `combo` module's current interval, drawn with the SAME chips the
 //     Profiles panel and the Overview card use (`SlotChips`, `ProvenanceChip`), so the three
 //     surfaces cannot drift into three dialects. An unresolved slot stays unresolved on screen.
@@ -19,9 +21,10 @@
 import type { JSX } from 'react'
 import { Stack, Typography } from '@mui/material'
 import type { CharacterDelta, CharacterSnap, ProgressionDelta, ProgressionSnap } from '@shared/types'
+import { currentLevelRead } from '@shared/currentLevel'
+import { Tooltip } from '../../lib/Tooltip'
 import { useModule } from '../../lib/useModule'
 import { EMPTY_PROGRESSION, applyProgressionDelta } from '../leveling/progressionDelta'
-import { currentLevel } from '../overview/overviewLevelingData'
 import { ProvenanceChip, SlotChips } from '../profiles/ClassComboChips'
 import { useComboSnap } from '../profiles/ClassComboData'
 
@@ -35,7 +38,10 @@ export default function CharacterIdentity(): JSX.Element {
   const combo = useComboSnap()
 
   const character = who?.character ?? null
-  const level = currentLevel(prog ?? EMPTY_PROGRESSION)
+  // The progression snapshot supplies the LOG CLOCK the statement's age is measured against (and
+  // the ding-tail fallback for the frame before the character module hydrates) — never the wall
+  // clock, which would call a freshly-loaded log three weeks stale.
+  const level = currentLevelRead(who?.level, prog ?? EMPTY_PROGRESSION)
 
   return (
     <Stack
@@ -55,10 +61,17 @@ export default function CharacterIdentity(): JSX.Element {
           {character.server}
         </Typography>
       )}
-      {level !== null && (
-        <Typography variant="subtitle2" color="text.secondary">
-          Level {level}
-        </Typography>
+      {level && (
+        <Tooltip title={level.title}>
+          <Typography variant="subtitle2" color="text.secondary" data-testid="character-level">
+            Level {level.level}
+            {level.cue && (
+              <Typography component="span" variant="caption" color="text.disabled" sx={{ ml: 0.5 }}>
+                {level.cue}
+              </Typography>
+            )}
+          </Typography>
+        </Tooltip>
       )}
       {combo.current ? (
         <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -67,7 +80,7 @@ export default function CharacterIdentity(): JSX.Element {
         </Stack>
       ) : (
         <Typography variant="caption" color="text.disabled">
-          No loadout read yet — one appears as soon as the log names classes you played.
+          No loadout read yet - one appears as soon as the log names classes you played.
         </Typography>
       )}
     </Stack>

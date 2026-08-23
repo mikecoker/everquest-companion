@@ -14,6 +14,8 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import type { ItemKnowledge, LootEvent } from '@shared/types'
+import type { Timeslice } from '@shared/timeslice'
+import { isAcquisition } from '@shared/lootDisposition'
 import { formatDate } from '../../lib/formatDate'
 import { EQ_ITEM_COLORS } from '../../lib/ItemWindow'
 import { ObservedItemWindow } from '../../lib/ObservedItemWindow'
@@ -261,18 +263,29 @@ function ObservedColumn({
   agg,
   knowledge,
   item,
-  zoneRates
+  zoneRates,
+  owned
 }: {
   events: LootEvent[]
   agg: LootBreakdown
   knowledge: ItemKnowledgeState
   item: string
   zoneRates: ItemZoneRates
+  owned?: number
 }): JSX.Element {
   return (
     <Box sx={{ flex: 1, minWidth: 0, width: '100%' }}>
       <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+        {/* TWO WITNESSES, EACH LABELLED WITH WHO SAID IT (JOS-160). "Times looted" counts loot
+            lines and is honest to the LOG; "In your inventory export" is what the last
+            `/outputfile inventory` vouched for and is honest to the DUMP. They disagree all the
+            time and that is fine — an item acquired before this log exists reads 0 looted and 3
+            held, which is the true state of affairs and precisely what this page used to hide
+            behind a bare "Times looted 0". */}
         <StatCard label="Times looted" value={String(events.length)} />
+        {owned !== undefined && owned > 0 && (
+          <StatCard label="In your inventory export" value={String(owned)} hint="from /outputfile inventory" />
+        )}
         <StatCard label="Distinct mobs" value={String(agg.sources.length)} />
         <StatCard label="Zones seen" value={String(agg.zones.length)} />
       </Stack>
@@ -303,6 +316,22 @@ export interface ItemDetailProps {
   events: LootEvent[]
   stats?: string
   isQuestItem: boolean
+  /**
+   * The timeslice the caller's `events` were already cut to (JOS-130), so the per-zone rates
+   * divide by the SAME stretch those drops were counted over. Absent ⇒ the whole record, which is
+   * what this drill-down has always measured and what the Mobs tab's dialog still wants: it opens
+   * over a page that has no slice control, and a rate quietly measured over somebody else's
+   * window is worse than a rate over all of it.
+   */
+  slice?: Timeslice
+  /**
+   * How many copies the loaded `/outputfile inventory` export vouches for on this item's counting
+   * key (JOS-160). Absent — or 0 — renders NOTHING: a dump only covers what was open when it was
+   * written (JOS-141), so its silence about an item is not a claim that you have none, and a
+   * confident "0 held" would be a fabricated answer. The Mobs tab's dialog, which has no reconcile
+   * to hand, simply omits it.
+   */
+  owned?: number
 }
 
 /**
@@ -321,18 +350,37 @@ export function ItemDetailContent({
   item,
   events,
   stats,
-  active
+  active,
+  slice,
+  owned
 }: Omit<ItemDetailProps, 'isQuestItem'> & { active: boolean }): JSX.Element {
-  const agg = useMemo(() => aggregateLoot(events), [events])
+  /**
+   * EVERY NUMBER BELOW IS ABOUT LOOTING, so the destroys come out here (JOS-401, the census).
+   * `Times looted`, `Distinct mobs`, `Zones seen`, the mob breakdown, the per-zone rates and the
+   * "Looted over time" histogram would each be wrong in the same way otherwise: a destroy names no
+   * mob (it would tally under `unknown`), it is not a drop, and it happened in your bags.
+   *
+   * The filter is HERE rather than at the two call sites (`LootView`'s pane takeover and the Mobs
+   * tab's dialog) precisely because there are two of them and a third would inherit the answer.
+   */
+  const looted = useMemo(() => events.filter(isAcquisition), [events])
+  const agg = useMemo(() => aggregateLoot(looted), [looted])
   const knowledge = useItemKnowledge(item, active)
   // The per-zone RATES (JOS-78). Its own hook because it joins a SECOND module — the progression
   // snapshot, for the active-time denominators — and that join is the one thing on this surface
   // that is not simply a fold of `events`.
-  const zoneRates = useItemZoneRates(events)
+  const zoneRates = useItemZoneRates(looted, slice)
   return (
     <Stack direction={{ xs: 'column', md: 'row' }} spacing={2.5} alignItems="flex-start">
       <ItemWindowColumn item={item} stats={stats} knowledge={knowledge} />
-      <ObservedColumn events={events} agg={agg} knowledge={knowledge} item={item} zoneRates={zoneRates} />
+      <ObservedColumn
+        events={looted}
+        agg={agg}
+        knowledge={knowledge}
+        item={item}
+        zoneRates={zoneRates}
+        owned={owned}
+      />
     </Stack>
   )
 }

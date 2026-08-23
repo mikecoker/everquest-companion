@@ -5,9 +5,22 @@
 // THE COUNTER TABLES CANNOT ANSWER THIS, and no amount of arithmetic over them will: `usage_daily`
 // is keyed on a DAY, and "right now" is not a day. The only live signal this platform has is the
 // EMF metric the ingest Lambda emits per accepted batch — `EQCompanion/Telemetry · Heartbeats`,
-// dimension `Channel=prod` — where one heartbeat is one open session per five minutes. The Sum
-// over a 300-second period therefore IS the number of sessions that were alive in that period,
+// dimension `Channel=prod` — where one heartbeat is one open session per HEARTBEAT PERIOD. The Sum
+// over a period of exactly that length therefore IS the number of sessions that were alive in it,
 // which is exactly the number the owner wanted at a glance.
+//
+// SO THE PERIOD IS NOT A PREFERENCE, IT IS THE CLIENT'S CADENCE (JOS-269). When the heartbeat went
+// 5 min → 10 min, a 300-second bucket stopped meaning "sessions alive" and started meaning "the
+// half of them whose pulse happened to land in this window" — the readout would have halved
+// overnight with nothing wrong. `BUCKET_MS` therefore tracks `HEARTBEAT_INTERVAL_MS` by
+// definition, and the only honest way to change one is to change the other.
+//
+// THE CROSSOVER IS THE ONE PERIOD THIS CANNOT BE EXACT OVER, and it is worth naming because the
+// fleet auto-updates over days: while some installs still run the 5-minute build, each of those
+// contributes TWO heartbeats to a 10-minute bucket and is counted twice. It reads high, it decays
+// as the fleet updates, and it is bounded by the share of the fleet on the old build. The
+// alternative — keeping the 5-minute bucket — under-counts the NEW build by half and gets WORSE
+// as the rollout proceeds, which is the wrong direction for a number to drift.
 //
 // IT SITS BESIDE `buildAnalytics`, NEVER INSIDE IT (the `ghDownloads.ts` precedent, same
 // reasoning): that function is pure over three arrays of counter rows and stays testable without
@@ -52,14 +65,29 @@ export const LIVE_METRIC = 'Heartbeats'
 /** Installed builds only. The dev channel is the author's own machine and is not a fleet. */
 export const LIVE_CHANNEL = 'prod'
 
-/** One heartbeat per open session per five minutes — the period IS the cadence (flush.ts). */
-export const BUCKET_MS = 5 * 60 * 1000
+/** One heartbeat per open session per bucket — the period IS the cadence, so this is
+ *  `HEARTBEAT_INTERVAL_MS` (flush.ts) restated, not chosen. Ten minutes since JOS-269.
+ *
+ *  It is a LITERAL rather than an import because this module is the triage half of the app and
+ *  `flush.ts` is the client half: importing it would drag `../store`, `../e2e` and the whole
+ *  Electron main graph into a file whose derivation is meant to stay pure and node-testable. The
+ *  cost of the copy is that the two must be changed together — which is what the header says, and
+ *  why the number is spelled the same way in both places. A THIRD place states it in words: the
+ *  "sessions in the last 10 min" note on the Live now tile (renderer/…/analyticsRows.ts), which is
+ *  the promise this window makes to the reader. */
+export const BUCKET_MS = 10 * 60 * 1000
 /**
- * How far back the age derivation can see: 12 hours, i.e. 144 buckets.
+ * How far back the age derivation can see: 12 hours, i.e. 72 buckets (144 before JOS-269 doubled
+ * the bucket; the WINDOW is the thing chosen here, and it did not move).
  *
  * Long enough that a typical evening's session is measured rather than truncated, short enough
- * that it is one small API call. A session older than this is reported as being exactly this old
- * — `ageIsFloor` says so, and the label says `est.`.
+ * that it is one small API call — smaller now, half the datapoints for the same reach. A session
+ * older than this is reported as being exactly this old — `ageIsFloor` says so, and the label says
+ * `est.`.
+ *
+ * WHAT DID MOVE IS THE GRAIN OF `avgAgeMs`: it is a whole number of buckets, so the estimate now
+ * steps in tens of minutes rather than fives. That is the same coarsening the session-duration tail
+ * took (flush.ts), for the same reason, and it is why the label has always said `est.`
  */
 export const LOOKBACK_MS = 12 * 60 * 60 * 1000
 /** CloudWatch must not add its latency to a screen that is otherwise about a database. */
@@ -157,9 +185,15 @@ export interface LiveSessionsOptions {
 
 /**
  * The last COMPLETE bucket's end. A period containing `now` is still filling — and heartbeats
- * arrive through a 60-second flush loop, so even a just-closed one is a little under-reported —
- * which is precisely why "active now" is defined as the last FULL bucket and not as the newest
- * datapoint CloudWatch will hand over.
+ * arrive through a flush loop rather than the instant they are recorded, so even a just-closed one
+ * can be a little under-reported — which is precisely why "active now" is defined as the last FULL
+ * bucket and not as the newest datapoint CloudWatch will hand over.
+ *
+ * THE FLUSH LAG DID NOT GROW WITH THE FLUSH PERIOD (JOS-269, 60 s → 5 min). A heartbeat is not
+ * waiting for "some flush within 5 minutes": the heartbeat period is a MULTIPLE of the flush
+ * period, so every heartbeat tick coincides with a flush tick and rides out on it. The lag stays
+ * near zero and the buckets stay honest; what a longer flush would have cost is exactly what the
+ * multiple was chosen to avoid.
  */
 export function lastCompleteBucketEnd(nowMs: number, bucketMs = BUCKET_MS): number {
   return Math.floor(nowMs / bucketMs) * bucketMs
@@ -174,7 +208,7 @@ export async function fetchLiveSessions(
   if (region === null || region === undefined) {
     return {
       available: false,
-      reason: 'no cached terraform outputs — run any triage command once to write .triage/stack.json'
+      reason: 'no cached terraform outputs - run any triage command once to write .triage/stack.json'
     }
   }
   const endMs = lastCompleteBucketEnd(nowMs)

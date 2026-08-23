@@ -1,5 +1,5 @@
 {{Classic Era}}
-{{Spellpage|
+{{Spellpagesmart|
 
 | spellname = Minor Summoning: Air
 | spellicon = 38
@@ -11,18 +11,18 @@
 
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Minor Summoning: Air Summon|Minor Summoning: Air]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 17 [[Minor Summoning: Air Summon|Air Elemental]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 160
 | range =  
 | casting_time = 9.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 1.50
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 

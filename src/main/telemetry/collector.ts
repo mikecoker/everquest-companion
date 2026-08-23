@@ -30,6 +30,8 @@ import { CHANNEL } from '../channel'
 import { logInfo } from '../errorLog'
 import { getTelemetryPrefs, setTelemetryPrefs } from '../store'
 import { telemetryCollectEnabled, telemetryEndpointConfigured } from './net'
+import { resetHealth } from './health'
+import { resetErrorReports } from './errorReports'
 import { dropRing, pushCapped, readRing, writeRing } from './ring'
 
 /** `process.platform` folded onto the closed enum — a raw platform string is still a string. */
@@ -61,6 +63,17 @@ let linesPending = 0
  * event instead of minting a new kind (shared/telemetry.ts, THE ADDITIVE-FIELD RULE).
  */
 let startupPending: StartupReplayStats | null = null
+/**
+ * How many sessions have BEGUN in this process. It exists for one decision and says so (JOS-272):
+ * whether `beginSession` is the first — in which case the errors filed before the pipeline existed
+ * (a store schema quarantine, anything else raised at module scope) come with it — or a later one,
+ * which starts empty like every session always has.
+ *
+ * It is counted HERE because a session is this module's idea, and `endSession` deliberately does NOT
+ * decrement it: a session that was ended and resumed is not the boot window, and the errors filed
+ * while the switch was off must not ride into the session the user turned back on.
+ */
+let sessionsBegun = 0
 
 /** Wall-clock ms since `startTelemetry()` — 0 before it has run. */
 export function sessionUptimeMs(now = Date.now()): number {
@@ -72,6 +85,21 @@ export function beginSession(now = Date.now()): void {
   viewsSeen.clear()
   linesPending = 0
   startupPending = null
+  // The health deltas live in their own leaf module (telemetry/health.ts — it has to, so
+  // `errorLog.ts` can bump one without a cycle), but they are SESSION state exactly like the two
+  // above and are cleared on the same boundaries.
+  resetHealth()
+  // Same for the error reports and the breadcrumb ring behind them (JOS-100). This call is also
+  // what STAMPS the session clock those reports bucket their age against: `errorReports.ts`
+  // cannot ask the collector for `sessionUptimeMs` without closing the errorLog cycle, so the
+  // collector tells it instead, at the one moment both agree a session has begun.
+  //
+  // …AND ON THE FIRST SESSION IT KEEPS WHAT WAS ALREADY THERE (JOS-272). Everything `logError` filed
+  // before this line ran was recorded and then cleared by it, which is why a store-schema quarantine
+  // — raised from `store.ts`'s module scope, long before a window exists — has never once reached
+  // the fleet. Only the FIRST session inherits: see `sessionsBegun` above.
+  resetErrorReports(now, sessionsBegun === 0)
+  sessionsBegun += 1
 }
 
 /**
@@ -84,6 +112,11 @@ export function endSession(): void {
   viewsSeen.clear()
   linesPending = 0
   startupPending = null
+  resetHealth()
+  // The session clock is stamped to 0 here on purpose: `resetErrorReports` takes `now` and a
+  // report built after this point would bucket its age from the LAST session's start. There is
+  // no session, so the honest answer is bucket 0 and an empty ring.
+  resetErrorReports(0)
 }
 
 /**
@@ -156,6 +189,15 @@ export function ensureAnalyticsId(): string | null {
  * Record one ALREADY-VALIDATED event. The IPC handler validates renderer input at the boundary
  * and main-side callers construct typed values, so this function's job is the gate and the ring,
  * not the shape.
+ *
+ * THERE IS EXACTLY ONE CARVE-OUT FROM THIS GATE IN THE WHOLE FEATURE, and it is named here so a
+ * reader auditing "nothing is collected when the switch is off" finds it at the gate rather than
+ * by accident: the OPT-OUT NOTICE (JOS-109, `./optOut.ts`). It is authored AT the flip and sent
+ * as its own single-event batch, so it never enters this ring and never passes through this
+ * function — which is why the gate below needs no exception written into it. The carve-out is
+ * real all the same: one fieldless event leaves the machine after the switch reads false, it is
+ * disclosed in TELEMETRY.md, and `./optOut.ts` argues every term of it. Nothing else may ever
+ * take that route; everything else in this app goes through the line below.
  */
 export function recordEvent(ev: TelemetryEvent): void {
   if (!telemetryCollectEnabled(getTelemetryPrefs())) return

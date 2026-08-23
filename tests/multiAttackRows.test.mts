@@ -38,6 +38,8 @@ function viewOf(o: Partial<SourceRoundsView> & { lanes: RoundLaneView[] }): Sour
     excluded: { frenzy: 0, riposte: 0, flurry: 0, rampage: 0 },
     modifiers: [],
     ripostesGiven: 0,
+    riposteLanded: 0,
+    riposteDamage: 0,
     ripostesTaken: 0,
     rampagesTaken: 0,
     flurries: 0,

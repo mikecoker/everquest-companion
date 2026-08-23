@@ -20,7 +20,14 @@
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { LOG_WINDOW_CHOICES, validateDraft, type SubmitErrorCode } from '../../shared/feedback'
-import { buildLogSlice, feedbackContext, saveSliceToFile, submitFeedback } from '../feedback'
+import {
+  buildAchievementsPreview,
+  buildInventoryPreview,
+  buildLogSlice,
+  feedbackContext,
+  saveSliceToFile,
+  submitFeedback
+} from '../feedback'
 
 /** The window selector's ONLY legal values (15 / 30 / 60 minutes). */
 function isWindowChoice(v: unknown): v is (typeof LOG_WINDOW_CHOICES)[number] {
@@ -37,7 +44,7 @@ function refuse(
 
 export function registerFeedbackIpc(): void {
   // Header context: versions, channel, queued count, whether this build has an endpoint.
-  ipcMain.handle(IPC.feedbackContext, () => feedbackContext())
+  ipcMain.handle(IPC.feedbackContext, async () => await feedbackContext())
 
   // Build the scrubbed slice and return a CAPPED preview. The gz bytes never cross IPC.
   // An unrecognized window is null (the dialog's "no log to attach" state), never a guess.
@@ -50,16 +57,43 @@ export function registerFeedbackIpc(): void {
     isWindowChoice(windowMinutes) ? await saveSliceToFile(windowMinutes) : { ok: false }
   )
 
+  // Package the CURRENT inventory dump and return a CAPPED preview (JOS-296). No arguments to
+  // validate, and that is the design: the renderer does not get to say WHICH file is read. Main
+  // resolves the dump for the active character through the outputs registry, so a compromised
+  // renderer cannot turn this into a read-any-file primitive the way a path parameter would.
+  ipcMain.handle(IPC.feedbackBuildInventory, async () => await buildInventoryPreview())
+
+  // The achievements dump, on the identical no-arguments terms (JOS-441).
+  ipcMain.handle(IPC.feedbackBuildAchievements, async () => await buildAchievementsPreview())
+
   // Submit. NEVER rejects: a network failure resolves with `{ok:false, queued:true}`.
   ipcMain.handle(IPC.feedbackSubmit, async (_e, draft: unknown, opts: unknown) => {
     const valid = validateDraft(draft)
     if (!valid.ok) return refuse(valid.message, valid.field)
     if (typeof opts !== 'object' || opts === null) return refuse('Missing send options.', 'opts')
-    const { attachLog, windowMinutes } = opts as { attachLog?: unknown; windowMinutes?: unknown }
+    const { attachLog, windowMinutes, attachInventory, attachAchievements } = opts as {
+      attachLog?: unknown
+      windowMinutes?: unknown
+      attachInventory?: unknown
+      attachAchievements?: unknown
+    }
     if (typeof attachLog !== 'boolean') return refuse('attachLog must be true or false.', 'attachLog')
     if (!isWindowChoice(windowMinutes)) {
       return refuse(`windowMinutes must be one of: ${LOG_WINDOW_CHOICES.join(', ')}.`, 'windowMinutes')
     }
-    return await submitFeedback(valid.value, { attachLog, windowMinutes })
+    // Same law as `attachLog`: a boolean, checked at the boundary. There is no path, window or
+    // count to validate beside it — the dump is whichever one main resolves.
+    if (typeof attachInventory !== 'boolean') {
+      return refuse('attachInventory must be true or false.', 'attachInventory')
+    }
+    if (typeof attachAchievements !== 'boolean') {
+      return refuse('attachAchievements must be true or false.', 'attachAchievements')
+    }
+    return await submitFeedback(valid.value, {
+      attachLog,
+      windowMinutes,
+      attachInventory,
+      attachAchievements
+    })
   })
 }

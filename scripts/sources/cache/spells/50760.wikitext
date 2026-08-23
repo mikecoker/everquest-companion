@@ -1,7 +1,8 @@
-{{Spellpage|
+{{Kunark Era}}
+{{Spellpagesmart|
 
 | spellname = Manifest Elements
-| spellicon = C
+| spellicon = 161
 | description = Forms the primal elements into a powerful servant.
 
 | classes = 
@@ -25,7 +26,7 @@ This spell is cast by NPCs only.
 | recast_time = 0.00
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 

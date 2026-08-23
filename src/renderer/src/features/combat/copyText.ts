@@ -27,9 +27,10 @@
 
 import type { SegmentView, SourceView } from '@shared/combat'
 import { flattenSkills, type MobBreakdown, type SkillRow, type TargetDetail } from './dashboardData'
+import { defenseHeadlineParts, defenseRowText, defenseRows, riposteLine, ripostesTakenLine } from './defenseRows'
 import { landEvidence } from './landEvidence'
 import { nestedRows, type OwnRow } from './petRows'
-import { RANK, count, pctText, statLines, subjectLine, table, type Col } from './copyTable'
+import { RANK, count, pctText, statLines, subjectLine, table, wrapText, type Col } from './copyTable'
 import { formatNum, formatRate } from '../../lib/formatRate'
 
 // The width constant and the `m:ss` spelling keep their old import path: combatShared.tsx
@@ -106,6 +107,32 @@ function sourceTable(rows: SourceView[], mode: 'out' | 'in'): string[] {
   )
 }
 
+/**
+ * YOUR DEFENCE, exactly as the panel states it (JOS-354). Same three builders the panel uses
+ * (`defenseRows.ts`), so the paste and the screen can never disagree about a rate, about which
+ * outcomes are your own skills, or — since JOS-361 — about the ORDER the rows are ranked in.
+ *
+ * THE PANEL PUTS IT BEHIND A TAB NOW AND THE PASTE STILL CARRIES IT (JOS-361). The copy affordance
+ * belongs to the card's header, above the tab strip, so it serializes the whole incoming direction
+ * rather than whichever of the two tabs happens to be open; a clipboard that changed shape with a
+ * tab click would make a paste depend on something the reader of the paste cannot see.
+ */
+function defenseHeader(seg: SegmentView): string[] {
+  const d = seg.defense
+  if (d.swings === 0) return []
+  const notes = [riposteLine(d), ripostesTakenLine(d)].filter((l): l is string => l !== null)
+  return [
+    '',
+    // Both runs go through the app's ' · ' packer, so a segment with every outcome present wraps
+    // instead of handing the chat client the break point (copyTable.statLines' whole argument).
+    ...statLines(['Your defence', ...defenseHeadlineParts(d)]),
+    ...statLines(defenseRows(d).map(defenseRowText)),
+    // The riposte notes are PROSE — the counter-swing's "already inside your melee total" caveat
+    // is the honesty, so it wraps on words and is never summarised away.
+    ...notes.flatMap((n) => wrapText(n))
+  ]
+}
+
 /** The incoming view's healing footer, exactly as the panel appends it under the list. */
 function healFooter(seg: SegmentView): string[] {
   if (seg.incomingHealTotal <= 0) return []
@@ -123,6 +150,12 @@ function healFooter(seg: SegmentView): string[] {
 export function formatSegmentText(seg: SegmentView, mode: 'out' | 'in'): string {
   const rows = mode === 'out' ? seg.entities : seg.incoming
   const out: string[] = [subjectLine(null, seg), ...statLines(segmentStats(seg, mode))]
+
+  // The defence block rides ABOVE the rows in the Incoming direction — where the panel used to put
+  // it, and where a linear paste still wants it (it is the summary; the table is the detail). It is
+  // emitted even when nothing landed, because "37 swings, all of them avoided" is a segment worth
+  // pasting and the row table below would be empty for it.
+  if (mode === 'in') out.push(...defenseHeader(seg))
 
   if (rows.length === 0) {
     out.push(mode === 'out' ? 'No outgoing damage in this segment.' : 'No incoming damage in this segment.')

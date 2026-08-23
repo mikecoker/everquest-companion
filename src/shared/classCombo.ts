@@ -146,6 +146,17 @@ export interface ComboInterval {
    * Absent (undefined) on every interval where nothing was overruled.
    */
   userOverruled?: boolean
+  /**
+   * A level BELOW the one in force when this interval opened was observed inside it (JOS-239).
+   *
+   * Your displayed level is the MINIMUM over the loadout's class levels, so inside one loadout it
+   * only ever rises. A level that goes backwards is therefore proof of a swap no detector cut, and
+   * it is the fact `[levelLo, levelHi]` cannot express: `levels 24-50` is a legitimate grind and
+   * `levels 11-50` is impossible only because the 11 came second.
+   *
+   * Absent (undefined) unless it happened — same serialization rule as `userOverruled`.
+   */
+  levelRegressed?: boolean
 }
 
 /** One atomic piece of evidence, before it is folded into a slot. */

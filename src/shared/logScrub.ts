@@ -78,20 +78,39 @@
 //     "<Name> — your pet?" offer, and a fixture that cannot carry them cannot test the offer.
 //     An exact-sentence match rather than a `Master` pattern is the whole safety of it.
 //
-//   * THE PET LEADER SAY (JOS-52) — `<Name> says, 'My leader is <You>.'`, the `/pet who leader`
-//     answer, and the ONLY line in this log in which a pet names its owner out loud.
-//     MEASURED (whole-log sweep, 1,404,458 lines, 2026-08-06): the family has exactly ONE member
-//     and exactly ONE occurrence — `Jaber says, 'My leader is Primitive.'` (Thu Aug 06 12:44:20).
-//     There is no follower variant, no no-leader variant and no charmed variant; the log's only
-//     other 12 lines containing "leader" are seven group-leader lines and five players' chat.
+//   * THE PET LEADER SAY (JOS-52) — `<Name> says, 'My leader is <Someone>.'`, the
+//     `/pet who leader` answer, and the ONLY line in this log in which a pet names its owner out
+//     loud. MEASURED (whole-log sweep, 1,404,458 lines, 2026-08-06): the family has exactly ONE
+//     member and exactly ONE occurrence — `Jaber says, 'My leader is Primitive.'` (Thu Aug 06
+//     12:44:20). There is no follower variant, no no-leader variant and no charmed variant; the
+//     log's only other 12 lines containing "leader" are seven group-leader lines and five
+//     players' chat.
 //
-//     IT IS GATED ON `opts.selfName`, and that is the difference between this carve-out and the
-//     two above it. The tell's argument was "a pet's name is not the user's" and the six says'
-//     was "no player's words and no player's name can ride this out" — but a LEADER say carries a
-//     player's name INSIDE the quote, which is exactly what family 1 exists to drop. So this one
-//     borrows the SELF `/who` ROW's argument instead: the owner's own name is theirs to publish,
-//     and a stranger's pet naming a stranger falls straight through to the drop list. Absent
-//     selfName ⇒ no carve-out at all, the same safe default the `/who` row takes.
+//     IT WAS GATED ON `opts.selfName` UNTIL JOS-270 — kept when the leader it named was the
+//     owner, dropped when it named anybody else. Owner ruling 2026-08-13 removed the gate: the
+//     line is now kept WHATEVER NAME it carries, which puts it on exactly the same footing as
+//     the two carve-outs above it.
+//
+//     WHY THE GATE COST MORE THAN IT PROTECTED. The self-gated form let the LIVE app act on a
+//     third party's leader say (it binds a group-mate's pet to them — allyCharms.ts) while
+//     guaranteeing that no feedback report could ever CONTAIN one. That is a structurally
+//     un-triageable defect: report 01KZVYMCAD72XFC36D73D8J2E8 is an ally's summoned pet whose
+//     damage joined nobody's parse, and the one line that would have bound it is the one line
+//     the slice was built to delete.
+//
+//     WHY KEEPING IT COSTS NOTHING. This is the 2026-08-05 group-membership ruling's reasoning
+//     (family 3 above), applied to the same shape of fact: the leader's name is a structural fact
+//     about the fight, not a communication, and the SAME NAME already appears uncensored in every
+//     combat line of the same slice — the pet is swinging, the leader is casting and healing. The
+//     delta is nil. What privacy protects is CONTENT, and no content rides out here: the sentence
+//     is fixed, the speaker is an NPC pet, and the only variable is a name the slice is already
+//     full of.
+//
+//     THE RESIDUAL, stated rather than waved at. The shape is a common grammar, so a PLAYER who
+//     types `My leader is <X>.` in /say produces a line this rule now keeps. That is precisely
+//     the risk the six-says carve-out has always accepted (a player can type "Following you,
+//     Master." too), and it is bounded the same way: an EXACT sentence shape, never a `/leader/`
+//     pattern, and one measured occurrence in 1.4M lines. Cost accepted at the same price.
 //
 //   * THE SELF `/who` ROW — `opts.selfName`. The owner's own identity is theirs to publish,
 //     and their row is the ONLY line in the log that states the class loadout
@@ -240,12 +259,13 @@ export function isThirdPartyChat(line: string, opts?: ScrubOpts): boolean {
   // The pet-voiced PUBLIC say. Anchored on the body (the tell's regex above is a suffix match
   // and needs no strip), and on the exact sentence — see PET_SAY_RE.
   if (PET_SAY_RE.test(b)) return false
+  // The `/pet who leader` answer, WHOEVER it names (JOS-270, owner ruling 2026-08-13). No longer
+  // gated on `selfName`: an ally's pet naming an ally is the same structural fact about the fight
+  // that the group-membership lines are, and both ends of it already appear uncensored in every
+  // combat line of the same slice. See the carve-out note above for the whole argument.
+  if (PET_LEADER_RE.test(b)) return false
   const selfName = opts?.selfName
   if (selfName !== undefined && selfName !== '') {
-    // The `/pet who leader` answer, but ONLY when the leader it names is the owner. A stranger's
-    // pet naming a stranger is a third party's name inside quoted speech and falls to rule 1.
-    const lead = PET_LEADER_RE.exec(b)
-    if (lead?.[2].toLowerCase() === selfName.trim().toLowerCase()) return false
     // the owner's own /who row (`[50 PAL/MNK/ENC] Primitive (Dark Elf) ...`) is their identity
     if (cachedSelfWhoRe(selfName).test(b)) return false
   }

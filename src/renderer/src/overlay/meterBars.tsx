@@ -17,14 +17,14 @@
 
 import { type JSX, useMemo } from 'react'
 import type { OverlayDrill } from '@shared/types'
-import { CATEGORY_LABEL, type DamageCategory, type SegmentView, type SourceView } from '@shared/combat'
+import { type DamageCategory, type SegmentView, type SourceView } from '@shared/combat'
 import { formatNum as fmt, formatRate } from '../lib/formatRate'
 import { type FlatSkill, type SkillRow } from '../features/combat/dashboardData'
-import { laneDps, meterPanel, type OwnRow, type PetRow } from '../features/combat/petRows'
+import { laneDps, meterPanel, type MeterPanel, type OwnRow, type PetRow } from '../features/combat/petRows'
 import { useCombinePetRow } from '../features/combat/useCombatPrefs'
 import { scopeSources } from '../features/combat/meterScope'
 import { landEvidence } from '../features/combat/landEvidence'
-import { MeterCrumb } from './meterCrumb'
+import { MeterCrumb, type CrumbTotal } from './meterCrumb'
 // The app's ONE `m:ss` spelling, out of the MUI-free primitives module every plain-text and
 // plain-React surface already reads it from. The overlay does not get a second one.
 import { fmtDur } from '../features/combat/copyTable'
@@ -33,11 +33,30 @@ import type { MeterScope, RosterSnap } from '@shared/roster'
 // Kept in step with the Combat tab's KIND_COLOR (features/combat/combatShared.tsx) — the overlay
 // is MUI-free and cannot import the theme, so the two lists are written out and must move
 // together. `member` is a group-mate (docs/plans/group-model.md).
+/**
+ * The damage meter's accent — the gold the window border and the header title already wear, and
+ * since JOS-158 the colour of the aggregate on the crumb row. Spelled out rather than borrowed
+ * from `KIND_COLOR.you` below: the two happen to be the same hue and mean different things, and
+ * the aggregate is the one number on this surface that is emphatically NOT yours.
+ */
+const ACCENT = '#d9b25f'
+
 const KIND_COLOR: Record<string, string> = {
   you: '#d9b25f',
   pet: '#6fb3d2',
+  allyPet: '#5b7f95',
   member: '#7fbf8f',
+  other: '#5f8f74',
   enemy: '#cf6679'
+}
+// The one-word tag after a bar's name. KEEP IN SYNC with the app's KIND_TAG (features/combat/
+// EntityRow.tsx), which carries the argument for each word — in particular why `other` (JOS-430)
+// is not called 'player'.
+const KIND_SUFFIX: Record<string, string> = {
+  pet: ' ·pet',
+  member: ' ·group',
+  allyPet: ' ·ally',
+  other: ' ·other'
 }
 // KEEP IN SYNC with the app's CAT_COLOR (features/combat/combatShared.tsx) — the overlay is a
 // separate renderer entry with no MUI theme, so it carries its own copy. 'slay' is a radiant
@@ -52,7 +71,14 @@ const CAT_COLOR: Record<DamageCategory, string> = {
 }
 
 
-/** A single horizontal bar: label + right-text + pct-fill. Dense + high-contrast. Clickable to drill. */
+/**
+ * A single horizontal bar: label + right-text + pct-fill. Dense + high-contrast. Clickable to drill.
+ *
+ * NO HOVER (JOS-358, owner ruling from hands-on testing: tooltips on these windows live in the
+ * title bar and the bars get NONE). It used to carry a `title` spelling out the compacted stats;
+ * what a bar states is now exactly what is printed ON it, and the fully-labeled figures are on the
+ * Combat tab, which is the surface that has room for them.
+ */
 function Bar({
   color,
   pct,
@@ -60,8 +86,7 @@ function Bar({
   label,
   right,
   onClick,
-  accent,
-  title
+  accent
 }: {
   color: string
   pct: number
@@ -71,9 +96,6 @@ function Bar({
   onClick?: () => void
   /** Full-height left stripe — keeps a skill row's category readable at any bar width. */
   accent?: string
-  /** Native hover tooltip spelling out the compacted right-hand stats (interactive mode only —
-   *  a locked overlay is click-through, so nothing hovers it). */
-  title?: string
 }): JSX.Element {
   return (
     <div
@@ -81,7 +103,6 @@ function Bar({
       // the overlay drill spec drives these rows by selector (tests/e2e/overlay-sync.e2e.mts).
       data-testid="overlay-bar"
       onClick={onClick}
-      title={title}
       style={{
         position: 'relative',
         height: 18,
@@ -144,9 +165,10 @@ export type Drill = OverlayDrill
  * the main view's bars (features/combat/combatShared.tsx skillStatText):
  *   `12% miss · 3 - 145dmg`
  * Density here comes from carrying FEWER stats, never from compressing labels (`12%m` / `145/3`
- * are unreadable in a glance-and-forget overlay). The counts the main view puts one click down
- * in its expanded readout live in this row's hover `title` instead — the overlay has no room
- * for an expansion, and in locked (click-through) mode there would be no way to collapse one.
+ * are unreadable in a glance-and-forget overlay). The counts the main view puts one click down in
+ * its expanded readout USED TO live in this row's hover title; since JOS-358 they live on the
+ * Combat tab alone, which is the surface with room for them — this window has no expansion, no
+ * hover, and in locked (click-through) mode no way to collapse either.
  * The row TOTAL is not here — it owns the right end of the bar.
  */
 function skillStat(s: FlatSkill): string {
@@ -164,43 +186,14 @@ function skillStat(s: FlatSkill): string {
   return parts.join(' · ')
 }
 
-/** The labeled stat run for one row, shared by the row title and its children lines. */
-function skillFacts(s: FlatSkill): string {
-  const land = landEvidence(s)
-  // The overlay has no expansion, so the damage-less row's hover carries the BASIS too — where
-  // the landings came from, or why a resist rate is being withheld.
-  if (s.hits === 0) return `${land.text} · ${land.hint}`
-  const misses = s.misses ?? 0
-  const swings = s.hits + misses
-  const resists = s.resists ?? 0
-  const bits = [
-    `total ${fmt(s.total)}`,
-    `${s.hits} hits`,
-    `avg per hit ${fmt(Math.round(s.total / s.hits))}`,
-    `${s.crits} crits (${Math.round((s.crits / s.hits) * 100)}% crit)`
-  ]
-  if (misses > 0) bits.push(`${Math.round((misses / swings) * 100)}% miss (${misses} of ${swings} swings avoided)`)
-  if (resists > 0) bits.push(land.resistText)
-  const min = s.min ?? 0
-  bits.push(min > 0 && min !== s.max ? `damage range ${fmt(min)} - ${fmt(s.max)}` : `damage range ${fmt(s.max)}`)
-  return bits.join(' · ')
-}
-
-/**
- * The overlay's stand-in for the main view's expanded per-ability readout: the same figures,
- * fully labeled, as the row's hover title (interactive mode — a locked overlay is
- * click-through, so it neither hovers nor could collapse an inline expansion).
- * For the GROUPED Slay Undead row this title also carries what the main view puts in the
- * expansion — the per-weapon-skill split, one labeled line each. The overlay's 18px rows have
- * no room for an inline breakdown and locked mode could never collapse one, so the hover title
- * is where that detail lives here.
- */
-function skillTitle(s: SkillRow, catLabel: string): string {
-  const head = `${s.name} (${catLabel}) — ${skillFacts(s)}`
-  if (!s.children || s.children.length === 0) return head
-  const lines = s.children.map((c) => `  ${c.name} — ${skillFacts(c)}`)
-  return `${head}\nBy skill:\n${lines.join('\n')}`
-}
+// WHAT JOS-358 DELETED HERE, so nobody re-derives it from the comments above. Three builders lived
+// in this file — `multiFacts`, `skillFacts` and `skillTitle` — and their whole job was the hover
+// title on a bar: the fully-labeled figures, the multi-attack reading (JOS-113), and the grouped
+// Slay Undead row's per-weapon split. The owner ruled the bars carry no tooltip at all, so they
+// have no reader left and are gone rather than kept warm. NOTHING WAS LOST FROM THE PRODUCT: the
+// Combat tab builds all three from `petRows`/`abilityStats` on a surface that can actually print
+// them, and `landEvidence` (the damage-less row's honest sentence) still speaks ON the bar through
+// `skillStat` above.
 
 /** ONE skill/spell lane of the drilled source — category-colored, stats inside the bar, and its
  *  OWN rate at the right end beside its total (petRows.laneDps; owner ruling 2026-08-05). Every
@@ -232,7 +225,6 @@ function SkillLine({ s, activeSec }: { s: SkillRow; activeSec: number }): JSX.El
         </>
       }
       right={`${formatRate(laneDps(s.total, activeSec))} · ${fmt(s.total)}`}
-      title={skillTitle(s, CATEGORY_LABEL[s.category])}
     />
   )
 }
@@ -248,11 +240,6 @@ function SkillLine({ s, activeSec }: { s: SkillRow; activeSec: number }): JSX.El
  * it stands for — a whole source, folded to one line.
  */
 function PetLine({ pet, pct, onDrill }: { pet: PetRow; pct: number; onDrill?: () => void }): JSX.Element {
-  const swings = pet.hits + pet.misses
-  const facts = [`total ${fmt(pet.total)}`, `${pet.hits} hits`]
-  if (pet.crits > 0) facts.push(`${pet.crits} crits`)
-  if (pet.misses > 0) facts.push(`${Math.round((pet.misses / swings) * 100)}% miss (${pet.misses} of ${swings} swings)`)
-  if (pet.resists > 0) facts.push(`${pet.resists} resisted`)
   return (
     <Bar
       color={KIND_COLOR.pet}
@@ -266,7 +253,6 @@ function PetLine({ pet, pct, onDrill }: { pet: PetRow; pct: number; onDrill?: ()
       }
       right={`${formatRate(pet.dps)} · ${fmt(pet.total)}`}
       onClick={onDrill}
-      title={`${pet.name} (your pet) — ${facts.join(' · ')}`}
     />
   )
 }
@@ -301,7 +287,7 @@ function SourceLines({
           label={
             <>
               {e.name}
-              {e.kind === 'pet' ? ' ·pet' : e.kind === 'member' ? ' ·group' : ''}
+              {KIND_SUFFIX[e.kind] ?? ''}
             </>
           }
           right={`${formatRate(e.dps)} · ${fmt(e.total)}`}
@@ -323,6 +309,44 @@ function ownLine(r: OwnRow, activeSec: number, setDrill: ((d: Drill | null) => v
     />
   ) : (
     <SkillLine key={`${r.skill.category}|${r.skill.name}`} s={r.skill} activeSec={activeSec} />
+  )
+}
+
+/**
+ * LEVEL 2: one source's ability list — one bar per ability (JOS-113), the per-ability stats on
+ * each bar's hover title (this window has no room for an inline expansion, and locked mode is
+ * click-through).
+ *
+ * Back goes to the row this level was opened FROM — a nested pet's owner (your breakdown), else
+ * all the way out to the source list. The zoom-out is offered here: the meter no longer opens
+ * drilled, so there is no view that is its own home and no reason to withhold the way out (the
+ * `canLeave` gate this replaces is JOS-35's zoom-out regression).
+ */
+function DrilledBars({
+  panel,
+  activeSec,
+  dur,
+  total,
+  setDrill
+}: {
+  panel: Extract<MeterPanel, { level: 2 }>
+  activeSec: number
+  dur: string
+  /** the SEGMENT's aggregate, unchanged by the drill: it is the fight's number, not the
+   *  subject's, which is exactly why it is labelled `all` (JOS-158). */
+  total: CrumbTotal
+  setDrill: ((d: Drill | null) => void) | null
+}): JSX.Element {
+  const out: Drill | null = panel.parent ? { entityId: panel.parent.id } : null
+  return (
+    <MeterCrumb
+      name={panel.subject.name}
+      dur={dur}
+      total={total}
+      onBack={setDrill ? () => setDrill(out) : null}
+    >
+      {panel.rows.map((r) => ownLine(r, activeSec, setDrill))}
+    </MeterCrumb>
   )
 }
 
@@ -358,29 +382,24 @@ export function MeterBars({
   // `meterPanel` never touches the stored value, so a restored `pet:<instanceId>` from a past
   // session, a fight that moved on, or a 'you' that blinks out between fights all re-drill
   // silently the moment the entity is back in the segment.
-  const panel = useMemo(
-    () => meterPanel(entities, combine, drill?.entityId ?? null),
-    [entities, combine, drill]
-  )
+  // The overlay hands its PERSISTED drill straight to the builder — `OverlayDrill` is exactly the
+  // shape `meterPanel` takes, which is why this surface needs no translation where the Combat tab
+  // and the Overview card each call `dashboardData.meterDrill` on their richer union.
+  const panel = useMemo(() => meterPanel(entities, combine, drill), [entities, combine, drill])
   const dur = fmtDur(seg?.durationSec ?? 0)
 
   if (!seg || (panel.level === 1 && panel.sources.length === 0)) return <MeterEmpty live={live} />
 
-  if (panel.level === 2) {
-    // Back goes to the row this one was opened FROM — a nested pet's owner (your breakdown), else
-    // all the way out to the source list. It is offered at EVERY level-2 view there is: the
-    // meter no longer opens drilled, so there is no view that is its own home and no reason to
-    // withhold the way out (the `canLeave` gate this replaces is JOS-35's zoom-out regression).
-    const out: Drill | null = panel.parent ? { entityId: panel.parent.id } : null
-    return (
-      <MeterCrumb name={panel.subject.name} dur={dur} onBack={setDrill ? () => setDrill(out) : null}>
-        {panel.rows.map((r) => ownLine(r, seg.activeSec, setDrill))}
-      </MeterCrumb>
-    )
-  }
+  // THE AGGREGATE THE TITLE BAR USED TO CARRY (JOS-158) — the same `SegmentView.outDps`, moved
+  // rather than recomputed, so the number a pinned meter shows did not change on the day its
+  // label appeared. The crumb states what it covers; see overlay/meterCrumb.tsx.
+  const total: CrumbTotal = { text: formatRate(seg.outDps), accent: ACCENT }
+
+  if (panel.level !== 1)
+    return <DrilledBars panel={panel} activeSec={seg.activeSec} dur={dur} total={total} setDrill={setDrill} />
 
   return (
-    <MeterCrumb name={null} dur={dur} onBack={null}>
+    <MeterCrumb name={null} dur={dur} total={total} onBack={null}>
       <SourceLines sources={panel.sources} setDrill={setDrill} />
     </MeterCrumb>
   )

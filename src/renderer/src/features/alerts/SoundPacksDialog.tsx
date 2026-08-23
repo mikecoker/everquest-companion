@@ -22,6 +22,7 @@ import {
 import {
   Alert,
   Box,
+  Button,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -33,7 +34,7 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import RefreshIcon from '@mui/icons-material/Refresh'
-import type { PackInstallProgress, RegistryPackView } from '@shared/types'
+import type { PackInstallProgress, RegistryPackView, SoundPack } from '@shared/types'
 import { currentPrefs } from './player'
 import { invalidateSoundCaches, playPreviewSound, revokePreviewCache, stopPreview } from './soundCache'
 import SoundPackRow, { type PreviewState } from './SoundPackRow'
@@ -108,7 +109,12 @@ function usePackInstall(
           onInstalledChange()
           await load(false)
         } else {
-          setProgress((prev) => ({ ...prev, [name]: { name, phase: 'error', message: res.error } }))
+          // `retryable` rides along (JOS-420) — this reply overwrites the push main already sent,
+          // and dropping the flag here would repaint a rate limit as a red error.
+          setProgress((prev) => ({
+            ...prev,
+            [name]: { name, phase: 'error', message: res.error, retryable: res.retryable }
+          }))
         }
       } finally {
         setBusy((prev) => {
@@ -266,6 +272,58 @@ function usePackSearch(packs: RegistryPackView[]): {
   return { search, setSearch, filtered }
 }
 
+/**
+ * WHICH PACK IS YOURS, stated at the top of the browser that sets it (JOS-273).
+ *
+ * THE POINT OF THE ROW IS THE UNHAPPY CASE. A default that resolves is a quiet line of text; a
+ * default naming a pack that is NOT installed is the state the owner's ruling insists must be
+ * visible — "when the chosen pack is missing, fall back VISIBLY, never silently" — and it is
+ * reachable in one honest way (the user deleted their own default), so it says so and offers the
+ * way back. Nothing here heals the preference: a stored choice is the user's statement, and this
+ * app does not quietly rewrite those.
+ */
+function DefaultPackRow({
+  packs,
+  defaultPackId,
+  onClear
+}: {
+  packs: SoundPack[]
+  defaultPackId: string | undefined
+  onClear: () => void
+}): JSX.Element {
+  const chosen = defaultPackId ? packs.find((p) => p.id === defaultPackId) : undefined
+  if (!defaultPackId) {
+    return (
+      <Typography variant="caption" color="text.secondary" data-testid="pack-default-row">
+        Default pack: the one this app ships. Star any installed pack to make it yours instead.
+      </Typography>
+    )
+  }
+  if (chosen) {
+    return (
+      <Typography variant="caption" color="text.secondary" data-testid="pack-default-row">
+        Default pack: {chosen.name}. New and suggested alerts use it.
+      </Typography>
+    )
+  }
+  return (
+    <Alert
+      severity="warning"
+      variant="outlined"
+      data-testid="pack-default-row"
+      action={
+        <Button size="small" onClick={onClear}>
+          Use the shipped pack
+        </Button>
+      }
+    >
+      Your default pack &quot;{defaultPackId}&quot; is not installed. Alerts pointing at a missing
+      pack play the closest line from whatever is installed - install it again below, or pick
+      another default.
+    </Alert>
+  )
+}
+
 /** The registry error banner — cached-list warning vs. a hard failure. */
 function RegistryError({
   error,
@@ -278,7 +336,7 @@ function RegistryError({
   return (
     <Alert severity={fromCache ? 'warning' : 'error'} variant="outlined">
       {fromCache
-        ? `Showing cached list — couldn't reach the registry (${error}).`
+        ? `Showing cached list - couldn't reach the registry (${error}).`
         : `Couldn't load the registry: ${error}`}
     </Alert>
   )
@@ -286,10 +344,19 @@ function RegistryError({
 
 export default function SoundPacksDialog({
   open,
+  packs,
+  defaultPackId,
+  onSetDefault,
   onClose,
   onInstalledChange
 }: {
   open: boolean
+  /** Installed packs — how this dialog knows whether the chosen default is actually here. */
+  packs: SoundPack[]
+  /** The user's default pack (JOS-273), or undefined for "whatever the app ships". */
+  defaultPackId: string | undefined
+  /** "Make this pack my default", or null to go back to the shipped one. */
+  onSetDefault: (packId: string | null) => void
   onClose: () => void
   /** Called after a successful install/uninstall so the parent refreshes packs. */
   onInstalledChange: () => void
@@ -328,6 +395,12 @@ export default function SoundPacksDialog({
             onChange={(e) => setSearch(e.target.value)}
           />
 
+          <DefaultPackRow
+            packs={packs}
+            defaultPackId={defaultPackId}
+            onClear={() => onSetDefault(null)}
+          />
+
           <RegistryError error={registry.error} fromCache={registry.fromCache} />
           {registry.loading && <LinearProgress />}
 
@@ -339,6 +412,7 @@ export default function SoundPacksDialog({
                   p={p}
                   prog={installer.progress[p.name]}
                   isBusy={installer.busy.has(p.name)}
+                  isDefault={p.name === defaultPackId}
                   isExpanded={preview.expanded.has(p.name)}
                   preview={preview.previews[p.name]}
                   playingKey={preview.playingKey}
@@ -346,6 +420,7 @@ export default function SoundPacksDialog({
                   onToggleExpand={preview.toggleExpand}
                   onInstall={(name) => void installer.install(name)}
                   onUninstall={(name) => void installer.uninstall(name)}
+                  onMakeDefault={onSetDefault}
                   onPlay={(name, file) => void preview.playPreview(name, file)}
                 />
               ))}
@@ -358,7 +433,7 @@ export default function SoundPacksDialog({
           </Box>
 
           <Typography variant="caption" color="text.secondary">
-            Packs from openpeon.com (PeonPing/og-packs) — game-audio packs are typically
+            Packs from openpeon.com (PeonPing/og-packs) - game-audio packs are typically
             CC-BY-NC; personal use.
           </Typography>
         </Stack>

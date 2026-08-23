@@ -41,6 +41,20 @@ function tallyOf(mods: ModifierTallyView[], name: string): number {
 }
 
 /**
+ * THE RIPOSTE COUNTER-SWING, read off the accumulator rather than off `modifierViews` (JOS-354).
+ *
+ * `ModifierTallyView` is the counts-only shape on the wire and stays that way; the landed count
+ * and the damage come from the raw tally, which is where the amount was re-read on ingest. The
+ * key is the log's own spelling ('Riposte') because that is what `parseModifiers` emits — the
+ * view's lowercase lookup above is a display-side convenience and not the storage key.
+ */
+function riposteTally(s: SourceStat): { landed: number; damage: number } {
+  const t = s.mods.get('Riposte')
+  if (!t) return { landed: 0, damage: 0 }
+  return { landed: t.count - t.avoided, damage: t.total }
+}
+
+/**
  * Build one source's Rounds payload, or undefined when the source has nothing to say — no
  * rounds AND no annotations. Undefined rather than an empty shell so a spell-only source (or a
  * mob that only ever cast) shows no panel instead of a row of zeroes.
@@ -70,12 +84,15 @@ export function roundStatsView(
     .sort((a, b) => b.rounds - a.rounds || a.label.localeCompare(b.label))
   const primaryRounds = lanes.reduce((n, l) => n + l.rounds, 0)
   const flurries = tallyOf(modifiers, 'flurry')
+  const riposte = riposteTally(s)
   return {
     lanes,
     primaryRounds,
     excluded: { ...s.roundAcc.excluded },
     modifiers,
     ripostesGiven: tallyOf(modifiers, 'riposte'),
+    riposteLanded: riposte.landed,
+    riposteDamage: riposte.damage,
     ripostesTaken: taken.riposte,
     rampagesTaken: taken.rampage,
     flurries,

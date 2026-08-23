@@ -42,9 +42,11 @@ import { CONSIDER_FACTION_COLOR } from '@shared/logEvents'
 import { wikiPageUrl } from '@shared/wiki'
 import { formatTime } from '../lib/formatDate'
 import { isTradeskillOnly } from '../lib/itemKnowledgeView'
-import { ItemHoverCard, MobHoverCard, lookupItemCached } from './feedHoverCards'
+import { ItemHoverCard, lookupItemCached } from './feedHoverCards'
+import { MobCard } from '../lib/hoverCards'
+import { overlayMobLookup } from './mobLookup'
 import { HoverCardLayer } from './hoverCardLayer'
-import { OverlayContent } from './overlayScale'
+import { FOOTER_ROW, OverlayContent } from './overlayScale'
 import { TextScaleStepper } from './TextScaleStepper'
 import { useOverlayChrome, type OverlayChrome } from './useOverlayChrome'
 import { OverlayHeader } from './OverlayHeader'
@@ -54,11 +56,11 @@ const GOLD = '#d9b25f'
 /** Per-kind accent + glyph. Colors match the app's semantics (alerts gold, loot teal, quest green,
  *  consider violet — a hue none of the other three uses, so a con row is identifiable at a glance
  *  even before you read it). The '◎' glyph reads as an eye/reticle: you looked at something. */
-const KIND_STYLE: Record<FeedEvent['kind'], { color: string; glyph: string; label: string }> = {
-  alert: { color: '#d9b25f', glyph: '!', label: 'Alert' },
-  loot: { color: '#6fb3d2', glyph: '◆', label: 'Loot' },
-  quest: { color: '#5fbf72', glyph: '✦', label: 'Quest' },
-  con: { color: '#a98bf0', glyph: '◎', label: 'Considered' }
+const KIND_STYLE: Record<FeedEvent['kind'], { color: string; glyph: string }> = {
+  alert: { color: '#d9b25f', glyph: '!' },
+  loot: { color: '#6fb3d2', glyph: '◆' },
+  quest: { color: '#5fbf72', glyph: '✦' },
+  con: { color: '#a98bf0', glyph: '◎' }
 }
 
 /**
@@ -249,10 +251,10 @@ function Row({ e, interactive }: { e: FeedEvent; interactive: boolean }): JSX.El
         lineHeight: 1.3
       }}
     >
-      <span
-        title={style.label}
-        style={{ color: style.color, flexShrink: 0, width: 10, textAlign: 'center', fontWeight: 700 }}
-      >
+      {/* The kind glyph. NO hover naming it (JOS-358): tooltips live in the title bar on these
+          windows now, and a row that has to name its own glyph on hover is a legend the feed
+          never had room for anyway. */}
+      <span style={{ color: style.color, flexShrink: 0, width: 10, textAlign: 'center', fontWeight: 700 }}>
         {style.glyph}
       </span>
       <span
@@ -287,12 +289,12 @@ function Row({ e, interactive }: { e: FeedEvent; interactive: boolean }): JSX.El
       </span>
 
       {anchor && previewMob && (
-        <HoverCardLayer anchor={anchor}>
-          <MobHoverCard mob={previewMob} con={e.con} />
+        <HoverCardLayer anchor={anchor} onDismiss={leave}>
+          <MobCard mob={previewMob} con={e.con} lookup={overlayMobLookup} />
         </HoverCardLayer>
       )}
       {anchor && !previewMob && previewItem && (
-        <HoverCardLayer anchor={anchor}>
+        <HoverCardLayer anchor={anchor} onDismiss={leave}>
           <ItemHoverCard item={previewItem} stats={reward?.stats} />
         </HoverCardLayer>
       )}
@@ -304,6 +306,11 @@ function Row({ e, interactive }: { e: FeedEvent; interactive: boolean }): JSX.El
  * Hydrate the feed, then ride deltas. A `log:character` rebuild resets the module's ring; the
  * next delta's seq restarts low, so we accept a delta whose seq went BACKWARDS by re-hydrating
  * rather than silently dropping rows forever. Same gap/dupe rule useModule enforces in the app.
+ *
+ * …AND WE NO LONGER WAIT FOR THAT DELTA TO ARRIVE (JOS-172). A backwards seq is evidence that only
+ * exists once something happens; `log:character` is main SAYING the world was rebuilt, and it now
+ * reaches this window (pipeline.ts `sendWorldRebuilt`). On a switch the previous character's rows
+ * used to sit here until the new one's log produced a live event of a kind this feed admits.
  */
 function useEventFeed(): FeedSnap {
   const [rows, setRows] = useState<FeedSnap>([])
@@ -333,9 +340,13 @@ function useEventFeed(): FeedSnap {
         return next.length > 100 ? next.slice(next.length - 100) : next
       })
     })
+    const offChar = window.eqOverlay.onCharacter(() => {
+      hydrate()
+    })
     return () => {
       alive = false
       off()
+      offChar()
     }
   }, [])
 
@@ -359,20 +370,15 @@ function FeedFooter({
   return (
     <div
       style={{
+        ...FOOTER_ROW,
         ...noDrag,
-        display: 'flex',
-        alignItems: 'center',
         gap: 8,
-        padding: '3px 8px 5px',
-        borderTop: '1px solid rgba(255,255,255,0.08)',
         fontSize: 10,
-        color: 'rgba(255,255,255,0.6)',
-        flexShrink: 0
+        color: 'rgba(255,255,255,0.6)'
       }}
     >
-      <span title="Background opacity" style={{ flexShrink: 0 }}>
-        bg
-      </span>
+      {/* The word IS the label (JOS-358) — the footer names its own controls, it does not hover. */}
+      <span style={{ flexShrink: 0 }}>bg</span>
       <input
         type="range"
         min={0.1}

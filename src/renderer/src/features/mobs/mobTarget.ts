@@ -36,6 +36,19 @@ export interface MobTarget {
   seed?: MobKnowledge
   /** the consider facts, when this was opened from a considered mob */
   con?: MobConsiderContext
-  /** what the kills module knows about this mob, when the caller has it */
+  /**
+   * An OVERRIDE of the kill record the page would join for itself, for a caller that resolved a
+   * DIFFERENT identity than the page's own name would (JOS-350).
+   *
+   * It is not the normal way to get a count and no ordinary surface should set it: MobPage joins
+   * `mob` against the kills module through `shared/kills.killsFor`, so a page opened from the
+   * Overview's last-target card reports the same total as the same mob opened from a search row.
+   * Leaving this to the caller is what made those two disagree — three surfaces attached nothing
+   * at all and the page read `Kills 0`.
+   *
+   * The ONE legitimate setter is the raid roster: it matches its targets ARTICLE-INSENSITIVELY
+   * against the log's `match` names (bossStatus.ts), which is a wider rule than `mobKey`, so it
+   * pins the record it matched — the same way `entry` pins the identity half of the page.
+   */
   kill?: Pick<KillInfo, 'count' | 'bestTier' | 'firstTs' | 'lastTs'>
 }

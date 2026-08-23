@@ -23,6 +23,7 @@ import type {
   SoundPack,
   SpellCastRecency
 } from '@shared/types'
+import type { SoundPackPrefs } from '@shared/soundPacks'
 import { useModule } from '../../lib/useModule'
 import { onAlertStoreChange, refreshAlertStore } from './player'
 import { invalidateSoundCaches } from './soundCache'
@@ -60,6 +61,15 @@ export interface AlertsStore {
   alerts: AlertDef[]
   prefs: AlertPrefs
   sortedPacks: SoundPack[]
+  /**
+   * THE USER'S DEFAULT SOUND PACK (JOS-273), or undefined when they have expressed no preference
+   * and the shipped pack is therefore what everything means. It is the id whether or not that pack
+   * is installed — "the pack I chose is gone" is a thing the surfaces have to be able to SAY, and
+   * healing it here would delete the user's statement.
+   */
+  defaultPackId: string | undefined
+  /** "Make this pack my default" — or null for "use whatever the app ships". */
+  setDefaultPack: (packId: string | null) => Promise<void>
   history: Record<string, AlertFireRecord[]>
   /**
    * Rank-preserving cast recency from the alerts module ("Mesmerization III" → ts). Drives
@@ -89,6 +99,7 @@ export function useAlertsStore(): AlertsStore {
   const [alerts, setAlerts] = useState<AlertDef[]>([])
   const [prefs, setPrefs] = useState<AlertPrefs>({ globalVolume: 0.7, muted: false })
   const [packs, setPacks] = useState<SoundPack[]>([])
+  const [packPrefs, setPackPrefs] = useState<SoundPackPrefs>({})
 
   // Live recent-fires history from the alerts module (single source of truth).
   const snap = useModule<AlertsSnap, AlertsDelta>('alerts', applyAlertsDelta)
@@ -97,14 +108,16 @@ export function useAlertsStore(): AlertsStore {
   const poisonSlowSeen = snap?.poisonSlowSeen ?? null
 
   const reload = useCallback(async () => {
-    const [a, p, ps] = await Promise.all([
+    const [a, p, ps, sp] = await Promise.all([
       window.eq.listAlerts(),
       window.eq.getAlertPrefs(),
-      window.eq.listSoundPacks()
+      window.eq.listSoundPacks(),
+      window.eq.getSoundPackPrefs()
     ])
     setAlerts(a)
     setPrefs(p)
     setPacks(ps)
+    setPackPrefs(sp)
   }, [])
 
   useEffect(() => {
@@ -128,9 +141,22 @@ export function useAlertsStore(): AlertsStore {
   // player's shared store (it caches nothing pack-related, but keeps everything in
   // sync on the same tick).
   const refreshPacks = useCallback(async () => {
-    const ps = await window.eq.listSoundPacks()
+    // The default-pack preference is re-read WITH the pack list, because an install/uninstall can
+    // change it: uninstalling a shipped pack tombstones it, and installing one clears that stone
+    // (main/ipc/sounds.ts). Two round trips that always happen together are one refresh.
+    const [ps, sp] = await Promise.all([window.eq.listSoundPacks(), window.eq.getSoundPackPrefs()])
     setPacks(ps)
+    setPackPrefs(sp)
     await refreshAlertStore()
+  }, [])
+
+  /**
+   * "Make this pack my default". The reply is the stored blob, so the UI shows what was actually
+   * persisted rather than what it asked for — the same read-back discipline every prefs write in
+   * this app follows.
+   */
+  const setDefaultPack = useCallback(async (packId: string | null) => {
+    setPackPrefs(await window.eq.setDefaultSoundPack(packId))
   }, [])
 
   const persistAlerts = useCallback(async (def: AlertDef) => {
@@ -170,6 +196,8 @@ export function useAlertsStore(): AlertsStore {
     alerts,
     prefs,
     sortedPacks,
+    defaultPackId: packPrefs.defaultPackId,
+    setDefaultPack,
     history,
     spellLastCast,
     poisonSlowSeen,

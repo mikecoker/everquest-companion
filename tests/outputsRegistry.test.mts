@@ -33,7 +33,12 @@ import {
   preferredOutputFile,
   OUTPUT_KINDS
 } from '../src/shared/outputs/kinds'
-import { outputAgeLabel, outputUpdatedMillis } from '../src/renderer/src/lib/outputFreshness'
+import {
+  outputAgeLabel,
+  outputIsStale,
+  outputLoadedLabel,
+  outputUpdatedMillis
+} from '../src/renderer/src/lib/outputFreshness'
 
 const INVENTORY = outputKind('inventory')
 
@@ -142,6 +147,39 @@ test('the bare <name>-Kind.txt form is the fallback, and the newest file the las
 })
 
 // ---------------------------------------------------------------------------
+// THE CAPTURE STEPS (JOS-185)
+// ---------------------------------------------------------------------------
+
+test('the inventory kind teaches how to capture the CONDITIONAL storages, not just the command', () => {
+  const steps = INVENTORY.steps
+  const all = steps.join('\n')
+  // The three storages `/outputfile inventory` exports only under a condition the file never
+  // states, plus the one it never exports at all. Each is a game fact with a source in the
+  // registry's own header; a step deleted here is a player's items going quietly missing.
+  assert.match(all, /Bank/)
+  assert.match(all, /Hoard/)
+  assert.match(all, /Depot/)
+  assert.match(all, /Wind Runes/)
+
+  // ORDER IS THE CONTENT: opening the hoard AFTER typing the command captures nothing, so every
+  // window step must precede the step that types it.
+  const typeAt = steps.findIndex((s) => s.includes(INVENTORY.command))
+  assert.ok(typeAt > 0, 'the command is a step, and it is not the first one')
+  for (const s of [/Bank/, /Hoard/, /Depot/]) {
+    assert.ok(
+      steps.slice(0, typeAt).some((step) => s.test(step)),
+      `the ${String(s)} step must come before the command is typed`
+    )
+  }
+
+  // A kind with no verified sample teaches nothing it has not measured — the no-guessing law
+  // reaches the instructions too, not just the parser.
+  for (const kind of OUTPUT_KINDS.filter((k) => k.status === 'awaiting-sample')) {
+    assert.deepEqual(kind.steps, [], `${kind.id} must not invent capture steps`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // THE STATUS SHAPE (what crosses IPC)
 // ---------------------------------------------------------------------------
 
@@ -157,10 +195,14 @@ test('a status is the def’s facts plus the file’s own mtime — nothing inve
     command: '/outputfile inventory',
     why: INVENTORY.why,
     fileKind: 'Inventory',
+    // The capture steps ride the same status (JOS-185), for the same reason the command does: a
+    // surface must never invent them, and there is exactly one place that states them.
+    steps: INVENTORY.steps,
     supported: true,
     path,
     updatedAt: dumpedAt
   })
+  assert.ok(INVENTORY.steps.length > 0, 'the one graduated kind carries real capture steps')
 
   // THE NEVER-RUN STATE: both halves null together, structurally — there is no argument shape
   // that names a file it cannot date, or dates one it cannot name.
@@ -206,4 +248,50 @@ test('the freshness line reads never-run, fresh and stale out of one slot', () =
   // …and a clock that is behind the file (mid-session DST, a network drive) never reads as a
   // future age: `formatAge` floors at zero, so it says "just now".
   assert.equal(outputAgeLabel(outputUpdatedMillis('2026-08-05T18:05:00.000Z'), now), 'updated just now')
+})
+
+// ---------------------------------------------------------------------------
+// THE SECOND SLOT: WHEN WE READ IT (JOS-253)
+// ---------------------------------------------------------------------------
+//
+// The slot above is the FILE's age. This one is ours, and the pair is the ticket: a dump written
+// while the app was closed is "updated just now" and, before JOS-253, was never read at all — two
+// facts that a single timestamp cannot hold and that no surface could previously tell apart.
+
+test('the load slot says when WE read the dump, including that we never have', () => {
+  const now = Date.parse('2026-08-05T18:00:00.000Z')
+
+  // NEVER LOADED — a distinct sentence from the age slot's "not yet run", and both can be on
+  // screen at once (the player wrote a dump; we have not opened it).
+  assert.equal(outputLoadedLabel(undefined, now), 'not loaded yet')
+
+  // LOADED — the same coarse `formatAge` idiom as its neighbour, so the two read as one pair.
+  assert.equal(outputLoadedLabel(Date.parse('2026-08-05T17:59:40.000Z'), now), 'loaded just now')
+  assert.equal(outputLoadedLabel(Date.parse('2026-08-05T17:38:00.000Z'), now), 'loaded 22m ago')
+  assert.equal(outputLoadedLabel(Date.parse('2026-08-02T18:00:00.000Z'), now), 'loaded 3d ago')
+})
+
+test('stale is the GAP between the two instants, and an unknown is never a warning', () => {
+  const wrote = Date.parse('2026-08-05T18:00:00.000Z')
+
+  // THE REPORTED CASE: the game rewrote the dump and our copy is from before that. This is the
+  // one judgement this file makes, and it rests on two instants we hold rather than on a
+  // staleness threshold nobody measured.
+  assert.equal(outputIsStale(wrote, wrote - 60_000), true)
+  assert.equal(outputIsStale(wrote, wrote - 5 * 24 * 3600_000), true)
+
+  // A HEALTHY LOAD is not stale, in either order. The mtime is stamped as the game finishes
+  // writing and `readAt` a settle-threshold later, so the two land within a second of each other
+  // and their ordering at that scale means nothing — one second of slack, and no more.
+  assert.equal(outputIsStale(wrote, wrote), false)
+  assert.equal(outputIsStale(wrote, wrote + 400), false)
+  assert.equal(outputIsStale(wrote, wrote - 1000), false, 'exactly one second is still healthy')
+  assert.equal(outputIsStale(wrote, wrote - 1001), true, '…and the millisecond past it is not')
+
+  // NEITHER HALF UNKNOWN IS A WARNING. A dump that does not exist, and a surface that has never
+  // loaded one, are both states the words already say — colouring them would be the app claiming
+  // a comparison it cannot make.
+  assert.equal(outputIsStale(undefined, wrote), false)
+  assert.equal(outputIsStale(wrote, undefined), false)
+  assert.equal(outputIsStale(undefined, undefined), false)
 })

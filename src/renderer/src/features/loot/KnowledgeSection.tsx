@@ -33,7 +33,7 @@ function KnowledgeHeader({ offline }: { offline?: boolean }): JSX.Element {
       <Typography variant="subtitle2">What it&apos;s for</Typography>
       {offline && (
         <Typography variant="caption" color="text.disabled">
-          (offline — showing what&apos;s known locally)
+          (offline - showing what&apos;s known locally)
         </Typography>
       )}
     </Stack>
@@ -177,7 +177,17 @@ export function KnowledgeSection({
   // opens the card on its own even for an item nothing flags.
   const recipes = data.recipes ?? []
   const crafted = craftedByLabel(data)
-  if (!hasKnowledge(data, recipes, crafted)) return null
+  // THE LINK IS NOT PART OF THE ANSWER, IT IS PART OF THE PAGE (JOS-333). `hasKnowledge` decides
+  // whether OUR sources add anything worth a card — and it used to gate the eqlwiki link too, which
+  // meant every item that is only ever an item lost the one affordance for going and reading about
+  // it. The owner reported it as Shield of Hatred showing no wiki link at all; the corpus never lost
+  // that row's page (`page: "Shield of Hatred"`, and `eqlmetadata` confirms the page is live and in
+  // era), the card it lived inside simply never mounted. So the attribution line stands alone when
+  // there is nothing else: one quiet caption, no header and no icon, which is not the "noise on
+  // vendor trash" the gate exists to prevent.
+  if (!hasKnowledge(data, recipes, crafted)) {
+    return <SourceNote wikiUrl={wikiPageUrl(data.page)} questUses={data.questUses} />
+  }
 
   return (
     <Box sx={{ mb: 2 }}>

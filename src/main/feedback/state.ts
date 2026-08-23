@@ -23,7 +23,14 @@ import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { UUID_V4_RE, type FeedbackDraft, type FeedbackEnv, type LogSliceMeta } from '../../shared/feedback'
+import {
+  UUID_V4_RE,
+  type FeedbackDraft,
+  type FeedbackEnv,
+  type AchievementsDumpMeta,
+  type InventoryDumpMeta,
+  type LogSliceMeta
+} from '../../shared/feedback'
 import { logError, logInfo } from '../errorLog'
 
 /** Bumped only if this file's shape changes. Unreadable/older ⇒ regenerate, never migrate. */
@@ -37,7 +44,13 @@ export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 /** Exponential backoff base: 5 min, 10, 20, 40, 80. */
 export const BACKOFF_BASE_MS = 5 * 60 * 1000
 
-/** One unsent report. `gzFile` is a NAME under the pending dir, never a path from elsewhere. */
+/** One unsent report. `gzFile` is a NAME under the pending dir, never a path from elsewhere.
+ *
+ *  `inventory` / `inventoryGzFile` are the SECOND attachment (JOS-296) and are OPTIONAL on the
+ *  entry rather than required: an entry spooled by a build that predates them is still a valid
+ *  entry, and `parseState` below keeps it (its whole shape check is the two UUIDs, deliberately
+ *  — this file's law is "corrupt ⇒ regenerate", never migrate). A missing field reads as
+ *  "attached no dump", which is what it meant. */
 export interface QueuedReport {
   clientReportId: string
   draft: FeedbackDraft
@@ -45,6 +58,11 @@ export interface QueuedReport {
   clientTs: number
   log: LogSliceMeta | null
   gzFile?: string
+  inventory?: InventoryDumpMeta | null
+  inventoryGzFile?: string
+  /** The THIRD attachment (JOS-441), optional on exactly the same terms. */
+  achievements?: AchievementsDumpMeta | null
+  achievementsGzFile?: string
   attempts: number
   nextAttemptAt: number
   queuedAt: number
@@ -103,7 +121,7 @@ export function readState(): FeedbackState {
         cached = parsed
         return cached
       }
-      logInfo(`[everquest-companion] feedback.json unreadable/foreign — starting fresh`)
+      logInfo(`[everquest-companion] feedback.json unreadable/foreign - starting fresh`)
     } catch (err) {
       logError('main:feedbackState', { message: 'feedback.json parse failed; starting fresh', err })
     }
@@ -149,40 +167,74 @@ export function queuedCount(): number {
   return readState().queue.length
 }
 
-/** Absolute path of a queue entry's spooled gz, or null when it carries no attachment. */
-export function pendingGzPath(entry: QueuedReport): string | null {
-  if (entry.gzFile === undefined) return null
-  return join(app.getPath('userData'), PENDING_DIR, entry.gzFile)
+/** A name under the pending dir → an absolute path inside it. Never a path from elsewhere. */
+function pendingPath(file: string): string {
+  return join(app.getPath('userData'), PENDING_DIR, file)
 }
 
-/** Read a spooled gz back. Missing ⇒ null, and the report is sent without its log. */
-export function readPendingGz(entry: QueuedReport): Buffer | null {
-  const path = pendingGzPath(entry)
+/** Absolute path of a queue entry's spooled slice gz, or null when it carries no slice. */
+export function pendingGzPath(entry: QueuedReport): string | null {
+  if (entry.gzFile === undefined) return null
+  return pendingPath(entry.gzFile)
+}
+
+/** Absolute path of a queue entry's spooled DUMP gz (JOS-296), or null when it carries none. */
+export function pendingInventoryGzPath(entry: QueuedReport): string | null {
+  if (entry.inventoryGzFile === undefined) return null
+  return pendingPath(entry.inventoryGzFile)
+}
+
+/** Absolute path of a queue entry's spooled ACHIEVEMENTS gz (JOS-441), or null when none. */
+export function pendingAchievementsGzPath(entry: QueuedReport): string | null {
+  if (entry.achievementsGzFile === undefined) return null
+  return pendingPath(entry.achievementsGzFile)
+}
+
+function readSpooled(path: string | null, what: string): Buffer | null {
   if (path === null || !existsSync(path)) return null
   try {
     return readFileSync(path)
   } catch (err) {
-    logError('main:feedbackState', { message: 'pending gz unreadable', err })
+    logError('main:feedbackState', { message: `pending ${what} unreadable`, err })
     return null
   }
+}
+
+/** Read a spooled gz back. Missing ⇒ null, and the report is sent without its log. */
+export function readPendingGz(entry: QueuedReport): Buffer | null {
+  return readSpooled(pendingGzPath(entry), 'gz')
+}
+
+/** The dump's spooled gz. Missing ⇒ null, and the report is sent without its inventory. */
+export function readPendingInventoryGz(entry: QueuedReport): Buffer | null {
+  return readSpooled(pendingInventoryGzPath(entry), 'inventory gz')
+}
+
+/** The achievements dump's spooled gz. Missing ⇒ null, and the report goes without it. */
+export function readPendingAchievementsGz(entry: QueuedReport): Buffer | null {
+  return readSpooled(pendingAchievementsGzPath(entry), 'achievements gz')
 }
 
 /**
  * Queue a report for a later attempt. Returns false when the queue is full — the caller tells
  * the user, rather than silently dropping either this report or an older one.
  *
- * The gz spools to its own file keyed by `clientReportId`, which is also the server's
- * idempotency key: a retry that races a successful first attempt gets the original reportId
- * back, never a duplicate row.
+ * Each attachment spools to its OWN file, both keyed by `clientReportId` (which is also the
+ * server's idempotency key: a retry that races a successful first attempt gets the original
+ * reportId back, never a duplicate row). Two files rather than one archive because the two legs
+ * are independent everywhere else too — a dump that fails to spool must not cost the slice.
  */
-export function enqueue(entry: QueuedReport, gz: Buffer | null): boolean {
+export function enqueue(
+  entry: QueuedReport,
+  gz: { log: Buffer | null; inventory: Buffer | null; achievements?: Buffer | null }
+): boolean {
   const state = readState()
   if (state.queue.length >= MAX_QUEUE) return false
   const next = { ...entry }
-  if (gz !== null) {
+  if (gz.log !== null) {
     try {
       const file = `${entry.clientReportId}.gz`
-      writeFileSync(join(pendingDir(), file), gz)
+      writeFileSync(join(pendingDir(), file), gz.log)
       next.gzFile = file
     } catch (err) {
       // A report without its log beats a lost report.
@@ -190,17 +242,48 @@ export function enqueue(entry: QueuedReport, gz: Buffer | null): boolean {
       next.log = null
     }
   }
+  if (gz.inventory !== null) {
+    try {
+      const file = `${entry.clientReportId}.inventory.gz`
+      writeFileSync(join(pendingDir(), file), gz.inventory)
+      next.inventoryGzFile = file
+    } catch (err) {
+      logError('main:feedbackState', {
+        message: 'pending inventory gz write failed; queuing without it',
+        err
+      })
+      next.inventory = null
+    }
+  }
+  if (gz.achievements !== null && gz.achievements !== undefined) {
+    try {
+      const file = `${entry.clientReportId}.achievements.gz`
+      writeFileSync(join(pendingDir(), file), gz.achievements)
+      next.achievementsGzFile = file
+    } catch (err) {
+      logError('main:feedbackState', {
+        message: 'pending achievements gz write failed; queuing without it',
+        err
+      })
+      next.achievements = null
+    }
+  }
   writeState({ ...state, queue: [...state.queue, next] })
   return true
 }
 
-/** Remove an entry (sent, dropped, or aged out) and unlink its spooled gz. */
+/** Remove an entry (sent, dropped, or aged out) and unlink ALL of its spooled attachments. */
 export function removeQueued(clientReportId: string): void {
   const state = readState()
   const entry = state.queue.find((e) => e.clientReportId === clientReportId)
   if (entry) {
-    const path = pendingGzPath(entry)
-    if (path !== null) rmSync(path, { force: true })
+    for (const path of [
+      pendingGzPath(entry),
+      pendingInventoryGzPath(entry),
+      pendingAchievementsGzPath(entry)
+    ]) {
+      if (path !== null) rmSync(path, { force: true })
+    }
   }
   writeState({ ...state, queue: state.queue.filter((e) => e.clientReportId !== clientReportId) })
 }

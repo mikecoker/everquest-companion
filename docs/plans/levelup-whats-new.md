@@ -83,6 +83,11 @@ Everything in §2 landed. Five things the design did not say, all measured:
 - **`ToastCard` gained ONE affordance**: a payload with no reward block makes
   the CARD the click target. A level is not a reward you can hold, so T6's
   "the item card is the only affordance" needed the level-up case spelled out.
+  **JOS-334 made that affordance VISIBLE**: the card prints a compact action
+  ("See what's new at 24", `toastActionLabel` in `shared/toast.ts` so the
+  wording is a test's business) firing the card's own `onOpen` — a pointer
+  cursor is not an affordance in a window nobody hovers. It is the same link,
+  not a second one, and a focus the label cannot NAME prints nothing at all.
 - **`AppFocus` anchors are per-view optional fields** (`mob`, `quest`,
   `level`), each validated at the IPC handler and rebuilt field by field, so
   the closed union stays closed. The Sky per-quest anchor wave L flagged is

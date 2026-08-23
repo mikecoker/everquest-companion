@@ -19,6 +19,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { OverlayConfig, OverlayDrill } from '@shared/types'
 import { clampTextScale } from '@shared/types'
+import {
+  DEFAULT_OVERLAY_TEXT_SIZE,
+  effectiveOverlayTextScale,
+  type OverlayTextSizePrefs
+} from '@shared/overlayTextScale'
+import {
+  DEFAULT_OVERLAY_BG_ALPHA,
+  clampBgAlpha,
+  effectiveOverlayBgAlpha,
+  type OverlayBgAlphaPrefs
+} from '@shared/overlayBgAlpha'
+import { onOverlayPointerExit, overlayPointerExited } from './pointerExit'
 
 /**
  * WHY A LOCKED OVERLAY EVER CAPTURES THE MOUSE, and why the reason has a NAME.
@@ -41,8 +53,14 @@ import { clampTextScale } from '@shared/types'
  *   'selector' — the pointer is over the SELECTOR ROW specifically (P3). The meters use this
  *                instead of 'window', so a locked meter's BODY stays genuinely click-through.
  *   'popup'    — the selector's list is open. Outlives 'selector' by construction (above).
+ *   'scroll'   — the pointer is in the SCROLL GRIP: the narrow strip along the right edge of a
+ *                content pane that has more rows than it can show (JOS-138, overlayScale.tsx).
+ *                It is the reason a pinned overlay can be scrolled at all, and it is deliberately
+ *                the narrowest of the four: a wheel notch is only delivered to a window that is
+ *                not ignoring the mouse, so scrolling and click-through cannot both be true of the
+ *                same pixel, and this is the smallest patch of pixels that buys the scroll.
  */
-export type CaptureReason = 'window' | 'selector' | 'popup'
+export type CaptureReason = 'window' | 'selector' | 'popup' | 'scroll'
 
 export interface OverlayChrome {
   /**
@@ -61,9 +79,24 @@ export interface OverlayChrome {
   config: OverlayConfig | null
   /** click-through + no chrome; the persisted lock state */
   locked: boolean
+  /**
+   * The background alpha the body is painted with, 0.1..1 — the EFFECTIVE one (JOS-407), which is
+   * the shared preference unless the player has turned on independent transparency, and this
+   * window's own stored value if they have.
+   *
+   * Every caller is unchanged by the switch existing, which is the point of resolving it here: a
+   * surface asks "how see-through am I" and gets an answer, never a rule.
+   */
   bgAlpha: number
-  /** Text size, 0.8..2. Remembered here, APPLIED by the surface: it goes on the content pane
-   *  (overlayScale.tsx) and never on the chrome, and the stepper prints it. */
+  /**
+   * Text size, 0.8..2 — the EFFECTIVE one (JOS-405), which is the shared preference unless the
+   * player has turned on independent sizes, and this window's own stored value if they have.
+   * Remembered here, APPLIED by the surface: it goes on the content pane (overlayScale.tsx) and
+   * never on the chrome, and the stepper prints it and disables its ends against it.
+   *
+   * Every caller is unchanged by the switch existing, which is the point of resolving it here:
+   * a surface asks "how big do I draw" and gets an answer, never a rule.
+   */
   textScale: number
   /** Config IS the drill state — no local mirror to drift. */
   drill: OverlayDrill | null
@@ -89,6 +122,20 @@ export interface OverlayChrome {
 
 export function useOverlayChrome(): OverlayChrome {
   const [cfg, setCfg] = useState<OverlayConfig | null>(null)
+  /**
+   * THE TEXT-SIZE PREFERENCE, which is not this window's config and does not gate `ready`.
+   *
+   * It starts at the shipped defaults rather than null on purpose, and that is not the JOS-340
+   * defect: `ready` exists for decisions a window must not make twice (the toast asking main to
+   * capture the mouse), and a SIZE is not one of them — it is a number the pane is drawn at, and
+   * arriving a hop later re-draws the same rows a little bigger. Gating the whole window on it
+   * would mean an overlay that paints nothing at all until a second IPC round trip lands.
+   */
+  const [textSize, setTextSize] = useState<OverlayTextSizePrefs>(DEFAULT_OVERLAY_TEXT_SIZE)
+  /** …and the TRANSPARENCY preference (JOS-407), on exactly the terms above: not this window's
+   *  config, not part of `ready`, and starting at the shipped default because a shade arriving a
+   *  hop later re-paints the same rows a little fainter. */
+  const [bgPrefs, setBgPrefs] = useState<OverlayBgAlphaPrefs>(DEFAULT_OVERLAY_BG_ALPHA)
   const [hovering, setHovering] = useState(false)
   /** What is asking for the mouse right now. Capture is on exactly while this is non-empty. */
   const reasonsRef = useRef<Set<CaptureReason>>(new Set())
@@ -102,13 +149,65 @@ export function useOverlayChrome(): OverlayChrome {
     return window.eqOverlay.onConfig(setCfg)
   }, [])
 
+  // The same hydrate-then-subscribe shape one preference over (JOS-405). The push is what a PINNED
+  // window has instead of a stepper: locked means no chrome, so every change it obeys was made in
+  // Preferences or on another window.
+  useEffect(() => {
+    void window.eqOverlay.getTextSize().then(setTextSize)
+    return window.eqOverlay.onTextSize(setTextSize)
+  }, [])
+
+  // The same hydrate-then-subscribe for the transparency preference (JOS-407).
+  useEffect(() => {
+    void window.eqOverlay.getBgAlpha().then(setBgPrefs)
+    return window.eqOverlay.onBgAlpha(setBgPrefs)
+  }, [])
+
   const locked = cfg?.locked ?? false
-  const bgAlpha = cfg?.bgAlpha ?? 0.72
   const drill = cfg?.drill ?? null
-  const textScale = clampTextScale(cfg?.textScale)
+  // ONE FUNCTION DECIDES EACH OF THESE, and it is not this file (shared/overlayTextScale.ts,
+  // shared/overlayBgAlpha.ts).
+  const textScale = effectiveOverlayTextScale(textSize, cfg?.textScale)
+  const bgAlpha = effectiveOverlayBgAlpha(bgPrefs, cfg?.bgAlpha)
+
+  /**
+   * THE LOCK CHANGING IS A RESET, HOWEVER IT CHANGED.
+   *
+   * `toggleLock` (the pin button) already forgets every reason, because main re-applies
+   * click-through from scratch (`applyOverlayLocked`) without asking this side anything. But the
+   * pin is not the only door: Preferences flips a lock, the celebration toast's does, and every
+   * flip comes back as a config ECHO — and a reason held at that moment used to survive it. Then
+   * `capturedRef` disagrees with the window, and the next genuine hover sends NOTHING because it
+   * believes it is already captured: a pinned overlay that has quietly stopped listening.
+   * MEASURED in the e2e (JOS-138): a locked meter arrived at the scroll step already showing its
+   * hover chrome, from a `capture('selector', true)` two steps earlier that no unlock ever cleared.
+   */
+  useEffect(() => {
+    reasonsRef.current.clear()
+    capturedRef.current = !locked
+    setHovering(false)
+  }, [locked])
 
   const patch = (p: Partial<OverlayConfig>): void => {
     setCfg((c) => (c ? { ...c, ...p } : c))
+    // A TEXT-SIZE PRESS MOVES THE PREFERENCE WHILE SYNCED, so it moves THIS FRAME (JOS-405).
+    //
+    // Main routes the write for real — this side does not decide where it lands — but the value
+    // the window DRAWS at is `effectiveOverlayTextScale(textSize, …)`, and while the switch is off
+    // that reads the preference and never the config line above. Without this, A+ would do nothing
+    // visible until main's broadcast came back, which is the one thing a reading-distance control
+    // must not feel like. Main's answer arrives moments later and overwrites it, as always.
+    if (p.textScale !== undefined && !textSize.independent) {
+      const shared = clampTextScale(p.textScale)
+      setTextSize((t) => (t.independent ? t : { ...t, shared }))
+    }
+    // …and a `bg` DRAG the same way (JOS-407). It matters more here than it does one field over:
+    // a slider the user is dragging must track the cursor, and a shade that only landed once main
+    // answered would lag every pixel of the drag behind the pointer.
+    if (p.bgAlpha !== undefined && !bgPrefs.independent) {
+      const shared = clampBgAlpha(p.bgAlpha)
+      setBgPrefs((b) => (b.independent ? b : { ...b, shared }))
+    }
     void window.eqOverlay.setConfig(p)
   }
 
@@ -123,7 +222,39 @@ export function useOverlayChrome(): OverlayChrome {
     capturedRef.current = want
     setHovering(want)
     window.eqOverlay.setIgnoreMouse(!want)
+    // THE THIRD LEAVE SIGNAL (JOS-358). The last named reason letting go is this window saying
+    // nothing here needs the mouse any more — and it is the moment a PINNED overlay stops being
+    // able to observe a leave for itself, because main is about to start ignoring mouse events
+    // again. A native tooltip raised over the title bar would otherwise stay up over the game.
+    if (!want) overlayPointerExited()
   }
+
+  /**
+   * THE LEAVE NOBODY IN THIS WINDOW COULD SEE (JOS-381).
+   *
+   * Main watches the cursor for the seconds a LOCKED overlay is capturing and says so when it is
+   * outside the window (src/main/pointerWatch.ts carries the report and the performance contract).
+   * That arrives here as leave signal 4, and the honest reading of it is that every named reason is
+   * wrong AT ONCE: the pointer is not over the header, the selector row, the open popup or the
+   * scroll grip, because it is not over the window. So they all go, and one `applyCapture` hands
+   * the mouse back exactly the way an ordinary `mouseleave` would.
+   *
+   * THE EARLY RETURN IS THE RE-ENTRANCY GUARD'S OTHER HALF. Releasing the last reason is itself
+   * leave signal 3 (`applyCapture` raises an exit), so this handler is called back into — with no
+   * reason held there is nothing to release and it stops there. pointerExit.ts's own `firing` flag
+   * makes the fan-out single regardless; both are cheap and neither alone is sufficient.
+   *
+   * The handler is reached through a REF so the subscription is made once per window instead of
+   * being torn down and rebuilt on every render — `useCardTick`'s arrangement, for its interval.
+   */
+  const releaseAllReasons = (): void => {
+    if (reasonsRef.current.size === 0) return
+    reasonsRef.current.clear()
+    applyCapture()
+  }
+  const releaseRef = useRef(releaseAllReasons)
+  releaseRef.current = releaseAllReasons
+  useEffect(() => onOverlayPointerExit(() => releaseRef.current()), [])
 
   const capture = (reason: CaptureReason, active: boolean): void => {
     // Interactive windows already own the mouse — a sensor firing there must not send anything,
@@ -144,6 +275,10 @@ export function useOverlayChrome(): OverlayChrome {
     reasonsRef.current.clear()
     capturedRef.current = !next
     setHovering(false)
+    // PINNING IS A LEAVE TOO (JOS-358): the press that locks the window is made ON the control
+    // whose tooltip is up, and the very next thing that happens is the window going
+    // click-through — after which nothing can un-hover it.
+    overlayPointerExited()
   }
 
   return {

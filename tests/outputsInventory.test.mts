@@ -16,6 +16,12 @@
 // refactor's proof is intact — that is all it ever claimed — and the one behavior change
 // has to be spelled out in numbers to pass.
 //
+// JOS-185 made section reading SHAPE-driven rather than name-driven, and the real dumps here are
+// exactly the evidence that it changed nothing they can see: the file still reads as `Location`
+// items plus a `KeyRing`, byte for byte. The rule those files cannot exercise — what happens when
+// the client writes a THIRD table — lives in `tests/outputsSections.test.mts`, which is synthetic
+// and says so.
+//
 // Run: `npm test`.
 
 import { test } from 'node:test'
@@ -384,7 +390,11 @@ test('the Equipment keyring is DISJOINT from the item table — counting it adds
   )
 })
 
-test('a section we do not recognize is retained verbatim and never interpreted', () => {
+// The refusal JOS-44 wrote, still standing after JOS-185 made section reading shape-driven: this
+// header has FIVE columns like the item table and still means nothing, because `Rank` and `Tier`
+// are not `Count` and `Slots` and no sample has ever said what they are. The shape rule widened
+// what "recognized" means from the section's NAME to its COLUMNS; it did not lower the bar.
+test('a section whose header shape we do not recognize is retained verbatim, never interpreted', () => {
   const dump = parseInventoryDump(
     [
       'Location\tName\tID\tCount\tSlots',
@@ -395,6 +405,7 @@ test('a section we do not recognize is retained verbatim and never interpreted',
     ].join('\n')
   )
   assert.deepEqual(dump.sections, ['Location', 'Mercenary'])
+  assert.deepEqual(dump.sectionShapes, { Location: 'items', Mercenary: 'unknown' })
   assert.equal(dump.items.length, 1)
   assert.equal(dump.unknownSections.length, 1)
   assert.deepEqual(dump.unknownSections[0], {
@@ -426,7 +437,8 @@ test('an empty file parses to an empty dump rather than throwing', () => {
     keyRing: [],
     unknownSections: [],
     malformed: [],
-    sections: []
+    sections: [],
+    sectionShapes: {}
   })
   assert.deepEqual(heldCountsFromDump(dump), {})
 })
@@ -460,9 +472,13 @@ test('looksLikeContainer separates bags from socketed items across the whole dum
 // THE REGISTRY
 // ---------------------------------------------------------------------------
 
-test('registry: inventory is the only graduated kind; every other kind refuses in a typed way', () => {
+test('registry: inventory and achievements are the graduated kinds; the rest refuse typed', () => {
+  // TWO KINDS SINCE JOS-429, and the list is asserted rather than counted so a kind cannot
+  // graduate without somebody editing this line. `achievements` earned it the same way `inventory`
+  // did: a real dump read, its format written down, a fixture committed (see
+  // tests/outputsAchievements.test.mts, which owns that kind's own claims).
   const supported = OUTPUT_KINDS.filter((k) => k.status === 'supported').map((k) => k.id)
-  assert.deepEqual(supported, ['inventory'])
+  assert.deepEqual(supported, ['inventory', 'achievements'])
 
   const res = parseOutput('inventory', REAL_DUMP)
   assert.equal(res.ok, true)

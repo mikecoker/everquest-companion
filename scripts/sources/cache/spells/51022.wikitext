@@ -33,13 +33,7 @@
 
 | where_to_obtain = 
 
-{{SpellWhereTable|
-{{SpellWhereRowB | [[Greater Faydark]] | [[Beleth Streamfoot]] | Kelethin Bard Guild | (-237,235) }}
-{{SpellWhereRow  | [[Freeport|North Freeport]] | [[Inisis Trimpet]] | Bard Guild | (-119,576) }}
-{{SpellWhereRowB | [[Freeport|North Freeport]] | [[Lysric Loresinger]] | Bard Guild | (-141,578) }}
-{{SpellWhereRow  | [[Qeynos|South Qeynos]] | [[Chalea Volesga]] | Bard Guild | (515,-132) }}
-{{SpellWhereRowB | [[Qeynos|South Qeynos]] | [[Lysric Loresinger]] | Bard Guild | (553,-157) }}
-}}
-| TableLocations = Qeynos<br/>Freeport<br/>Kelethin
-| TableEra = Classic
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 }}

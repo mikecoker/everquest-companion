@@ -21,26 +21,22 @@
 //   * Absent version ⇒ 1. That covers every store ever written before this framework, so
 //     the chain starts from a single, well-defined floor.
 //   * PURE runner over plain objects (`migrateStoreData`), file I/O separated
-//     (`migrateStoreFile`) — the src/shared/update.ts precedent. Tests need no Electron.
+//     (`migrateStoreFile`, now in ./storeFile.ts) — the src/shared/update.ts precedent. Tests
+//     need no Electron.
 //
 // THE CONTRACT (this is what makes "indefinitely" real, and it lives in AGENTS.md too):
 // any commit that changes a persisted shape ships a migration in the SAME commit. Never
 // mutate what an old key means without a step that rewrites it.
 //
-// FAILURE POLICY. Startup never dies here. Every path is best-effort and logs:
-//   * unreadable file  → leave it alone, no stamp (electron-store will raise its own error)
-//   * unparseable file → QUARANTINE it to `<name>.corrupt.json` and start fresh. conf's
-//     `clearInvalidConfig` defaults to false, so a truncated write (power loss mid-save)
-//     otherwise throws on EVERY read forever — an app bricked by one bad byte.
-//   * a step throws    → keep everything the earlier steps produced, stamp the last version
-//     that fully succeeded, log, and retry the failing step on the next launch.
-//   * newer than we know → see the downgrade note on `migrateStoreData`.
-// Before the FIRST write of a run the original file is copied byte-for-byte to
-// `<name>.v<from>.backup.json` (written once per source version — a later run never
-// overwrites the pristine copy). At most one small file per schema version the machine has
-// ever held: cheap insurance for a promise that has to hold forever.
+// FAILURE POLICY, AND WHERE IT LIVES. Startup never dies over the store. The pure chain below
+// answers for the DATA (a step that throws keeps what the earlier steps produced, stamps the last
+// version that fully succeeded, and retries next launch; a store from a newer build is never
+// rewritten — see the downgrade note on `migrateStoreData`). Everything about the FILE — reading
+// it, quarantining an unparseable one, SALVAGING it before accepting defaults, the pristine
+// per-version backup, and the atomic write-back — moved to `./storeFile.ts` in JOS-272, which was
+// the only way to add a recovery path to a module already sitting at the 400-code-line ceiling.
+// That file's header carries the whole of the failure policy it owns.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
 // The ONE dependency this module takes, and a deliberate exception to the note below about
 // LAUNCH_MS: shared/speechText.ts is a pure content module (it imports one rank helper and
 // nothing else — no Electron, no parser, no LogEvent union), and duplicating the speech mode
@@ -69,6 +65,14 @@ import { normalizePerfHudPrefs } from '../shared/perf'
 // ZERO-IMPORT graphics-compatibility contract, and its normalizer is the one answer to "what is a
 // valid graphics pref block" that the store, the IPC handler and this migration all share.
 import { normalizeGraphicsPrefs } from '../shared/graphicsPrefs'
+// The SIXTH, and identical in kind to the third, fourth and fifth: shared/processPriority.ts is a
+// pure, ZERO-IMPORT contract, and its normalizer is the one answer to "what is a valid
+// process-priority pref block" that the store, the IPC handler and this migration all share.
+import { normalizeProcessPriorityPrefs } from '../shared/processPriority'
+// The SEVENTH, and identical in kind to the third through sixth: shared/resistPrefs.ts is a pure,
+// ZERO-IMPORT contract, and its normalizer is the one answer to "what is a valid resist-evidence
+// pref block" that the store, the IPC handler and this migration all share.
+import { normalizeResistPrefs } from '../shared/resistPrefs'
 
 /** A store file, parsed. Deliberately untyped: a migration's INPUT is a shape the current
  *  code no longer describes, so `StoreShape` would be a lie at every step but the last. */
@@ -81,7 +85,7 @@ export const SCHEMA_VERSION_KEY = 'schemaVersion'
  * The schema the code running right now expects. Bump by exactly one whenever a persisted
  * shape changes, and add the matching MIGRATIONS entry in the same commit.
  */
-export const CURRENT_SCHEMA_VERSION = 10
+export const CURRENT_SCHEMA_VERSION = 14
 
 export interface Migration {
   /** Version this step produces. Steps run in ascending `to` order, contiguously. */
@@ -92,7 +96,9 @@ export interface Migration {
   migrate(data: StoreData): StoreData
 }
 
-const isPlainObject = (v: unknown): v is StoreData =>
+/** Exported for `./storeFile.ts`, the file half split out of here (JOS-272): "is this parsed value
+ *  a store at all" has to have one answer on both sides of that cut. */
+export const isPlainObject = (v: unknown): v is StoreData =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** Progress worth keeping: anything the user actually accumulated. */
@@ -492,11 +498,148 @@ const migrateToV9: Migration = {
 // Same treatment as 4→5, 5→6 and 6→7: every reader defaults, so a v9 store boots fine without
 // this step — it ships so a v10 store is a PROMISE that whatever is in the key is a complete
 // block. A malformed value is replaced by the documented default, never coerced.
+//
+// IT NORMALIZES LOCALLY RATHER THAN THROUGH `normalizeGraphicsPrefs`, AND THAT IS THE APPEND-ONLY
+// LAW, NOT A DUPLICATION SLIP (JOS-31). This step used to call the shared normalizer, which was
+// correct for exactly as long as the shared normalizer produced the v10 shape. JOS-31 changed that
+// shape (booleans → 'auto' | 'on' | 'off'), so a step that kept calling it would silently start
+// emitting a v11 block while claiming to have produced a v10 one — and the 10 → 11 step below,
+// whose whole job is to read the v10 booleans and decide what they MEANT, would find strings.
+// A shipped step's output is frozen; these two lines are what freezing it costs. (`=== true` is
+// the original `typeof x === 'boolean' ? x : false` exactly — every non-`true` value, readable or
+// not, was and is `false` here.)
 const migrateToV10: Migration = {
   to: 10,
   describe: 'add the graphics prefs blob (software rendering + opaque overlays, both off)',
   migrate(data) {
-    data.graphics = normalizeGraphicsPrefs(data.graphics)
+    const v = isPlainObject(data.graphics) ? data.graphics : {}
+    data.graphics = { safeMode: v.safeMode === true, opaqueOverlays: v.opaqueOverlays === true }
+    return data
+  }
+}
+
+// ------------------------------- 10 → 11: the graphics switches gain an `auto` state (JOS-31)
+//
+// A Wine user reported the celebration overlay becoming a stuck black box after a level-up
+// (01KZGQZJ2HMZGRY28A7CVRG4QT, v0.7.0), which is the JOS-40 family arriving through Wine's
+// compositor rather than through a driver. The fix is that the app DETECTS the prefix and takes
+// the compatibility path by itself — and a two-state switch cannot express that, because it has
+// no way to say "the user refused". So each switch becomes 'auto' | 'on' | 'off'
+// (shared/graphicsPrefs.ts) and this step decides what each stored boolean MEANT.
+//
+// `false` BECOMES 'auto', AND THAT IS THE ONE JUDGEMENT IN THIS FILE WORTH ARGUING ABOUT. It is
+// the same argument the 8 → 9 step made about the toast: `graphics` was WRITTEN ON EVERY LAUNCH
+// that ran the 9 → 10 step, not when somebody reached for a switch, so a stored `false` is
+// overwhelmingly yesterday's default written down rather than a person declining anything. Reading
+// all of them as an explicit refusal would mean every Wine install that ever ran a v10 build is
+// permanently excluded from the fix this ticket exists to deliver — a fix they cannot discover,
+// because the symptom is that they cannot see the window that holds the switch.
+//
+// `true` STAYS 'on'. Nothing but a deliberate act ever wrote it, and detection must never be able
+// to take a switch away from somebody who asked for it. That asymmetry is the whole step: the
+// value that could only be a choice is preserved as a choice, and the value that was equally a
+// choice and a default is handed to the thing that can tell them apart at runtime.
+//
+// WHAT THIS WILL NEVER DO AGAIN, in the 8 → 9 step's words: it is a one-time reinterpretation of a
+// shape, pinned to this one version step. A user who turns a switch off tomorrow writes 'off' into
+// a v11 store, and no future step gets to decide that they did not mean it.
+const migrateToV11: Migration = {
+  to: 11,
+  describe: "graphics switches become 'auto'|'on'|'off' (a stored false was the default, so: auto)",
+  migrate(data) {
+    const v = isPlainObject(data.graphics) ? data.graphics : {}
+    data.graphics = normalizeGraphicsPrefs({
+      safeMode: v.safeMode === true ? 'on' : 'auto',
+      opaqueOverlays: v.opaqueOverlays === true ? 'on' : 'auto'
+    })
+    return data
+  }
+}
+
+// ------------------------------- 11 → 12: the companion yields the CPU to the game (JOS-366)
+//
+// ONE new top-level blob, holding one boolean:
+//
+//   `processPriority` {yieldToGame:true}
+//
+// ON IS THE POLICY, and it is the opposite call from the two blobs above it — which is worth
+// stating plainly, because "a new switch ships off" is otherwise the house rule. `perfHud` and
+// `graphics` are INSTRUMENTS and WORKAROUNDS: a HUD is something you reach for, a software
+// renderer is a fix for a driver most machines do not have, and shipping either one on would be
+// charging everybody for a minority's need. This is neither. Below-normal priority is a statement
+// about what this app IS relative to the game it sits beside — it is never the foreground
+// experience, and nothing it does is latency-critical — so the honest default is the one the
+// player would pick if they knew the question existed. The people it helps most are precisely the
+// ones who will never open Preferences → Performance.
+//
+// EXISTING INSTALLS GET `true` TOO, deliberately: an absent key normalizes to the default, so
+// this step writes `true` into every store that predates the feature. That is not overruling
+// anybody — nobody has ever expressed a preference here, because there was no control to express
+// it with. The moment there is one, a stored `false` is a decision, and no future step gets to
+// reinterpret it (the 8 → 9 step's promise, kept).
+const migrateToV12: Migration = {
+  to: 12,
+  describe: 'add the processPriority prefs blob (yield CPU to the game, on by default)',
+  migrate(data) {
+    data.processPriority = normalizeProcessPriorityPrefs(data.processPriority)
+    return data
+  }
+}
+
+// ------------------------------- 12 → 13: the exclusive-fullscreen note's memory (JOS-375)
+//
+// ONE key deleted: `eqExclusiveNoticeDismissedVersion`, the app version at which an install
+// dismissed the JOS-368 Preferences note about EverQuest running in exclusive fullscreen.
+//
+// THE NOTE WAS WRONG, NOT MERELY UNWANTED. It told a player their game was in an EXCLUSIVE
+// display mode — the one an always-on-top overlay cannot share — on the strength of
+// `Fullscreen=1` in `eqclient.ini`. On the current client that setting is a BORDERLESS
+// fullscreen WINDOW, which shares the screen with an overlay perfectly well, so the sentence
+// could never be true for anybody it was shown to. It was removed rather than reworded, and its
+// memory has nothing left to remember.
+//
+// A STEP RATHER THAN A TOLERATED ORPHAN, which is this file's standing answer for a key whose
+// reader is gone (1 → 2's `liveLoot`, verbatim): a dead key left in the file is a thing a future
+// reader has to look up before they can rule it out, and the whole point of a versioned chain is
+// that the file on disk matches the shape the code believes in. `delete` on a key that is not
+// there is a no-op, so this is a no-op for every install that never dismissed the note — which,
+// since JOS-368 shipped in no release at all, is every install outside the dev cohort.
+const migrateToV13: Migration = {
+  to: 13,
+  describe: "drop eqExclusiveNoticeDismissedVersion (the note it remembered is gone)",
+  migrate(data) {
+    delete data.eqExclusiveNoticeDismissedVersion
+    return data
+  }
+}
+
+// ------------------------------- 13 → 14: which casters teach the resist profiles (JOS-385)
+//
+// ONE new top-level blob, holding one boolean:
+//
+//   `resists` {includeNpcCasters:true}
+//
+// ON IS THE POLICY, and it was MEASURED rather than assumed — which is the whole reason this
+// switch exists at all. JOS-382 refused NPC-on-NPC evidence outright; the owner's worry when he
+// reopened it was specific and testable (a player's fire spells get resisted where a charmed pet's
+// do not, because pets are tuned differently, so folding pet casts in would quietly drag a mob's
+// fire number down). The `--compare` mode of scripts/gen-resist-baseline.ts put both populations
+// through the same estimator on the owner's log, and the skew the worry describes is not there.
+// So the family ships on, and the switch stays because the answer is the kind that can change.
+//
+// EXISTING INSTALLS GET `true` TOO, deliberately, and for the 11 → 12 step's reason verbatim: an
+// absent key normalizes to the default anyway, nobody has ever expressed a preference here because
+// there was no control to express it with, and after this step a stored `false` is a decision that
+// no future step gets to reinterpret.
+//
+// NOTHING ABOUT THE LEDGER MOVES. The switch is read when a card is DRAWN, never when a log is
+// folded (shared/resistPrefs.ts says why at length), so this step changes what a number weighs and
+// not one byte of what was observed. There is no data to rewrite and nothing to invalidate.
+const migrateToV14: Migration = {
+  to: 14,
+  describe: 'add the resists prefs blob (NPC and pet casters count as evidence, on by default)',
+  migrate(data) {
+    data.resists = normalizeResistPrefs(data.resists)
     return data
   }
 }
@@ -515,7 +658,11 @@ export const MIGRATIONS: readonly Migration[] = [
   migrateToV7,
   migrateToV8,
   migrateToV9,
-  migrateToV10
+  migrateToV10,
+  migrateToV11,
+  migrateToV12,
+  migrateToV13,
+  migrateToV14
 ]
 
 /** Version recorded in `data`; anything absent, non-integer or < 1 means "pre-framework" ⇒ 1. */
@@ -614,172 +761,3 @@ export function migrateStoreData(input: StoreData, opts: MigrateOptions = {}): M
   return { status: 'migrated', from, to: at, applied, data, changed: true }
 }
 
-// --------------------------------------------------------------------- file half
-
-export interface MigrationHooks {
-  info?: (message: string) => void
-  error?: (message: string) => void
-}
-
-export interface StoreFileMigration extends MigrationOutcome {
-  path: string
-  /** Where the pristine pre-migration copy went (absent ⇒ nothing needed backing up). */
-  backupPath?: string
-  /** Whether the migrated data was written back. */
-  wrote: boolean
-  /** No store file yet — a fresh install. Nothing to migrate; the store starts CURRENT. */
-  fileMissing: boolean
-  /** The file was unparseable and was moved aside; the store starts CURRENT and empty. */
-  quarantinedPath?: string
-  /** The file exists but could not be read. Nothing was touched and nothing may be stamped. */
-  readError?: string
-}
-
-/** `…/x.json` → `…/x.v3.backup.json` — one per source version, self-describing, bounded. */
-export function backupPathFor(storePath: string, fromVersion: number): string {
-  const stem = storePath.replace(/\.json$/i, '')
-  return `${stem}.v${fromVersion}.backup.json`
-}
-
-/** `…/x.json` → `…/x.corrupt.json`. */
-export function quarantinePathFor(storePath: string): string {
-  const stem = storePath.replace(/\.json$/i, '')
-  return `${stem}.corrupt.json`
-}
-
-/** A store that needs nothing: a fresh install, or one we just quarantined. */
-const startsCurrent = (): MigrationOutcome => ({
-  status: 'up-to-date',
-  from: CURRENT_SCHEMA_VERSION,
-  to: CURRENT_SCHEMA_VERSION,
-  applied: [],
-  data: {},
-  changed: false
-})
-
-/** How every failure path below names a thrown value. One spelling, so the logged text of a
- *  read/rename/write failure is identical whichever step produced it. */
-const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
-/** Either the file's bytes, or the finished outcome the caller must return unchanged. */
-type ReadStoreStep = { raw: string; result?: undefined } | { raw?: undefined; result: StoreFileMigration }
-
-/** Read the store bytes. A missing file is a fresh install; any other read failure leaves the
- *  file untouched and unstamped (a file we could not read is a file we must not describe). */
-function readStoreBytes(storePath: string, hooks: MigrationHooks): ReadStoreStep {
-  try {
-    return { raw: readFileSync(storePath, 'utf8') }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { result: { ...startsCurrent(), path: storePath, wrote: false, fileMissing: true } }
-    }
-    const message = errText(err)
-    hooks.error?.(`store schema: cannot read ${storePath} (${message}); leaving it untouched`)
-    return { result: { ...startsCurrent(), path: storePath, wrote: false, fileMissing: false, readError: message } }
-  }
-}
-
-/** Unparseable (or not an object): conf would throw on every single read from here on. */
-function quarantineStore(storePath: string, hooks: MigrationHooks): StoreFileMigration {
-  const quarantine = quarantinePathFor(storePath)
-  try {
-    renameSync(storePath, quarantine)
-    hooks.error?.(
-      `store schema: ${storePath} is not valid JSON — moved to ${quarantine} and starting from defaults`
-    )
-    return { ...startsCurrent(), path: storePath, wrote: false, fileMissing: true, quarantinedPath: quarantine }
-  } catch (err) {
-    const message = errText(err)
-    hooks.error?.(`store schema: ${storePath} is not valid JSON and could not be moved aside (${message})`)
-    return { ...startsCurrent(), path: storePath, wrote: false, fileMissing: false, readError: message }
-  }
-}
-
-/**
- * Pristine copy of the ORIGINAL bytes, once per source version. A failure here is logged
- * but never blocks the migration: refusing to upgrade forever because a backup could not
- * be written is strictly worse than upgrading without one.
- */
-function writeBackupOnce(
-  storePath: string,
-  raw: string,
-  fromVersion: number,
-  hooks: MigrationHooks
-): string | undefined {
-  const backup = backupPathFor(storePath, fromVersion)
-  try {
-    if (!existsSync(backup)) writeFileSync(backup, raw, 'utf8')
-    return backup
-  } catch (err) {
-    hooks.error?.(`store schema: backup to ${backup} failed (${errText(err)})`)
-    return undefined
-  }
-}
-
-/** Write the migrated data back, recording the result of the attempt on `result`. */
-function writeMigrated(
-  storePath: string,
-  outcome: MigrationOutcome,
-  result: StoreFileMigration,
-  hooks: MigrationHooks
-): void {
-  try {
-    // Tab-indented to match conf's serializer, so our write and electron-store's writes
-    // produce identical formatting instead of churning the whole file.
-    writeFileSync(storePath, JSON.stringify(outcome.data, undefined, '\t'), 'utf8')
-    result.wrote = true
-    hooks.info?.(
-      `store schema: v${outcome.from} → v${outcome.to} (${outcome.applied.join(', ') || 'no steps'}); ` +
-        `backup ${result.backupPath ?? 'none'}`
-    )
-  } catch (err) {
-    const message = errText(err)
-    hooks.error?.(`store schema: v${outcome.from} → v${outcome.to} could not be written (${message}); will retry next launch`)
-    result.wrote = false
-    // Nothing persisted ⇒ nothing may be stamped, or the failed steps would be skipped forever.
-    result.to = outcome.from
-  }
-}
-
-/**
- * Read the store file, run the chain, back it up, write it back. Call ONCE at startup,
- * before electron-store is constructed. Never throws.
- */
-export function migrateStoreFile(storePath: string, hooks: MigrationHooks = {}): StoreFileMigration {
-  const read = readStoreBytes(storePath, hooks)
-  if (read.result) return read.result
-  const raw = read.raw
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (err) {
-    parsed = undefined
-    void err
-  }
-  if (!isPlainObject(parsed)) return quarantineStore(storePath, hooks)
-
-  const outcome = migrateStoreData(parsed)
-  const result: StoreFileMigration = { ...outcome, path: storePath, wrote: false, fileMissing: false }
-  if (outcome.status === 'up-to-date') return result
-
-  const backup = writeBackupOnce(storePath, raw, outcome.from, hooks)
-  if (backup !== undefined) result.backupPath = backup
-
-  if (outcome.status === 'future') {
-    hooks.error?.(
-      `store schema: ${storePath} is at v${outcome.from} but this build only knows v${CURRENT_SCHEMA_VERSION}. ` +
-        'Leaving it untouched and running best-effort — a downgrade never rewrites a newer store.'
-    )
-    return result
-  }
-
-  writeMigrated(storePath, outcome, result, hooks)
-  if (outcome.status === 'partial' && outcome.failed) {
-    hooks.error?.(
-      `store schema: migration to v${outcome.failed.to} failed (${outcome.failed.error}); ` +
-        `store left at v${result.to}, retrying next launch`
-    )
-  }
-  return result
-}

@@ -62,12 +62,16 @@
 param(
   # Minimize instead of parking on a second monitor, even if one is available.
   [switch]$Minimize,
-  # Give up on the VM half after this long (download + install + submit).
-  [int]$TimeoutSeconds = 1800,
+  # Give up on the VM half after this long (download + install + submit + the telemetry dwell).
+  # Raised 1800 -> 2100 by JOS-269: the guest's telemetry dwell grew from 150 s to 390 s when the
+  # flush cadence went 60 s -> 5 min, and a budget that was sized before that would have started
+  # cutting off otherwise healthy runs.
+  [int]$TimeoutSeconds = 2100,
   # Give up on the cloud half after this long (row appears + slice lands).
   [int]$CloudTimeoutSeconds = 600,
-  # Give up on the telemetry leg after this long. The client's flush cadence is 60 s and the
-  # guest already sat on the app for two ticks, so this is slack for the ingest + aggregate.
+  # Give up on the telemetry leg after this long. The guest has ALREADY flushed by the time this
+  # starts (it sits on the app for a full flush tick), so this is slack for the ingest + aggregate
+  # and is not a function of the client's cadence.
   [int]$TelemetryTimeoutSeconds = 300,
   # The AWS profile the triage store authenticates with. Same default as the CLI.
   [string]$AwsProfile = 'eqc',

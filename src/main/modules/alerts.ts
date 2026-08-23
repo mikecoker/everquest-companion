@@ -22,10 +22,72 @@
 //
 // Alert defs are owned by the store; the module holds a live copy that main keeps
 // in sync (setDefs) whenever the user saves/deletes an alert.
+//
+// A LITERAL `where.spell` MATCHER IS RANK-BLIND (JOS-259). A spell alert fires for ALL RANKS of
+// that spell — the owner's ruling, and the domain law behind it is that an upgraded spell never
+// downgrades. Both sides of the compare fold through `spellLineKey`, so `Elemental Maelstrom`,
+// `Elemental Maelstrom II` and `Elemental Maelstrom III` are one def's business. `/regex/` specs
+// are untouched. The argument, and its scope, are on `accepts` below.
+//
+// AND SINCE JOS-276 THE DAMAGE LANE FOLDS TOO — `where.skill` on a `damage` trigger, for the
+// dtypes whose `skill` IS a spell name ('spell' | 'dot'). The owner's law is now stated without a
+// carve-out: ranks are not used for ANYTHING in the alert system. `foldsRank` decides at compile
+// time which key can fold and `foldReaches` decides per event whether it does; the melee and
+// damage-shield dtypes are excluded there rather than by measurement. Full argument on
+// `foldReaches`.
+//
+// CAPTURE GROUPS (JOS-103). A trigger's regexes may declare NAMED groups, and what they capture
+// rides out on `FiredAlert.captures` so a spoken alert can say it ("Puma on Fail"). THIS FILE IS
+// ONE OF THE TWO ENFORCEMENT POINTS — read the threat model in shared/alertCaptures.ts before
+// touching `fieldMatches`, `capturesFrom` or `conditionMatches`. The short form of what is
+// enforced HERE, and it is control 3 of that model: a capture may only come from the text the
+// def's OWN condition just tested, on an event this alert already subscribed to — a `raw`
+// condition captures from `ev.raw`, a `where` matcher captures from that one field's value.
+// There is no path to another event, another alert, or app state, and there are no ambient
+// tokens. Every value leaves through `harvestCaptures`, which sanitizes it and caps both its
+// length and the number of groups; nothing downstream is trusted to do that for us.
+//
+// …AND SINCE JOS-353 THERE IS EXACTLY ONE TOKEN THE APP FILLS IN ITSELF: `{target}`, the entity
+// the matched event says the spell is affecting. It is not a general ambient facility and the
+// exemption is argued in full in shared/alertTargets.ts. What this file enforces is the SHAPE of
+// it: the wanted set is compiled from the def's OWN PHRASE (so a def that never says `{target}`
+// carries none, and its delta is byte-identical to before), the value is resolved from the SAME
+// event the alert just fired on, and a group the pattern declared always wins over the derived
+// one — see `withAutoCaptures`.
 
 import type { EqModule } from './types'
+import {
+  EarlyWarnings,
+  breakEventIdentity,
+  earlyWarnSubject,
+  type BreakWatcher,
+  type EarlyWarnDue
+} from './alertsEarlyWarning'
+// The pure field readers, split out of this file so it stays under its factoring ceiling — the
+// `where` matcher's two (`fieldText`, `spellCandidateNames`) and the firing payload's one
+// (`firingSpell`). Their arguments live with them in alertsFields.ts.
+import { fieldText, firingSpell, spellCandidateNames, withAutoCaptures } from './alertsFields'
 import { idKey } from '../log/parseCommon'
+import { harvestCaptures } from '../../shared/alertCaptures'
+// `{target}` — the ONE token the app fills in without a declared capture group (JOS-353). The
+// table of which field of which kind names the entity, the sentinel rendering ('self' → "you"),
+// and the security argument for the exemption all live in shared/alertTargets.ts; this file is the
+// other enforcement point and does exactly two things with it: compile the WANTED set from the
+// def's own phrase, and merge the resolved value UNDER the pattern's own captures
+// (`withAutoCaptures`, which lives beside the other pure field readers in alertsFields.ts).
+import { autoTokensWanted, type AutoTokenName } from '../../shared/alertTargets'
+import type { BuffTimerRow } from '../../shared/buffTimers'
+import {
+  breakProbes,
+  breakTriggerKinds,
+  normalizeEarlyWarnSec,
+  type BreakTriggerKind
+} from '../../shared/earlyWarning'
 import type { LogEvent } from '../../shared/logEvents'
+// The repo-wide rank fold (JOS-259). `spellLineKey` is shared/'s mirror of the parser's
+// `spellCanonKey` — tests/spellLines.test.mts pins the two equal — and it is what makes a literal
+// `where.spell` matcher rank-blind; see `accepts`.
+import { spellLineKey } from '../../shared/spellLines'
 import type {
   AlertDef,
   AlertFireRecord,
@@ -62,106 +124,214 @@ const SPELL_CAST_CAP = 400
 const COOLDOWN_KEY_CAP = 500
 
 /**
+ * A compiled matcher value: the predicate, plus the RegExp it compiled to when the spec was
+ * written in `/regex/` form, plus the rank-folded key when it is a LITERAL `spell` matcher.
+ *
+ * The regex is kept BESIDE the predicate rather than behind it because a named capture group is
+ * only readable from the RegExp itself (`exec().groups`) — see `fieldMatches`. Nothing else about
+ * matching changed: `test` is the same predicate it always was, and a literal spec has no `re` at
+ * all, so it can capture nothing.
+ */
+interface CompiledMatch {
+  test: (fieldValue: string) => boolean
+  re?: RegExp
+  /**
+   * `spellLineKey(spec)` — set ONLY for a literal matcher on a key that NAMES A SPELL (`spell`
+   * anywhere, and `skill` on a `damage` trigger — `foldsRank`), and only when the fold leaves
+   * something to compare (a spec that is nothing but a roman numeral folds to '' and is left alone
+   * rather than turned into a wildcard). Absent everywhere else, which is what keeps `caster`,
+   * `target`, `refresh` and every `/regex/` spec byte-for-byte what they were.
+   */
+  lineKey?: string
+}
+
+/**
+ * WHICH (kind, key) PAIRS NAME A SPELL — the compile-time half of the rank fold.
+ *
+ * `spell` folds on every kind that has one, which is every kind the alert surface authors
+ * (alertsFields.ts SPELL_FIELD_BY_KIND). `damage.skill` joins it in JOS-276: the typed-nuke and
+ * DoT shapes put the SPELL NAME there (log/parseCombat.ts), and the owner's law leaves no lane
+ * out. Whether that fold actually reaches a given event is a second question, asked per event by
+ * `foldReaches` — a `damage` event's `skill` is only a spell name for two of its four dtypes.
+ *
+ * Nothing else folds, and the two near-misses are provable no-ops rather than judgement calls:
+ * `poisonProc.strike` and `poisonCoat.poison` draw from shared/poisons.ts, whose 40-odd names
+ * carry no roman-numeral rank at all.
+ */
+function foldsRank(kind: string, key: string): boolean {
+  return key === 'spell' || (kind === 'damage' && key === 'skill')
+}
+
+/**
  * Compile a matcher value into a predicate. A value wrapped in slashes (`/.../`)
  * is a case-insensitive regex; anything else is a case-insensitive exact match on
  * the stringified field. Invalid regex falls back to literal equality so a bad
  * def degrades gracefully instead of throwing in the hot path.
+ *
+ * A LITERAL SPELL-NAMING MATCHER IS RANK-BLIND (JOS-259, extended by JOS-276) — see `accepts`.
+ * The trigger's kind and the `where` key are both passed in because the fold belongs to the fields
+ * that name a spell and to nothing else (`foldsRank`).
  */
-function compileFieldMatch(spec: string): (fieldValue: string) => boolean {
+function compileFieldMatch(spec: string, key: string, kind: string): CompiledMatch {
   if (spec.length >= 2 && spec.startsWith('/') && spec.endsWith('/')) {
     const body = spec.slice(1, -1)
     try {
+      // No 'g' flag, so `exec`/`test` are stateless and this compiled object is safe to reuse
+      // across every event without a `lastIndex` reset (the trap `hasWireControls` documents).
       const re = new RegExp(body, 'i')
-      return (v) => re.test(v)
+      return { test: (v) => re.test(v), re }
     } catch {
       // fall through to literal
     }
   }
   const lower = spec.toLowerCase()
-  return (v) => v.toLowerCase() === lower
+  const test = (v: string): boolean => v.toLowerCase() === lower
+  if (!foldsRank(kind, key)) return { test }
+  const lineKey = spellLineKey(spec)
+  return lineKey ? { test, lineKey } : { test }
 }
 
 /**
- * Stringify ONE event field for matching. A `where` key names an arbitrary field of an
- * arbitrary LogEvent, so the value is nearly always a string/number/boolean — but a few fields
- * hold arrays (`damage.modifiers`, the buff-landing `candidates` lists, one of which is an
- * array of OBJECTS).
+ * WHETHER A COMPILED MATCHER ACCEPTS ONE PIECE OF TEXT — exact as it always was, plus the RANK
+ * FOLD for a literal `spell` matcher.
  *
- * This reproduces JS's own `String()` coercion rather than improving on it, because the coerced
- * text is exactly what every existing alert def is matched against: an array joins its elements
- * with ',' (a nullish element contributing ''), and an object element renders as the literal
- * '[object Object]'. That last one IS what a def matching on the object-shaped `candidates` list
- * sees today — making it nicer would silently change which alerts fire. The final fallback also
- * absorbs bigint/symbol/function, which no LogEvent field holds.
+ * THE RULE (JOS-259, owner ruling 2026-08-12 — "rank-blind matching, full stop"): a spell alert
+ * fires for ALL RANKS OF THE SPELL. EQ Legends re-tiers the classic spells as roman-numeral ranks
+ * of one base name, and only SOME of the lines a spell prints carry the suffix — `castBegin` and
+ * `resist` keep it (`You begin casting Elemental Maelstrom II.` / `<mob> resisted your Elemental
+ * Maelstrom II!`), while the wear-off/fade family prints the bare name. So a def pinned to one
+ * spelling was an alert that half the spell's own lines could never satisfy: the reporter's
+ * resisted alert for `Elemental Maelstrom` went silent the day they unlocked rank II, while their
+ * fade alert — pinned to the same string, matched against a line that never carried a suffix —
+ * kept working. Folding both sides through `spellLineKey` (the repo-wide rank fold, mirrored from
+ * the parser's `spellCanonKey`) makes every line of one spell answer to one def.
+ *
+ * IT WIDENS ONLY, AND ONLY FOR LITERALS. The fold is a superset of the old case-insensitive
+ * equality it replaces, so a def pinned to `Elemental Maelstrom II` still fires on II — it now
+ * also fires on I and on III, which is the ruling. A `/regex/` spec is USER-AUTHORED PATTERN and
+ * is left exactly alone: someone who wrote `/Maelstrom II$/` asked a narrower question on purpose,
+ * and rewriting their intent is not ours to do.
+ *
+ * SCOPE: EVERY KEY THAT NAMES A SPELL (`foldsRank`). `castBegin`, `castFizzle`,
+ * `castInterrupted`, `resist`, `cc`, `uncharm`, `heal`, `buffApply`, `buffFade`, `buffWearOff` and
+ * the derived `buffExpired` all spell it `spell` (alertsFields.ts SPELL_FIELD_BY_KIND), so one
+ * key folds them all and they cannot disagree about which def owns a line; JOS-276 added
+ * `damage.skill` for the two dtypes whose skill IS a spell name. The two other fields that name a
+ * spell-ish thing are left alone because the fold would be a provable no-op there:
+ * `poisonProc.strike` and `poisonCoat.poison` draw from shared/poisons.ts, whose 40-odd names
+ * carry no roman-numeral rank at all.
+ *
+ * NO UPGRADE-OFFER COMPENSATION. The offer strip (shared/spellLines.ts `detectRankUpgrades`) is
+ * untouched by this: the ruling is that no offer is needed to keep an alert firing, and the
+ * domain law behind it is that once you upgrade a spell it never downgrades, even on a loadout
+ * swap. An offer that still appears is now a convenience, never the thing standing between a user
+ * and a sound.
+ *
+ * `folds` is the per-event gate (`foldReaches`); it is true for every caller that asks about a
+ * `spell` key, which is what keeps this identical to what JOS-259 shipped.
  */
-function fieldText(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (value == null) return '' // only reachable as an array ELEMENT — join() renders nullish as ''
-  if (Array.isArray(value)) return (value as unknown[]).map(fieldText).join(',')
-  return '[object Object]'
+function accepts(f: CompiledMatch, text: string, folds = true): boolean {
+  if (f.test(text)) return true
+  return folds && f.lineKey !== undefined && spellLineKey(text) === f.lineKey
 }
 
 /**
- * THE SPELL NAMES ONE EVENT CAN HONESTLY ANSWER TO (JOS-84) — `ev.spell` plus every name in the
- * event's `candidates` list, or an empty array when the event carries no candidates.
+ * WHETHER THE RANK FOLD REACHES THIS EVENT — the runtime half, and it exists for exactly one
+ * field: `damage.skill` (JOS-276).
  *
- * WHY THIS EXISTS. `buffApply.spell` / `buffWearOff.spell` are documented as a BEST-EFFORT PICK:
- * EQ's landing and wears-off sentences are shared across a whole spell family (`<mob> slows
- * down.` is Forlorn Deeds / Languid Pace / Rejuvenation / Shiftless Deeds / Tepid Deeds; `<mob>
- * looks frail.` is Disempower / Incapacitate / Listless Power), so the parser cannot name the
- * spell from the line and puts the FIRST DB candidate in `spell` while `candidates` carries the
- * truth. The suggestion wizard authored `where:{spell:'<your spell>'}` against that first pick,
- * which is a coin flip the user always loses: an enchanter's Shiftless Deeds alert was compared
- * to the string "Forlorn Deeds" and could never fire. MEASURED against the reporter's own log
- * lines — that is the whole of JOS-84.
+ * `damage` PUTS FOUR DIFFERENT VOCABULARIES IN ONE FIELD (log/parseCombat.ts), and only two of
+ * them are spell names:
+ *   'spell' — the typed nuke, `<A> hits <B> for N points of <class> damage by <Spell>.` A SPELL,
+ *             and it prints the rank when the caster has one: the owner's log carries both
+ *             `… damage by Harm Touch.` (488) and `… damage by Harm Touch III/IV/VI/IX.` (23) —
+ *             one spell, two spellings, in one lane. This is the defect.
+ *   'dot'   — the tick, `<B> has taken N damage from <Spell> by <caster>.` Also a spell, also
+ *             ranked in the wild: `Chords of Dissonance I/III/IV/V` off four different bards.
+ *   'melee' — NOT a log string at all. `meleeSkill(verb)` maps the swing verb onto a CLOSED table
+ *             of ten constants (Backstab, Bash, Kick, Cleave, Smite, Ranged, Strike, Frenzy,
+ *             Flurry, Melee), so no melee skill can ever carry a roman-numeral tail. That is the
+ *             JOS-259 worker's "provably inert" measurement, re-verified for JOS-276 and now
+ *             pinned in tests/rankBlindSpellAlerts.test.mts (D3).
+ *   'ds'    — the damage-shield element, and this one IS free text off the line (DS_RE group 3).
+ *             The owner's whole log spells three of them — flames (17,780), thorns (7,861),
+ *             frost (152) — so it is inert today, but nothing in the parser BOUNDS it. That is
+ *             why this gate is written on the dtype rather than left to the measurement: an
+ *             element the game adds tomorrow cannot quietly start folding.
  *
- * So a `where.spell` matcher tests the WHOLE SET. It is the same reading shared/alertGroups.ts
- * already argues for the on-you slow ("both sentences are shared by a whole slow family and name
- * no spell, so this alert reports that a slow expired, never which one"), applied to the mob side
- * as well: when the game prints one sentence for five spells, an alert on any one of them is an
- * alert on the family, and firing is the honest answer. The alternative — silence — is the bug.
- *
- * SCOPE. Only the `spell` key widens, and only when the event actually carries `candidates`.
- * `where:{candidates:…}` is untouched (it still sees `fieldText`'s '[object Object]' join, which
- * is what today's defs are matched against), families with no candidate list (castBegin, resist,
- * buffFade, the derived buffExpired) are byte-for-byte unchanged, and an event that carries
- * candidates but no `spell` field at all (poisonProc names its `strike`) still fails the
- * pre-existing "field is absent ⇒ no match" test before this is ever consulted.
+ * Every other key answers true, which is the identity this had before the damage lane existed.
  */
-function spellCandidateNames(ev: LogEvent): string[] {
-  const cands = (ev as unknown as Record<string, unknown>).candidates
-  if (!Array.isArray(cands)) return []
-  const out: string[] = []
-  for (const c of cands as unknown[]) {
-    if (typeof c === 'string') out.push(c)
-    else if (typeof c === 'object' && c !== null) {
-      const name = (c as { name?: unknown }).name
-      if (typeof name === 'string') out.push(name)
-    }
-  }
-  return out
+function foldReaches(f: CompiledField, ev: LogEvent): boolean {
+  if (f.key !== 'skill') return true
+  return ev.kind === 'damage' && (ev.dtype === 'spell' || ev.dtype === 'dot')
 }
 
-/** One compiled `where` entry: the event field it names and the predicate it compiled to. */
-interface CompiledField {
+/** One compiled `where` entry: the event field it names and the matcher it compiled to. */
+interface CompiledField extends CompiledMatch {
   key: string
-  test: (v: string) => boolean
 }
 
 /**
- * Whether ONE compiled `where` field accepts `ev`.
+ * A CONDITION THAT MATCHED, plus whatever its named groups captured (JOS-103).
+ *
+ * An object rather than a boolean because "matched" and "matched, and here is what it named" are
+ * one answer: recomputing the captures afterwards would mean running the pattern a second time
+ * and hoping the second run agreed with the first. `captures` is absent for the overwhelming
+ * majority of conditions, which declare no named group at all.
+ */
+interface ConditionHit {
+  captures?: Record<string, string>
+}
+
+/** Merge a hit's captures into an accumulator, first writer wins. Undefined stays undefined. */
+function mergeCaptures(
+  into: Record<string, string> | undefined,
+  from: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!from) return into
+  if (!into) return { ...from }
+  for (const [k, v] of Object.entries(from)) if (!(k in into)) into[k] = v
+  return into
+}
+
+/**
+ * Whether ONE compiled `where` field accepts `ev`, and what it captured.
  *
  * An ABSENT field is still an immediate no-match, exactly as before — that is what keeps a
  * `where:{spell:…}` written against a family with no `spell` field (poisonProc names its
  * `strike`) from being admitted through the candidate list below.
+ *
+ * CAPTURES COME FROM THE TEXT THIS MATCHER ACTUALLY TESTED, and from nowhere else — control 3 of
+ * the threat model in shared/alertCaptures.ts. For a `/regex/`-form matcher that means the
+ * stringified value of the ONE field this `where` entry names, on the ONE event kind the trigger
+ * subscribed to. A literal matcher has no RegExp and therefore captures nothing.
+ *
+ * The JOS-84 spell widening captures from the CANDIDATE NAME that satisfied the matcher, for the
+ * same reason `matchedSpellName` reports that name rather than the event's best-effort pick: the
+ * text the pattern matched is the text it named.
+ *
+ * The JOS-259 rank fold rides inside `accepts`, so it applies to the field's own value and to
+ * every candidate name alike — a candidate list that spells a rank cannot be a second way for one
+ * spell to have two identities. `foldReaches` is asked ONCE here, because the answer is a property
+ * of this (field, event) pair and both compares below are about the same pair.
  */
-function fieldMatches(ev: LogEvent, f: CompiledField): boolean {
+function fieldMatches(ev: LogEvent, f: CompiledField): ConditionHit | null {
   const raw = (ev as unknown as Record<string, unknown>)[f.key]
-  if (raw == null) return false
-  if (f.test(fieldText(raw))) return true
+  if (raw == null) return null
+  const folds = foldReaches(f, ev)
+  const text = fieldText(raw)
+  if (accepts(f, text, folds)) return capturesFrom(f, text)
   // Only the `spell` key widens, and only when the event carries candidates (JOS-84).
-  return f.key === 'spell' && spellCandidateNames(ev).some((n) => f.test(n))
+  if (f.key !== 'spell') return null
+  const hit = spellCandidateNames(ev).find((n) => accepts(f, n, folds))
+  return hit === undefined ? null : capturesFrom(f, hit)
+}
+
+/** Run a matcher's own RegExp over the text it just accepted, and bound what it named. */
+function capturesFrom(f: CompiledMatch, text: string): ConditionHit {
+  if (!f.re) return {}
+  const m = f.re.exec(text)
+  const captures = harvestCaptures(m?.groups)
+  return captures ? { captures } : {}
 }
 
 /** A single PRIMITIVE condition prepared for fast evaluation (regex compiled once). */
@@ -169,6 +339,12 @@ interface CompiledCondition {
   event?: { kind: string; fields: CompiledField[] }
   raw?: RegExp
   // 'app' primitives compile to neither event nor raw → they never match main-side.
+}
+
+/** What a matching trigger yields: the text to record, plus anything its pattern named. */
+interface AlertMatch {
+  text: string
+  captures?: Record<string, string>
 }
 
 /**
@@ -179,14 +355,31 @@ interface CompiledAlert {
   def: AlertDef
   composite: 'single' | 'any' | 'all'
   conditions: CompiledCondition[]
+  /**
+   * The ENDING kinds this def watches for, empty for every other def (JOS-235,
+   * shared/earlyWarning.ts `breakTriggerKinds`). Non-empty is what makes an `earlyWarnSec` arm
+   * from the timer row instead of from this def's own trigger — for a break def the trigger IS
+   * the end, and arming on it silenced the alert entirely.
+   */
+  breakKinds: BreakTriggerKind[]
+  /**
+   * The auto tokens THIS DEF'S PHRASE writes (JOS-353) — empty for every alert that does not
+   * speak `{target}`, which is nearly all of them.
+   *
+   * COMPILED FROM THE PHRASE, NOT FROM THE TRIGGER, and that is the bound on the whole feature:
+   * a def that never says `{target}` carries no target on its firing, so its `module:delta` is
+   * byte-identical to what it was before the token existed. Resolving one costs a table lookup
+   * and a sanitize per FIRE; deciding whether to is done once, here, at compile time.
+   */
+  autoTokens: AutoTokenName[]
 }
 
 /** Compile one PRIMITIVE trigger into a matcher condition. */
 function compileCondition(t: AlertTriggerPrimitive): CompiledCondition {
   if (t.type === 'event') {
-    const fields = Object.entries(t.where ?? {}).map(([key, spec]) => ({
+    const fields: CompiledField[] = Object.entries(t.where ?? {}).map(([key, spec]) => ({
       key,
-      test: compileFieldMatch(spec)
+      ...compileFieldMatch(spec, key, t.kind)
     }))
     return { event: { kind: t.kind, fields } }
   }
@@ -204,76 +397,6 @@ function compileCondition(t: AlertTriggerPrimitive): CompiledCondition {
   return {}
 }
 
-// ---- spell context on the firing payload (docs/plans/voice-alerts.md §1) ----
-//
-// A spoken alert can say the spell that set it off ("Mesmerization", "Swift"), which means the
-// FIRING has to carry it: the renderer receives `FiredAlert`, and before this it carried only
-// the alert id, the timestamp and the matched raw line. Re-deriving the spell renderer-side
-// would mean a second parser for lines main has already parsed.
-//
-// WHICH FIELD NAMES THE SPELL, PER KIND — measured against shared/logEvents.ts, not assumed.
-// Most of the families spell it `spell`; three do not, and the exceptions are the whole reason
-// this is a table instead of a property read:
-//   * poisonProc  → `strike`  (the Strike's own name; a proc has no cast line at all)
-//   * poisonCoat  → `poison`  (and it is the literal string 'unknown' for the generic
-//                              third-person coat line, which is filtered below — 'unknown' is
-//                              a stated absence, not a spell name)
-//   * damage      → `skill`, but ONLY for dtype 'spell' | 'dot' (verified in log/parseCombat.ts:
-//                   the typed-nuke and DoT shapes put the spell name there). For 'melee' it is
-//                   a melee skill and for 'ds' it is the damage-shield element — neither is a
-//                   spell, so neither is claimed. Handled separately, below.
-//
-// FAMILIES THAT CARRY NO SPELL, and therefore fall back to the alert's name when a spell speech
-// mode fires on them: zone, loot, offer, trade, level, expGain, aaGain, aaSpend, aaActivate (an
-// AA name is not a spell), death, playerDeath, mitigation, miss, charm, uncharm, petClaim,
-// spellEmote (the emote text names no spell — that ambiguity is the point of the family),
-// illusionFade (27-way ambiguous by design), poisonDry, stanceChange, invocationChange, selfWho,
-// skillUp, itemActivate, itemMerge, itemMergeFailed, consider, epoch, sessionStart, campStart,
-// campAbort, offlineGap, unknown — plus EVERY 'raw' trigger that matched a spell-less line and
-// every renderer-evaluated 'app' signal (bossDefeat / questComplete, which arrive via appFired
-// and never see a LogEvent at all).
-//
-// `cc` and `heal` declare `spell?` — present on some shapes only (a CC application names no
-// spell; its worn-off keep-alive does). An absent field is simply an absent spell.
-
-/** Event kind → the field on that event whose value is the triggering spell's DISPLAY name. */
-const SPELL_FIELD_BY_KIND: Partial<Record<LogEvent['kind'], string>> = {
-  castBegin: 'spell',
-  castFizzle: 'spell',
-  castInterrupted: 'spell',
-  resist: 'spell',
-  cc: 'spell',
-  heal: 'spell',
-  buffApply: 'spell',
-  buffFade: 'spell',
-  buffWearOff: 'spell',
-  buffExpired: 'spell',
-  poisonProc: 'strike',
-  poisonCoat: 'poison'
-}
-
-/**
- * The spell that set this event off, DISPLAY form with the rank suffix INTACT — or undefined
- * when the family names none. Rank-stripping belongs to the speech resolver
- * (shared/speechText.ts), never to the producer: a consumer that wants "Mesmerization III"
- * must still be able to see the III.
- *
- * The one dynamic read mirrors `conditionMatches`'s own field access (the `where` matcher has
- * always indexed events by an arbitrary key), so this introduces no new escape hatch.
- */
-function firingSpell(ev: LogEvent): string | undefined {
-  if (ev.kind === 'damage') {
-    return ev.dtype === 'spell' || ev.dtype === 'dot' ? ev.skill.trim() || undefined : undefined
-  }
-  const field = SPELL_FIELD_BY_KIND[ev.kind]
-  if (field === undefined) return undefined
-  const value = (ev as unknown as Record<string, unknown>)[field]
-  if (typeof value !== 'string') return undefined
-  const name = value.trim()
-  // 'unknown' is what a poisonCoat says when the line deliberately hides which poison it was.
-  return name && name !== 'unknown' ? name : undefined
-}
-
 /**
  * The spell name to SPEAK for this firing — `base` (the event's own best-effort pick) unless the
  * alert matched a different candidate (JOS-84).
@@ -286,6 +409,11 @@ function firingSpell(ev: LogEvent): string | undefined {
  * and a regex-shaped matcher resolves to the first candidate it accepts — the honest answer when
  * one sentence is five spells, since the log itself does not say which.
  *
+ * IT ASKS THE SAME QUESTION THE MATCH DID (`accepts`, not `test`), so the JOS-259 rank fold cannot
+ * split the two apart: a def pinned to `Elemental Maelstrom` that fired on a line naming
+ * `Elemental Maelstrom II` keeps the event's own pick and SAYS the rank it saw. Announcing the
+ * def's spelling instead would be reporting the alert back to the user rather than the log.
+ *
  * Runs once per FIRE, never per compiled alert per event: firings are rare, matching is not.
  */
 function matchedSpellName(c: CompiledAlert, ev: LogEvent, base: string | undefined): string | undefined {
@@ -295,8 +423,8 @@ function matchedSpellName(c: CompiledAlert, ev: LogEvent, base: string | undefin
   for (const cond of c.conditions) {
     if (cond.event?.kind !== ev.kind) continue
     const f = cond.event.fields.find((x) => x.key === 'spell')
-    if (!f || f.test(base)) continue
-    const hit = names.find((n) => f.test(n))
+    if (!f || accepts(f, base)) continue
+    const hit = names.find((n) => accepts(f, n))
     if (hit !== undefined) return hit
   }
   return base
@@ -318,6 +446,12 @@ function matchedSpellName(c: CompiledAlert, ev: LogEvent, base: string | undefin
  * `idKey` is the repo-wide canonicalization (world-model law 2: names are dirty — damage lines
  * capitalize the article, lifecycle lines lowercase it), so "King Tranix" and "king tranix" are
  * one mob and cannot hold two clocks between them.
+ *
+ * RANK-BLIND BY CONSTRUCTION (JOS-276 sweep) — no spell name enters this key. A clock is
+ * `<alert>` or `<alert, mob>`, so one def firing on rank I and on rank III of its own spell shares
+ * ONE cooldown, which is what the fold above means: they are the same alert about the same spell.
+ * Adding the spelling here would hand the same def two clocks and re-introduce the split JOS-259
+ * closed, one layer down.
  */
 function cooldownKey(def: AlertDef, ev: LogEvent): string {
   if (def.cooldownScope !== 'target') return def.id
@@ -329,10 +463,20 @@ function cooldownKey(def: AlertDef, ev: LogEvent): string {
 
 function compileAlert(def: AlertDef): CompiledAlert {
   const t: AlertTrigger = def.trigger
+  const breakKinds = breakTriggerKinds(t)
+  // Only a 'custom' phrase can carry a token at all — the other three speech modes resolve to
+  // values the app owns and have no template to substitute into (shared/speechText.ts).
+  const autoTokens = autoTokensWanted(def.speech?.mode === 'custom' ? def.speech.phrase : undefined)
   if ('conditions' in t) {
-    return { def, composite: t.type, conditions: t.conditions.map(compileCondition) }
+    return {
+      def,
+      composite: t.type,
+      conditions: t.conditions.map(compileCondition),
+      breakKinds,
+      autoTokens
+    }
   }
-  return { def, composite: 'single', conditions: [compileCondition(t)] }
+  return { def, composite: 'single', conditions: [compileCondition(t)], breakKinds, autoTokens }
 }
 
 export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
@@ -371,6 +515,12 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
    *
    * Recorded for REPLAY events too (unlike firing, which is live-only) so the map is complete
    * the moment the renderer hydrates.
+   *
+   * RANK-SENSITIVE ON PURPOSE, and it is the one map in the alert system that stays so (JOS-276
+   * sweep). It answers "which rank am I actually using", which is a question about ranks; nothing
+   * downstream of it decides whether an alert FIRES. Its readers are the suggestions surface
+   * (which rank a chip is offered for) and the upgrade offers — both now conveniences rather than
+   * the thing between a user and a sound.
    */
   private spellLastCast = new Map<string, number>()
   /** Names whose recency advanced since the last flush (delta payload). */
@@ -385,10 +535,28 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
   private poisonSlowSeen: PoisonSlowRecency | null = null
   /** true when `poisonSlowSeen` advanced since the last flush (delta payload). */
   private poisonSlowDirty = false
+  /**
+   * THE ARMED EARLY WARNINGS (JOS-216) — the alerts whose fire has been MOVED to N seconds before a
+   * tracked debuff's estimated end. Its whole state machine, and why an arm resolves on the next
+   * tick rather than at the match, is in alertsEarlyWarning.ts.
+   */
+  private early = new EarlyWarnings()
 
   /** Replace the live alert set (called by main after load + every save/delete). */
   setDefs(defs: AlertDef[]): void {
     this.compiled = defs.map(compileAlert)
+  }
+
+  /**
+   * Where the early-warning offset reads its estimated ends from (JOS-216) — the PUBLIC timer
+   * projection, `buildTimerRows(buffs, buffTimers)`, injected by modules/wiring.ts.
+   *
+   * A seam rather than a direct dependency because this module is registered BEFORE the two it
+   * would have to reach for, and because the rows are the one output both timer overlays already
+   * draw: consuming them is what keeps this feature from growing a duration model of its own.
+   */
+  setTimerRows(rows: () => readonly BuffTimerRow[]): void {
+    this.early.setRowSource(rows)
   }
 
   /** The defs currently loaded (for snapshot()). */
@@ -408,6 +576,9 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
     this.castPending = new Map()
     this.poisonSlowSeen = null
     this.poisonSlowDirty = false
+    // A pending warning is about a debuff on a mob this character was fighting; the next character
+    // is not fighting it, and the replay that follows will re-arm nothing (a replay never fires).
+    this.early.reset()
   }
 
   /**
@@ -463,23 +634,144 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
     let spellResolved = false
     for (const c of this.compiled) {
       if (!c.def.enabled) continue
-      const matchedText = this.matches(c, ev)
-      if (matchedText == null) continue
+      const match = this.matches(c, ev)
+      if (match == null) continue
       const key = cooldownKey(c.def, ev)
-      if (this.onCooldown(key, c.def, ev.ts)) continue
-      this.noteFire(key, ev.ts)
       if (!spellResolved) {
         base = firingSpell(ev)
         spellResolved = true
       }
       const spell = matchedSpellName(c, ev, base)
-      const fired: FiredAlert = { alertId: c.def.id, ts: ev.ts, matchedText }
+      const fired: FiredAlert = { alertId: c.def.id, ts: ev.ts, matchedText: match.text }
       // Omitted rather than set to undefined: the delta is JSON over IPC, and an absent key
       // is the honest encoding of "this family names no spell".
       if (spell !== undefined) fired.spell = spell
+      // Likewise absent when the trigger declared no named group AND the phrase asked for no auto
+      // token — which is nearly every alert, so the delta stays byte-identical for them. The
+      // values are already sanitized and capped (shared/alertCaptures.ts `harvestCaptures`,
+      // shared/alertTargets.ts `resolveTarget`); nothing downstream re-derives them.
+      const captures = withAutoCaptures(match.captures, c.autoTokens, ev)
+      if (captures) fired.captures = captures
+      if (this.earlyWarnTakesIt(c, ev, key, fired)) continue
+      if (this.onCooldown(key, c.def, ev.ts)) continue
+      this.noteFire(key, ev.ts)
       this.pending.push(fired)
-      this.record(c.def.id, ev.ts, matchedText)
+      this.record(c.def.id, ev.ts, match.text)
     }
+  }
+
+  /**
+   * WHETHER THE EARLY-WARNING OFFSET CLAIMS THIS MATCH — true when nothing sounds right now.
+   *
+   * THE OFFSET MOVES THE ONE FIRE; IT DOES NOT ADD A SECOND ONE (JOS-216). An alert with an early
+   * warning says nothing when its trigger matches: the match ARMS a warning against the timer row
+   * this landing produces, and the firing the caller built is made later, N seconds before that
+   * row's estimated end. The cooldown is deliberately NOT spent here — the clock belongs to the
+   * sound, and no sound has been made yet.
+   *
+   * …UNLESS THIS DEF'S TRIGGER IS THE ENDING (JOS-235), in which case there is nothing left to arm
+   * against and arming was the bug that ate the alert whole. A break-family def arms from the ROW
+   * APPEARING instead (`breakWatchers`) and still FIRES on its own trigger — except for the one
+   * landing whose warning already spoke, which `breakSpoken` swallows. An early break never
+   * reached its warning, so nothing suppresses it: it fires, exactly as it always did.
+   */
+  private earlyWarnTakesIt(c: CompiledAlert, ev: LogEvent, key: string, fired: FiredAlert): boolean {
+    const sec = normalizeEarlyWarnSec(c.def.earlyWarnSec)
+    if (sec === undefined) return false
+    // The names this line could answer to — the event's own resolved pick (already on the firing)
+    // plus the JOS-84 candidate list, which is the truth when one sentence is a whole family.
+    const names = [...(fired.spell === undefined ? [] : [fired.spell]), ...spellCandidateNames(ev)]
+    if (c.breakKinds.length === 0) {
+      this.early.arm({ sec, cooldownKey: key, subject: earlyWarnSubject(ev, names), ts: ev.ts, fired })
+      return true
+    }
+    return this.early.breakSpoken(c.def.id, breakEventIdentity(ev, names))
+  }
+
+  /**
+   * The wall-clock heartbeat (~1×/sec while the LIVE tail runs, never during replay). It exists for
+   * ONE thing: the early-warning offset, whose whole subject is a deadline that arrives while the
+   * log is idle — which is exactly when a player is watching a mez run down.
+   */
+  onTick(nowMs: number): void {
+    for (const due of this.early.tick(nowMs, this.breakWatchers(nowMs))) this.fireWarning(due, nowMs)
+  }
+
+  /**
+   * The break-family defs that want to be told about live rows (JOS-235).
+   *
+   * Rebuilt each tick rather than cached with the compile, because "enabled" and the offset can
+   * change under it and the list is at most a handful of defs — a user has one charm-break alert,
+   * not four hundred. When it is empty (the overwhelmingly common case) the scheduler does not read
+   * the timer projection at all.
+   */
+  private breakWatchers(nowMs: number): BreakWatcher[] {
+    const out: BreakWatcher[] = []
+    for (const c of this.compiled) {
+      if (!c.def.enabled || c.breakKinds.length === 0) continue
+      const sec = normalizeEarlyWarnSec(c.def.earlyWarnSec)
+      if (sec === undefined) continue
+      out.push({ alertId: c.def.id, sec, probe: (row) => this.probeBreak(c, row, nowMs) })
+    }
+    return out
+  }
+
+  /**
+   * WOULD THIS DEF ANNOUNCE THE BREAK OF THIS ROW — asked of the def's OWN matcher, never of a
+   * second one written to guess at the same question (the seam, and the whole blast radius of the
+   * hypothetical event it is asked with, are documented on `breakProbes`).
+   *
+   * The firing it hands back is built exactly like an ordinary one: the same `matchedText` the
+   * matcher reports (here a projection sentence, because no line has been printed), the same
+   * captures its own named groups took from the fields it tested, and the same cooldown clock the
+   * REAL break event would have chosen — so `cooldownScope:'target'` still means one clock per mob,
+   * and the families whose break line names a `mob` rather than a `target` degrade to the
+   * alert-level clock here in exactly the way they already do there.
+   *
+   * The spoken spell is the probe's — the rank-less name the wear-off line prints — for the same
+   * reason `matchedSpellName` reports the candidate that satisfied the def rather than the event's
+   * best-effort pick: the name the alert matched on is the name it should say.
+   */
+  private probeBreak(
+    c: CompiledAlert,
+    row: BuffTimerRow,
+    nowMs: number
+  ): { fired: FiredAlert; cooldownKey: string } | null {
+    for (const kind of c.breakKinds) {
+      for (const p of breakProbes(kind, row, nowMs)) {
+        const match = this.matches(c, p.ev)
+        if (!match) continue
+        const fired: FiredAlert = { alertId: c.def.id, ts: nowMs, matchedText: match.text, spell: p.spell }
+        // The probe's hypothetical event carries the ROW's subject, so an early warning speaks the
+        // same mob name the real break would have (`breakProbes`, shared/earlyWarning.ts).
+        const captures = withAutoCaptures(match.captures, c.autoTokens, p.ev)
+        if (captures) fired.captures = captures
+        return { fired, cooldownKey: cooldownKey(c.def, p.ev) }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Make an early warning's firing, if the alert behind it still wants it.
+   *
+   * The def is re-read rather than trusted: a warning can be armed for a minute, and an alert the
+   * user deleted or switched off in the meantime must not speak. The cooldown is spent HERE, on the
+   * clock the ARMING event chose (so `cooldownScope:'target'` still means one clock per mob), and
+   * `seq` is bumped by hand — a tick advances no log seq, and `useModule` would drop the delta as a
+   * duplicate (JOS-87; `appFired` bumps it for the same reason).
+   */
+  private fireWarning(due: EarlyWarnDue, nowMs: number): void {
+    const def = this.compiled.find((c) => c.def.id === due.fired.alertId)?.def
+    if (!def?.enabled) return
+    if (this.onCooldown(due.cooldownKey, def, nowMs)) return
+    this.noteFire(due.cooldownKey, nowMs)
+    this.seq += 1
+    // `dueAt` rides the firing so a consumer can COUNT DOWN to the deadline this warning is early
+    // of (JOS-378). It is carried only here, on the early-warning path, because it is only here
+    // that a deadline exists — see FiredAlert.dueAt.
+    this.pending.push({ ...due.fired, ts: nowMs, dueAt: due.dueAt })
+    this.record(def.id, nowMs, due.fired.matchedText)
   }
 
   /**
@@ -499,7 +791,11 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
     // dupe (app fires arrive off the bus, so there's no fresh LogEvent seq); a
     // trailing flushNow() by main pushes it. matchedText = the signal context.
     this.seq += 1
-    this.pending.push({ alertId, ts, matchedText: context })
+    // MARKED AS AN ECHO (JOS-380). The renderer has already played this one — it is the only side
+    // that can evaluate an app signal — so the record travels for history's sake and the player
+    // skips playback on it. An unmarked record here is what made every app-signal alert fire
+    // twice; only audio coalescing kept it inaudible.
+    this.pending.push({ alertId, ts, matchedText: context, origin: 'app' })
   }
 
   /** Append a fire to an alert's ring buffer, capping at HISTORY_CAP (newest last). */
@@ -547,34 +843,54 @@ export class AlertsModule implements EqModule<AlertsSnap, AlertsDelta> {
    * Cross-event correlation is deliberately out of scope; an 'all' over conditions that can
    * never co-occur on one event (e.g. two different `kind`s) simply never fires.
    */
-  private matches(c: CompiledAlert, ev: LogEvent): string | null {
+  private matches(c: CompiledAlert, ev: LogEvent): AlertMatch | null {
     if (c.composite === 'all') {
       // Every condition must match this one event. An empty condition list can't be satisfied
       // meaningfully — treat it as no-match to avoid a firehose.
       if (c.conditions.length === 0) return null
+      // 'all' means EVERY condition matched this one event, so every one of them is "the
+      // condition that matched" and all their captures are in scope. First writer wins on a
+      // name collision, which is source order — the same rule the whole file reads by.
+      let captures: Record<string, string> | undefined
       for (const cond of c.conditions) {
-        if (!this.conditionMatches(cond, ev)) return null
+        const hit = this.conditionMatches(cond, ev)
+        if (!hit) return null
+        captures = mergeCaptures(captures, hit.captures)
       }
-      return ev.raw
+      return { text: ev.raw, ...(captures ? { captures } : {}) }
     }
-    // 'any' and 'single': fire on the first matching condition.
+    // 'any' and 'single': fire on the first matching condition, and take ITS captures. A
+    // later condition that would also have matched is never evaluated, so it can never
+    // contribute a value the firing did not actually match on.
     for (const cond of c.conditions) {
-      if (this.conditionMatches(cond, ev)) return ev.raw
+      const hit = this.conditionMatches(cond, ev)
+      if (hit) return { text: ev.raw, ...(hit.captures ? { captures: hit.captures } : {}) }
     }
     return null
   }
 
-  /** Whether ONE primitive condition matches `ev`. */
-  private conditionMatches(cond: CompiledCondition, ev: LogEvent): boolean {
+  /** Whether ONE primitive condition matches `ev`, and what its named groups captured. */
+  private conditionMatches(cond: CompiledCondition, ev: LogEvent): ConditionHit | null {
     if (cond.event) {
-      if (ev.kind !== cond.event.kind) return false
-      return cond.event.fields.every((f) => fieldMatches(ev, f))
+      if (ev.kind !== cond.event.kind) return null
+      let captures: Record<string, string> | undefined
+      for (const f of cond.event.fields) {
+        const hit = fieldMatches(ev, f)
+        if (!hit) return null
+        captures = mergeCaptures(captures, hit.captures)
+      }
+      return captures ? { captures } : {}
     }
     if (cond.raw) {
-      return cond.raw.test(ev.raw)
+      // A raw condition captures from `ev.raw` — the exact line it just tested, and the only
+      // text it ever sees. `cond.raw` carries no 'g' flag, so `exec` is stateless.
+      const m = cond.raw.exec(ev.raw)
+      if (!m) return null
+      const captures = harvestCaptures(m.groups)
+      return captures ? { captures } : {}
     }
     // 'app' conditions never match main-side.
-    return false
+    return null
   }
 
   snapshot(): { seq: number; state: AlertsSnap } {

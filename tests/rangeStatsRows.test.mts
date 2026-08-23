@@ -21,7 +21,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  AA_RATE_TITLE,
   AA_RESPEC_CAPTION,
+  ACTIVE_TIME_TITLE,
   NONE,
   OFFLINE_CAPTION,
   OFFLINE_TITLE,
@@ -35,6 +37,7 @@ import {
   offlineText,
   rangeHeroes,
   unstatedCaption,
+  withActiveTime,
   witnessedText,
   zoneStatRows
 } from '../src/renderer/src/features/leveling/rangeStatsRows'
@@ -184,9 +187,14 @@ test('a null rate renders as an em-dash, never as 0.0', () => {
 })
 
 test('a zone with no idle at all carries no idle string', () => {
-  const [row] = zoneStatRows([
-    zone({ zone: 'Befallen', spanMs: 2 * HOUR + 41 * MIN, killsPerHourActive: 38.5, levelsPerHourActive: 1.42 })
-  ])
+  // ROWS ARE SHAPED OVER THE HOUR IN FORCE SINCE JOS-288, and the default is `elapsed`. This row
+  // states its ACTIVE rates, so the arm names that basis: what it is about is the idle string and
+  // the two rate spellings beside it, not which denominator produced them.
+  const [row] = zoneStatRows(
+    [zone({ zone: 'Befallen', spanMs: 2 * HOUR + 41 * MIN, killsPerHourActive: 38.5, levelsPerHourActive: 1.42 })],
+    'levels',
+    'active'
+  )
   assert.equal(row.idle, null, 'null, so the panel prints nothing rather than "0s idle"')
   assert.equal(row.time, '2h 41m')
   assert.equal(row.levelsPerHour, '1.42 lvl/hr')
@@ -240,7 +248,10 @@ test('the hero cards report the four headline numbers', () => {
         { ts: T0 + HOUR, level: 19 }
       ],
       levelRuns: [{ fromLevel: 18, toLevel: 19, startTs: T0, endTs: T0 + HOUR }]
-    })
+    }),
+    // The ACTIVE basis, named: this fixture states an active rate, and what the arm is about is the
+    // four cards rather than which hour they divide by (the pair below pins that).
+    'active'
   )
   assert.deepEqual(heroes.map((h) => h.id), ['rate', 'kills', 'levels', 'range'])
   assert.equal(heroes[0].value, '1.42 lvl/hr')
@@ -261,7 +272,8 @@ test('an at-the-cap range em-dashes the rate and says WHY', () => {
 })
 
 test('a range with no active time em-dashes the rate for the OTHER reason', () => {
-  const heroes = rangeHeroes(stats({ activeMs: 0, idleMs: 3 * HOUR, expSamples: 0 }))
+  // Named basis: the reason under test is "no time of THIS kind", and the kind is the active one.
+  const heroes = rangeHeroes(stats({ activeMs: 0, idleMs: 3 * HOUR, expSamples: 0 }), 'active')
   assert.equal(heroes[0].value, NONE)
   assert.equal(heroes[0].sub, 'no active time in this range')
   assert.equal(heroes[1].sub, 'no credited kills in this range')
@@ -382,3 +394,40 @@ test('the unstated footnote appears only when it is true', () => {
   assert.match(note ?? '', /^\* 1 experience line stated no percentage/, 'singular')
   assert.match(unstatedCaption(stats({ expUnstated: 22 })) ?? '', /22 experience lines stated no percentage/)
 })
+
+test('the active-time definition answers the question a user actually asked (JOS-249)', () => {
+  // A 0.22.0 reporter asked whether "active time" was AFK removal or out-of-combat removal. It is
+  // NEITHER, so the sentence has to (a) state what it IS and (b) close out both guesses by name —
+  // otherwise the reader supplies the wrong one and every rate in the app reads as a claim it is
+  // not making.
+  assert.match(ACTIVE_TIME_TITLE, /^Active time = /)
+  // The three streams `idleSpans` walks, in the same words `idleRuleCaption` already uses.
+  assert.match(ACTIVE_TIME_TITLE, /experience, credited kill, or loot line/)
+  // The logout half — `activeMs` subtracts offline as well as idle.
+  assert.match(ACTIVE_TIME_TITLE, /logged out/)
+  // Both wrong guesses, refused out loud.
+  assert.match(ACTIVE_TIME_TITLE, /not an AFK check/)
+  assert.match(ACTIVE_TIME_TITLE, /not out-of-combat time/)
+  // The threshold is READ from the classifier's own constant, never typed in beside it: a second
+  // copy of 5 would go on saying 5 the day the measurement moved it.
+  assert.ok(
+    ACTIVE_TIME_TITLE.includes(`over ${IDLE_GAP_MS / MIN} minutes`),
+    `the sentence must quote IDLE_GAP_MS: ${ACTIVE_TIME_TITLE}`
+  )
+})
+
+test('withActiveTime appends the definition rather than replacing what a surface already said', () => {
+  assert.equal(withActiveTime('Motes per hour.'), `Motes per hour. ${ACTIVE_TIME_TITLE}`)
+  // The one title in this file that already had a sentence keeps it, and gains the definition.
+  assert.match(AA_RATE_TITLE, /^AA completions and ability points per hour of active time\. Active time = /)
+})
+
+test('the levels-per-hour hero card is the only one that hovers the definition', () => {
+  const heroes = rangeHeroes(stats({ activeMs: 2 * HOUR, levelsPerHourActive: 1.42, expSamples: 12 }), 'active')
+  const rateCard = heroes.find((h) => h.id === 'rate')
+  assert.match(rateCard?.title ?? '', /Active time = /, 'the rate card divides by it, so it says what it is')
+  for (const h of heroes.filter((c) => c.id !== 'rate')) {
+    assert.equal(h.title, undefined, `${h.id} has no rate denominator and so carries no hover`)
+  }
+})
+

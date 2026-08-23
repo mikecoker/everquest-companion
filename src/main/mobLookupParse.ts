@@ -45,53 +45,15 @@
 
 import { templateField } from './itemLookupParse'
 import type { MobDrop, MobLoc, MobQuestUse, MobSeenDrop } from '../shared/types'
+import { mobKey } from '../shared/mobKey'
 
 /**
- * Canonical identity key for a MOB name. The same rule as parser.idKey (lowercase + trim) plus
- * two folds.
- *
- * QUOTE FOLD: the log writes ``Innoruuk`s Chosen`` with a backtick, the wiki writes it with a
- * typographic or straight apostrophe, and the quest catalog uses whatever its page did. Folding
- * all three to `'` is what lets one mob be one key across the three sources.
- *
- * COPY-NUMBER STRIP — a trailing ` (N)`. That suffix is OURS, not the game's: no log line ever
- * carries it (a full-log sweep of the live log finds `(N)` only in heal amounts and skill-up
- * levels). `WorldModel.label()` (combat/world.ts) appends the spawn GENERATION when more than
- * one instance of a name has been engaged — "an elemental capturer (14)" is the 14th capturer
- * this session, not a different creature — and that label rides
- * `Encounter.lastOutTarget` → `CurrentTarget.name` → the Overview tab's `lookupMob(name)`.
- * MEASURED consequence before this strip: the dev userData cache
- * (`%APPDATA%\everquest-companion-dev\mob-knowledge-cache.json`) held ELEVEN such keys —
- * 'an elemental capturer (14)', 'a rock golem (45)', 'an elemental crusader (28)',
- * 'an elemental channeler (19)', 'an elemental visier (12)', … — and every one of them was
- * `notFound`, while all eleven base names are catalog hits carrying real drop tables. Plane of
- * Sky is where it bites: the island trash comes in same-named packs, so gen counters run high.
- *
- * A copy number is not part of an identity — loot off "an elemental capturer (14)"'s corpse is
- * that mob's loot, and the wiki has exactly one page for it. Same canonicalize-at-a-boundary
- * family as the item ` +N` strip (itemLookupParse.normalizeItemName, world-model law 2), and
- * as there, DISPLAY stays raw: callers pass the untouched name to `knowledgeFromCatalog`, so
- * the card still reads "An elemental capturer (14)".
- *
- * Only DIGITS are stripped. A parenthesized WORD is part of the name (instance tiers like
- * "(Awakened)", wiki disambiguators), so `(\d+)` is the whole rule — and it is safe against the
- * committed catalog, where zero of the 7,866 entries end in a parenthesized number.
- *
- * The cache SHAPE is unchanged, so no CACHE_VERSION bump and no purge: the old ' (N)'-keyed
- * entries simply become unreachable, and being negatives they age out under NEG_TTL_MS anyway.
- *
- * Deliberately does NOT strip the leading article: "a giant rat" and "giant rat" are different
- * page titles on the wiki, and the log always prints the article, so keeping it is both honest
- * and lossless. Article-insensitive matching is a BOSS-matching rule (law 2), not this one.
+ * THE canonical mob key. It lives in `src/shared/mobKey.ts` since JOS-350 (unchanged behaviour,
+ * new address) because the RENDERER needs the same fold to join anything by mob name — the seam
+ * `features/overview/useCurrentMob.ts` had already named. Re-exported here so every main-side
+ * `import { mobKey } from './mobLookupParse'` keeps working; the doc lives with the function.
  */
-export function mobKey(name: string): string {
-  return name
-    .trim()
-    .replace(/\s*\(\d+\)$/, '')
-    .toLowerCase()
-    .replace(/[`’´]/g, "'")
-    .replace(/\s+/g, ' ')
-}
+export { mobKey }
 
 /**
  * Reduce a short field value to plain text. Used for `|name`, `|level` and `|zone`, which are
@@ -316,6 +278,41 @@ export class MobLootIndex {
     const items = this.byMob.get(mobKey(mob))
     if (!items) return []
     return [...items.values()].sort((a, b) => b.count - a.count || b.lastTs - a.lastTs)
+  }
+
+  /**
+   * The union of what we've looted off EVERY spelling of ONE creature (JOS-142).
+   *
+   * The index files loot under the raw LOG name, and a raid god the log spells `Cazic-Thule` is
+   * the same creature the roster and the wiki call `Cazic Thule`. `main/mobAliases.ts` is the one
+   * place that statement lives; this method just reads the key list it produces. `mobKey` is
+   * idempotent, so the caller may pass either display names or already-canonical keys.
+   *
+   * Counts ADD and `lastTs` takes the later — two spellings of one corpse's owner are one mob's
+   * history, and reporting them separately would be the same lie as dropping one of them. The
+   * display spelling kept is the first one the index recorded for that item, exactly as `note()`
+   * already decides it within a single key.
+   *
+   * ONE spelling short-circuits to `drops()` unchanged — the byte-identical path for the 30
+   * roster targets and every one of the 7.9k catalog mobs (JOS-137 constraint 4).
+   */
+  dropsAcross(spellings: readonly string[]): MobSeenDrop[] {
+    if (spellings.length <= 1) return this.drops(spellings[0] ?? '')
+    const merged = new Map<string, MobSeenDrop>()
+    for (const spelling of spellings) {
+      const items = this.byMob.get(mobKey(spelling))
+      if (!items) continue
+      for (const [ik, row] of items) {
+        const prev = merged.get(ik)
+        if (!prev) {
+          merged.set(ik, { ...row })
+          continue
+        }
+        prev.count += row.count
+        if (row.lastTs > prev.lastTs) prev.lastTs = row.lastTs
+      }
+    }
+    return [...merged.values()].sort((a, b) => b.count - a.count || b.lastTs - a.lastTs)
   }
 
   /** How many distinct mobs we have loot for (test/diagnostic handle). */

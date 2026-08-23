@@ -19,6 +19,11 @@
 //                    `<Name> told you, '…'`                        3537  (all NPCs — 3050 pet
 //                                                                        claims, rest merchants)
 //
+// AND THE BARD'S BINDING PAIR JOINED THE SLOW SET (JOS-233, owner ruling 2026-08-12; re-measured
+// read-only over the same file at 1,593,491 lines on 2026-08-12): `Your Largo's Melodic Binding
+// spell has worn off of <mob>.` 81, `Largo's Assonant Binding` 0 (this character never reached
+// 51), `The strands fade away.` 0, `Selo's Consonant Chain` 0. J1b and J1c below are theirs.
+//
 // TELL CONTENT IS CONSTRUCTED HERE, deliberately. The 11 real tells are other people's words and
 // shared/logScrub.ts drops every line carrying quoted speech, so no fixture can hold one and no
 // public test file should quote one. The SHAPE is what was measured and the shape is what is
@@ -88,6 +93,61 @@ test('J1 the slow set covers every player-castable slow, not just the one this c
     assert.ok(!fired.has('group:cc:broke'), `${spell} must not read as a mez/root break`)
     assert.ok(!fired.has('charm-break'), `${spell} must not read as a charm break`)
   }
+})
+
+test("J1b the bard's binding songs fire the slow alert on the MOB side only", () => {
+  // JOS-233, owner ruling 2026-08-12. These two are the first roster members that do NOT come from
+  // the DB's slow landing-emote oracle: they share ONE landing sentence — `Someone is bound by
+  // strands of solid music.`, which since JOS-384 the corrections overlay gives the level-20 song
+  // too — and a message family is not an effect family, so the oracle has nothing to say about
+  // them in either direction. The ruling is that the binding slows the mob's SWINGS as well as its
+  // feet, which makes its expiry the same quiet loss this set exists for. This test reaches them
+  // by the WEAR-OFF line, which names the spell outright and carries no candidate list at all, so
+  // the shared landing sentence cannot reach it.
+  //
+  // JOS-225's regression is the other half of this test and it is asserted on every line: the
+  // reporter heard "Mez / root broke" every time the level-20 song lapsed, and neither song may
+  // ever reach that alert (or the charm one) again.
+  const defs = allDefs()
+  for (const spell of ["Largo's Melodic Binding", "Largo's Assonant Binding"]) {
+    const fired = fire(defs, [`Your ${spell} spell has worn off of a froglok ton knight.`])
+    assert.ok(fired.has('group:slow:mob'), `${spell} did not fire the slow alert`)
+    assert.ok(!fired.has('group:cc:broke'), `${spell} must never read as a mez/root break again`)
+    assert.ok(!fired.has('charm-break'), `${spell} must not read as a charm break`)
+    assert.equal(fired.size, 1, `${spell} must fire exactly one alert`)
+  }
+
+  // THE UNRULED REST OF THE LINE stays silent. Same shape of song, same `buffFade`, no ruling —
+  // and Selo's Consonant Chain is the control JOS-225's own slice used from the inside.
+  for (const spell of [
+    "Selo's Consonant Chain",
+    "Selo's Chords of Cessation",
+    "Selo's Assonant Strain"
+  ]) {
+    const fired = fire(defs, [`Your ${spell} spell has worn off of a froglok ton knight.`])
+    assert.equal(fired.size, 0, `${spell} is explicitly unruled and must fire nothing`)
+  }
+})
+
+test('J1c the binding songs do NOT reach the on-you slow alert — the sentence is shared', () => {
+  // THE TRIPWIRE THAT MADE THE ROSTER TWO LISTS. Both Largo's print `The strands fade away.` when
+  // they expire on YOU — and so does `Lyssa's Solidarity of Vision`, the Bard 34 BENEFICIAL vision
+  // buff, verbatim. A `where:{spell:…}` matcher tests the whole CANDIDATE list (JOS-84), so one
+  // shared roster would announce "a slow wore off you" every time that buff lapsed, with nothing
+  // in the sentence to tell them apart. This is the haste twin again, except the two sentences are
+  // not one word apart — they are identical, so anchoring cannot save it and only the ROSTER can.
+  const ev = parseEvent(TS + 'The strands fade away.', 0)
+  assert.ok(ev && ev.kind === 'buffWearOff')
+  assert.equal(ev.target, 'self')
+  assert.deepEqual(ev.candidates, [
+    "Largo's Assonant Binding",
+    "Largo's Melodic Binding",
+    "Lyssa's Solidarity of Vision"
+  ])
+
+  const fired = fire(allDefs(), ['The strands fade away.'])
+  assert.ok(!fired.has('group:slow:you'), 'a beneficial bard buff expiring is not a slow expiring')
+  assert.equal(fired.size, 0)
 })
 
 test('J2 a NON-slow buff wearing off a named target is silent', () => {

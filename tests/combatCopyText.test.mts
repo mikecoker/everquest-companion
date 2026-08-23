@@ -145,6 +145,26 @@ const SEG: SegmentView = {
     source({ id: 'e1', name: 'a deadly black widow (7)', kind: 'enemy', total: 2400, dps: 29, hits: 60, crits: 4, critPct: 6.7 }),
     source({ id: 'e2', name: 'a deadly black widow (8)', kind: 'enemy', total: 800, dps: 10, hits: 20 })
   ],
+  // YOUR DEFENCE (JOS-354) — the block the Incoming paste opens with. Shaped like a real segment:
+  // 81 swings aimed at you, 39 of them landed, 42 avoided (12 by one of your four skills).
+  defense: {
+    swings: 81,
+    hits: 39,
+    avoided: { miss: 30, dodge: 2, parry: 1, riposte: 2, block: 7, absorb: 0 },
+    avoidedTotal: 42,
+    avoidedPct: (42 / 81) * 100,
+    defended: 12,
+    defendedPct: (12 / 81) * 100,
+    rates: {
+      miss: (30 / 81) * 100,
+      dodge: (2 / 81) * 100,
+      parry: (1 / 81) * 100,
+      riposte: (2 / 81) * 100,
+      block: (7 / 81) * 100,
+      absorb: 0
+    },
+    riposte: { events: 2, swings: 2, hits: 2, damage: 143, pctOfSwingDamage: 0.46, taken: 11 }
+  },
   enemyHealTotal: 1200,
   incomingHealTotal: 2100,
   incomingHealers: [
@@ -220,6 +240,19 @@ const EMPTY: SegmentView = {
   inTotal: 0,
   inDps: 0,
   incoming: [],
+  // Nothing swung at you either — so the defence block prints NOTHING rather than a table of
+  // zero-percent rows, which is the degenerate case the empty golden below pins.
+  defense: {
+    swings: 0,
+    hits: 0,
+    avoided: { miss: 0, dodge: 0, parry: 0, riposte: 0, block: 0, absorb: 0 },
+    avoidedTotal: 0,
+    avoidedPct: 0,
+    defended: 0,
+    defendedPct: 0,
+    rates: { miss: 0, dodge: 0, parry: 0, riposte: 0, block: 0, absorb: 0 },
+    riposte: { events: 0, swings: 0, hits: 0, damage: 0, pctOfSwingDamage: 0, taken: 0 }
+  },
   enemyHealTotal: 0,
   incomingHealTotal: 0,
   incomingHealers: []
@@ -262,6 +295,20 @@ test('formatSegmentText (incoming) uses the incoming totals and appends the heal
       // Incoming carries NO active-dps and NO enemy-heal note — both are outgoing-only claims.
       'Incoming damage · 3.2k · 39 dps',
       '',
+      // YOUR DEFENCE (JOS-354) rides above the attacker table: the summary first, the detail
+      // after. The panel puts it behind a Mitigation tab since JOS-361 and the paste still carries
+      // BOTH halves of the direction — the copy button is the card's, not the visible tab's.
+      // The run wraps on the app's ' · ' packer rather than overrunning the paste width, the rows
+      // are STACK-RANKED by count (JOS-361: 30 misses lead), and the riposte notes are prose and
+      // wrap on words.
+      'Your defence · 52% of 81 swings at you avoided',
+      '15% by block/parry/dodge/riposte',
+      'Missed you 30 (37.0%) · Block 7 (8.6%) · Dodge 2 (2.5%)',
+      'Riposte 2 (2.5%) · Parry 1 (1.2%)',
+      'Riposte: 2 swings turned aside · 2 counter-swings (2 landed) for 143',
+      'damage - already inside your melee total, 0.5% of it',
+      'Riposted by mobs: 11 counter-swings swung at you off your own attacks',
+      '',
       '   Attacker                  Total     DPS  Crit',
       '1  a deadly black widow (7)   2.4k  29 dps    7%',
       '2  a deadly black widow (8)    800  10 dps',
@@ -281,7 +328,7 @@ test('formatEntityText is the flat skill list, slay grouped, with the rounds foo
   assert.equal(
     text,
     [
-      'You — a deadly black widow +2 · 1:23',
+      'You - a deadly black widow +2 · 1:23',
       '31.2k · 375 dps · 260 hits · 12% crit · 82% hit · 29% resist',
       '',
       'Skill          Total  Hits  Avg  Max  Crit  Miss  Resist',
@@ -307,7 +354,7 @@ test('formatEntityText NESTS the pet as a line item when the preference passes i
   assert.equal(
     text,
     [
-      'You — a deadly black widow +2 · 1:23',
+      'You - a deadly black widow +2 · 1:23',
       // The header stats stay YOURS — nesting is a layout of the rows, never a fold of the
       // numbers: not one point of pet damage joins a lane of yours.
       '31.2k · 375 dps · 260 hits · 12% crit · 82% hit · 29% resist',
@@ -334,7 +381,7 @@ test('formatEntityText omits every column the source has no data for', () => {
   assert.equal(
     text,
     [
-      'Grinn Frostbeard — a deadly black widow +2 · 1:23',
+      'Grinn Frostbeard - a deadly black widow +2 · 1:23',
       '5.0k · 60 dps · 40 hits',
       '',
       // No Crit / Miss / Resist columns exist at all here — an absent dimension is absent,
@@ -353,7 +400,7 @@ test('formatTargetText carries the ~ estimate prefix on every derived number but
   assert.equal(
     text,
     [
-      'Damage to a deadly black widow (7) — a deadly black widow +2 · 1:23',
+      'Damage to a deadly black widow (7) - a deadly black widow +2 · 1:23',
       // The stat run wraps on a separator rather than running past the paste width.
       '~12.0k · 27% of outgoing · ~118 hits · ~13 crit · ~27 avoided',
       '~1 resisted',
@@ -385,7 +432,7 @@ test('formatMobsText copies the rows the card LISTS and says what it left off', 
   assert.equal(
     text,
     [
-      'Damage by mob — a deadly black widow +2 · 1:23',
+      'Damage by mob - a deadly black widow +2 · 1:23',
       // The count is of ALL mobs (4) while the table shows the card's cap (3) — so the header
       // can never disagree with the '+N more' line below it.
       '4 mobs · 45.2k',
@@ -427,7 +474,7 @@ test('a long fight name is clipped to the paste width — never the clock, never
   const drill = formatTargetText(long, 'a deadly black widow (7)', TARGET)
   assert.ok(fits(drill), first(drill))
   assert.ok(first(drill).endsWith(' · 1:23'))
-  assert.ok(first(drill).startsWith('Damage to a deadly black widow (7) — '))
+  assert.ok(first(drill).startsWith('Damage to a deadly black widow (7) - '))
 })
 
 test('nothing anywhere is markdown — a paste must not be re-rendered by its destination', () => {

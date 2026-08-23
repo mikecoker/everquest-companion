@@ -13,23 +13,33 @@
 // slot, and the two that deliberately name none:
 //
 //   * `Any Slot` is the client's spelling for a slot-agnostic equipment slot. It is a real place
-//     to wear something and it is not one of the eighteen, so it maps to nothing rather than to a
-//     guess about which slot the wearer meant.
+//     to wear something and it is not one of the eighteen, so it maps to no SLOT rather than to a
+//     guess about which slot the wearer meant. JOS-104 gave it what it was always missing — a
+//     CELL: `ANY_CELL_LOCATIONS` below routes it to `ANY_CELLS`, and this table still says null,
+//     because "names no equip slot" is exactly what is true about it.
 //   * `Held` is the same story from the other side: the wiki's PRIMARY/SECONDARY split does not
-//     exist in that token, and picking one would be inventing which hand.
+//     exist in that token, and picking one would be inventing which hand. It gets no cell either —
+//     an any-cell would be a lie about where the thing is worn.
 //
-// AND THE DUMP IS WHERE WE LEARNED HOW MANY OF EACH YOU WEAR (JOS-67). `Ear`, `Wrist` and `Fingers`
-// each print TWICE at top level in the committed 295-line dump — three tokens, twice each, nothing
-// else repeating — which is the game itself stating the pair rule that `PLAN_SLOTS` now encodes.
-// The table below is unchanged: a client token names a SLOT, and how many cells that slot has is
-// types.ts's answer, not this table's.
+// AND THE DUMP IS WHERE WE LEARNED HOW MANY OF EACH YOU WEAR (JOS-67, and JOS-104 after it).
+// `Ear`, `Wrist` and `Fingers` each print TWICE at top level in the committed 295-line dump —
+// which is the game itself stating the pair rule that `PLAN_SLOTS` encodes — and so does
+// `Any Slot`, which is the game stating that there are two of those too. The table below is
+// unchanged in kind: a client token names a SLOT (or honestly names none), and how many cells
+// exist is types.ts's answer, not this table's.
 //
 // PURE: types plus a fold, no fs and no Electron, so both tsconfigs see it and the node runner
 // drives it against the real 295-line dump (`tests/plannerInventory.test.mts`).
 
-import { parseItemName, walkEntries, type InventoryDump, type InventoryEntry } from '../outputs/inventory'
+import {
+  parseItemName,
+  PRIMARY_ITEM_SECTION,
+  walkEntries,
+  type InventoryDump,
+  type InventoryEntry
+} from '../outputs/inventory'
 import type { EquipLocationToken } from '../outputs/inventory'
-import { cellsForSlot, type EquipSlot, type PlanSlotId } from './types'
+import { ANY_CELLS, cellsForSlot, type EquipSlot, type PlanSlotId } from './types'
 
 /**
  * The table. Keys are every member of `EQUIP_LOCATIONS`; a `null` value is a token that names no
@@ -88,13 +98,32 @@ export interface PlannerInventory {
   hosts: PlannerInventoryHost[]
 }
 
-/** A row of the dump's Location table that is a top-level EQUIPPED item, with something in it. */
-function equippedSlot(entry: InventoryEntry): EquipSlot | null {
-  // `path` empty ⇒ top level: a `-Slot<n>` child is a bag's contents or a socketed exaltation,
-  // and neither is the thing being worn in that slot.
-  if (entry.path.length > 0 || entry.empty) return null
-  if (entry.place.kind !== 'equip') return null
-  return SLOT_OF_LOCATION[entry.place.token]
+/**
+ * The client tokens that name an ANY CELL rather than an equip slot (JOS-104). A set of one, and a
+ * set rather than an `if` so a second such token — the day the client grows one — is a row added
+ * here beside the table, not a condition buried in a function.
+ */
+export const ANY_CELL_LOCATIONS: ReadonlySet<EquipLocationToken> = new Set<EquipLocationToken>([
+  'Any Slot'
+])
+
+/**
+ * The planner CELLS a row of the dump's Location table could fill, in board order — empty for
+ * anything that is not a top-level equipped item with something in it.
+ *
+ * `path` empty ⇒ top level: a `-Slot<n>` child is a bag's contents or a socketed exaltation, and
+ * neither is the thing being worn in that slot. An `Any Slot` row offers BOTH any-cells and the
+ * caller takes the first free one, exactly as it does for the second ear.
+ */
+function cellsForLocation(entry: InventoryEntry): readonly PlanSlotId[] {
+  // Only the `Location` table says what is WORN (JOS-185): the dump can carry other item-shaped
+  // tables, they all feed held counts, and none of them is the character's body.
+  if (entry.section !== PRIMARY_ITEM_SECTION) return []
+  if (entry.path.length > 0 || entry.empty) return []
+  if (entry.place.kind !== 'equip') return []
+  if (ANY_CELL_LOCATIONS.has(entry.place.token)) return ANY_CELLS
+  const slot: EquipSlot | null = SLOT_OF_LOCATION[entry.place.token]
+  return slot === null ? [] : cellsForSlot(slot)
 }
 
 /**
@@ -107,17 +136,18 @@ function equippedSlot(entry: InventoryEntry): EquipSlot | null {
  * WROTE THEM — the dump still has no column saying which ring is left, and the cells are numbered
  * 1 and 2 rather than named, precisely so the app is not claiming to know.
  *
- * `Any Slot` maps to no cell at all (see the table above), so it still contributes nothing; a
- * THIRD row for a slot the game only gives two of would be dropped, which is the honest answer to
- * a dump we cannot place.
+ * `Any Slot` used to map to no cell at all and contribute nothing, which is the whole of what a
+ * v0.12.0 player reported as "missing 2x any slots" (JOS-104). It now takes `ANY_CELLS` on the
+ * same terms: two rows, two cells, file order, numbered rather than named.
+ *
+ * A THIRD row for a place the game only gives two of is still DROPPED — the honest answer to a
+ * dump we cannot place, and the reason `filled` gates every take rather than only the pairs.
  */
 export function equippedHosts(dump: InventoryDump): InventoryHost[] {
   const out: InventoryHost[] = []
   const filled = new Set<PlanSlotId>()
   for (const entry of walkEntries(dump.items)) {
-    const slot = equippedSlot(entry)
-    if (slot === null) continue
-    const cell = cellsForSlot(slot).find((c) => !filled.has(c))
+    const cell = cellsForLocation(entry).find((c) => !filled.has(c))
     if (cell === undefined) continue
     filled.add(cell)
     const parsed = parseItemName(entry.name)

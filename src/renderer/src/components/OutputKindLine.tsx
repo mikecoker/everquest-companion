@@ -16,6 +16,14 @@
 // settles, and the registry re-reads on every ask, so re-asking on that push is what makes the
 // age fall back to "just now" the moment the player types the command. Nothing is cached here —
 // the whole failure mode this closes is an answer from before the command was typed.
+//
+// AND `onProgress` IS THE SECOND SUCH PUSH SINCE JOS-429, which is what kept the second graduated
+// kind from needing a channel of its own. `inventory:autoReloaded` means something specific — the
+// held counts moved — and an achievements dump moves no count, so re-using it would have been a
+// lie told to every other listener. What both loads DO have in common is that they write
+// `ProgressState` and push it. Listening to both is strictly a widening: a kind whose file was
+// rewritten is now re-asked about on either push, and the registry is one readdir plus one stat
+// with nothing cached, so a redundant ask costs an answer that was already correct.
 
 import { type JSX, useCallback, useEffect, useState } from 'react'
 import type { OutputFileStatus, OutputKindId } from '@shared/outputs/kinds'
@@ -50,10 +58,12 @@ export function useOutputStatus(kind: OutputKindId): OutputStatusState {
     let alive = true
     const live = (): boolean => alive
     read(live)
-    const off = window.eq.onInventoryReload(() => read(live))
+    const offInv = window.eq.onInventoryReload(() => read(live))
+    const offProgress = window.eq.onProgress(() => read(live))
     return () => {
       alive = false
-      off()
+      offInv()
+      offProgress()
     }
   }, [read])
 
@@ -64,6 +74,25 @@ export interface OutputKindLineProps {
   kind: OutputKindId
   /** Override the registry's clause when a surface has something truer to say. Rarely needed. */
   why?: string
+  /**
+   * When this app last READ the dump (JOS-253) — passed THROUGH rather than read from the
+   * registry, and that is the whole design decision here. The registry answers questions about
+   * the FILE (`outputStatus` is one readdir + one stat), and "did we load it" is not one of them:
+   * it is a fact about the consumer's own state, which for inventory is
+   * `ProgressState.inventorySource.readAt` and for the next kind will be something else. A
+   * registry field would have to be invented per consumer and could not be true for two surfaces
+   * at once. `null` ⇒ this surface reads the dump and has none; omitted ⇒ it does not read it.
+   */
+  loadedAt?: number | null
+  /** Draw it understated (JOS-268) — chrome only, passed straight through to `OutputFileLine`. */
+  quiet?: boolean
+  /**
+   * Re-read the dump on demand (JOS-431), passed straight through. The ACT belongs to the caller
+   * for the reason `loadedAt` does: this component knows the FILE's status and nothing about who
+   * consumes it, and "read it again" is a request to that consumer. Omitted ⇒ no affordance, which
+   * is every surface that had none before.
+   */
+  onRefresh?: () => void
   testId?: string
 }
 
@@ -71,7 +100,14 @@ export interface OutputKindLineProps {
  * The line for one `/outputfile` kind. Renders nothing until the first read settles, so a surface
  * never flashes "not yet run" at somebody who ran the command an hour ago.
  */
-export default function OutputKindLine({ kind, why, testId }: OutputKindLineProps): JSX.Element | null {
+export default function OutputKindLine({
+  kind,
+  why,
+  loadedAt,
+  quiet,
+  onRefresh,
+  testId
+}: OutputKindLineProps): JSX.Element | null {
   const { status, ready } = useOutputStatus(kind)
   if (!ready || status === null) return null
   return (
@@ -79,6 +115,10 @@ export default function OutputKindLine({ kind, why, testId }: OutputKindLineProp
       command={status.command}
       why={why ?? status.why}
       updatedAt={status.updatedAt ?? undefined}
+      steps={status.steps}
+      {...(loadedAt === undefined ? {} : { loadedAt })}
+      quiet={quiet}
+      {...(onRefresh === undefined ? {} : { onRefresh })}
       testId={testId}
     />
   )

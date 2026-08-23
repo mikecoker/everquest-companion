@@ -85,6 +85,7 @@ function FightsSection({
         <PoisonSlowRow
           offer={offer}
           existingIds={existingIds}
+          defaultPackId={ctx.defaultPackId}
           onPersist={handlers.onPersist}
           onDismiss={handlers.onDismissOffer}
         />
@@ -210,6 +211,7 @@ export default function SuggestResults({
             <AlertGroupsPanel
               groups={groups}
               existingIds={existingIds}
+              defaultPackId={ctx.defaultPackId}
               onCreate={handlers.onCreateGroup}
             />
           </SectionShell>

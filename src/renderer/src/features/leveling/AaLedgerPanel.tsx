@@ -35,7 +35,7 @@ const AUTO_COLOR = '#7a7a7a'
 function rangeLabel(ranks: readonly number[]): string {
   if (ranks.length === 0) return ''
   const contiguous = ranks[ranks.length - 1] - ranks[0] + 1 === ranks.length
-  if (contiguous && ranks.length > 1) return `${String(ranks[0])}–${String(ranks[ranks.length - 1])}`
+  if (contiguous && ranks.length > 1) return `${String(ranks[0])}-${String(ranks[ranks.length - 1])}`
   return ranks.map(String).join(', ')
 }
 
@@ -191,7 +191,7 @@ function AbilityRow({
           variant="caption"
           sx={{ minWidth: 46, textAlign: 'right', color: paid ? 'text.secondary' : 'text.disabled' }}
         >
-          {paid ? `${String(row.invested)} pts` : '—'}
+          {paid ? `${String(row.invested)} pts` : '-'}
         </Typography>
       </Stack>
       {open && <RankRungs row={row} />}
@@ -224,11 +224,7 @@ export function AaLedgerPanel({
     })
   }
   return (
-    <Paper
-      variant="outlined"
-      sx={{ p: 2, display: 'flex', flexDirection: 'column', maxHeight: '45%' }}
-      data-testid="aa-ledger"
-    >
+    <Paper variant="outlined" sx={{ p: 2 }} data-testid="aa-ledger">
       <Typography variant="subtitle2">
         AA abilities{' '}
         <Typography component="span" variant="caption" color="text.secondary">
@@ -236,12 +232,15 @@ export function AaLedgerPanel({
         </Typography>
       </Typography>
       <Typography variant="caption" color="text.secondary" gutterBottom display="block">
-        every rank the log recorded, grouped into ladders and sorted by points invested — click a
+        every rank the log recorded, grouped into ladders and sorted by points invested - click a
         row for its rungs
       </Typography>
-      {/* The list owns the scroll (the standing list law) so the reconciliation footer below it
-          stays pinned and visible however deep the ledger gets. */}
-      <Box sx={{ flexGrow: 1, minHeight: 0, overflow: 'auto', pr: 0.75 }}>
+      {/* THE LADDER IS AS TALL AS THE ACCOUNT (JOS-289). The list used to own a scroll inside a
+          `maxHeight: 45%` paper so the reconciliation footer stayed pinned; on the real log that
+          is 50 abilities read seven at a time, and the footer was pinned to the top of a porthole.
+          The panel is a LEDGER — you read it down — so it takes its honest height, the footer sits
+          under the last row where a total belongs, and the page carries the whole thing. */}
+      <Box>
         {rows.map((r) => (
           <AbilityRow key={r.name} row={r} max={max} open={open.has(r.name)} onToggle={() => { toggle(r.name) }} />
         ))}
@@ -254,7 +253,7 @@ export function AaLedgerPanel({
       >
         {summary.invested.toLocaleString()} pts across {summary.paidRanks} bought rank
         {summary.paidRanks === 1 ? '' : 's'}
-        {summary.autoRanks > 0 && ` · ${String(summary.autoRanks)} granted`} — the same total as
+        {summary.autoRanks > 0 && ` · ${String(summary.autoRanks)} granted`} - the same total as
         the {allocated.toLocaleString()} AA points spent above
       </Typography>
     </Paper>

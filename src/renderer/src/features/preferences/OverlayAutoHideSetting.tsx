@@ -16,32 +16,40 @@
 // HIDE, NEVER CLOSE, and the copy says so: an auto-hidden overlay keeps its position, its lock
 // state and its drill-down, and the TitleBar menu still lists it as open. That is the difference
 // between a setting and a surprise.
+//
+// "NOT IN EVERQUEST" INCLUDES THIS APP (JOS-199). The caption used to promise the opposite — "this
+// app's own windows don't count" — which a player reported as the bug it was: the meters sat on top
+// of the Companion while they were trying to read it. The OVERLAYS still don't count (clicking one
+// must not make it vanish under your cursor); the main window does.
 
-import { type JSX, useCallback, useEffect, useState } from 'react'
+import { type JSX, useCallback, useState } from 'react'
 import { FormControlLabel, Stack, Switch, Typography } from '@mui/material'
-import { type OverlayAutoHidePrefs, DEFAULT_OVERLAY_AUTO_HIDE } from '@shared/presencePrefs'
+import type { OverlayAutoHidePrefs } from '@shared/presencePrefs'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 
 /**
- * The prefs blob, hydrated once from main and written back on every change — the VoiceSetting
- * pattern exactly. Writes are optimistic locally (a switch must not lag an IPC round trip) and
- * authoritative from main's reply, which is what was actually stored.
+ * The prefs blob, SEEDED from the pane's hydration snapshot and written back on every change.
+ *
+ * IT USED TO MOUNT ON `DEFAULT_OVERLAY_AUTO_HIDE` AND CORRECT ITSELF (JOS-340), which is the
+ * flicker the owner reported — and this card is the worst case of it in the pane, because its two
+ * defaults point OPPOSITE ways: `hideWhenNotRunning` ships `true`, so a user who turned it off
+ * watched it paint ON and drop; `hideWhenUnfocused` ships `false`, so a user who turned it on
+ * watched it paint OFF and rise. The starting value now comes out of the snapshot the gate already
+ * has in hand (./prefsHydration.tsx), synchronously, so there is no first frame to be wrong in.
+ *
+ * Writes are unchanged: optimistic locally (a switch must not lag an IPC round trip) and
+ * authoritative from main's reply, which is what was actually stored — and that reply is what goes
+ * back into the snapshot, so the next mount of this card seeds from the same truth.
  */
 function useOverlayAutoHide(): [OverlayAutoHidePrefs, (patch: Partial<OverlayAutoHidePrefs>) => void] {
-  const [prefs, setPrefs] = useState<OverlayAutoHidePrefs>(DEFAULT_OVERLAY_AUTO_HIDE)
-
-  useEffect(() => {
-    let alive = true
-    void window.eq.getOverlayAutoHide().then((stored) => {
-      if (alive) setPrefs(stored)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
+  const [prefs, setPrefs] = useState<OverlayAutoHidePrefs>(usePrefsSeed().overlayAutoHide)
 
   const update = useCallback((patch: Partial<OverlayAutoHidePrefs>) => {
     setPrefs((cur) => ({ ...cur, ...patch }))
-    void window.eq.setOverlayAutoHide(patch).then(setPrefs)
+    void window.eq.setOverlayAutoHide(patch).then((stored) => {
+      setPrefs(stored)
+      recordPref('overlayAutoHide', stored)
+    })
   }, [])
 
   return [prefs, update]
@@ -65,7 +73,7 @@ export function OverlayAutoHideSetting(): JSX.Element {
         />
         <Typography variant="caption" color="text.secondary">
           {prefs.hideWhenNotRunning
-            ? 'Your open overlays disappear while the game is closed and come back when it starts. They keep their position, size and lock — nothing is closed.'
+            ? 'Your open overlays disappear while the game is closed and come back when it starts. They keep their position, size and lock - nothing is closed.'
             : 'Off. Open overlays stay on screen whether or not the game is running.'}
         </Typography>
       </Stack>
@@ -84,7 +92,7 @@ export function OverlayAutoHideSetting(): JSX.Element {
         />
         <Typography variant="caption" color="text.secondary">
           {prefs.hideWhenUnfocused
-            ? 'Your open overlays disappear while another app is in front. This app’s own windows don’t count — clicking an overlay, or the main window, keeps them up.'
+            ? 'Your open overlays disappear whenever anything else is in front - including this app’s own window, so they’re out of the way while you browse it. Clicking an overlay itself keeps them up.'
             : 'Off. Open overlays stay on screen while you work in other apps.'}
         </Typography>
       </Stack>

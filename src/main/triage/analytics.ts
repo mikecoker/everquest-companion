@@ -27,11 +27,13 @@ import {
   percentileBucket,
   replayMsBucketLabel,
   sessionBucketLabel,
+  stutterMsBucketLabel,
   USAGE_METRICS
 } from '../../shared/telemetryRollup'
 import {
   bucketRange,
   LOG_SIZE_BYTES_EDGES,
+  NEW_BYTES_EDGES,
   TELEMETRY_FUNNEL_STEPS
 } from '../../shared/telemetry'
 import type {
@@ -43,10 +45,19 @@ import type {
   TriageCohortRow,
   TriageFunnelStepRow,
   TriageFunnelView,
+  TriageMixRow,
   TriageStartupRow,
   TriageUpdateRow,
   TriageVersionRow
 } from '../../shared/triage'
+import { buildCoverage } from './coverage'
+// JOS-364's machine class, in its own file for the reason that file's header states — this
+// section pushed this one past the 400-line ceiling, and the answer is a split.
+import { buildMachineClass } from './machineClass'
+import { buildLiveStalls } from './liveStalls'
+// …and the cross-tab over the same reports (JOS-372), in its own file for the same reason.
+import { buildPerfCube } from './perfCube'
+import { buildReleaseHealth } from './releaseHealth'
 import {
   addDays,
   bucketCounts,
@@ -58,8 +69,11 @@ import {
   seriesOf,
   sumOf,
   windowDays,
+  type BugReportRow,
+  type ErrorIssueRow,
   type FunnelRow,
   type InstallRow,
+  type PerfRow,
   type UsageRow
 } from './usageRows'
 
@@ -67,6 +81,22 @@ export interface AnalyticsInput {
   usage: readonly UsageRow[]
   funnels: readonly FunnelRow[]
   installs: readonly InstallRow[]
+  /**
+   * Feedback bug reports per build (JOS-96) — the FOURTH source, and the only one that comes from
+   * the `report` table rather than the counter tables. Optional so every existing caller and test
+   * keeps compiling and reading exactly as it did; absent means the overlay is empty, which is
+   * honest (no reports counted) rather than wrong.
+   */
+  bugReports?: readonly BugReportRow[]
+  /** The stored error issues (JOS-100). Optional for the same reason `bugReports` is: every
+   *  existing caller and every existing fixture compiles unchanged, and a fleet with no error
+   *  rows renders exactly as it did before this feature existed. */
+  issues?: readonly ErrorIssueRow[]
+  /** The perf cube (JOS-372) — the SIXTH source, and the only one carrying more than one
+   *  dimension per row. Optional for the reason the two above are; absent renders as a section
+   *  that says nothing has been reported, which on a stack whose ingest predates the cube is
+   *  exactly the truth. */
+  perf?: readonly PerfRow[]
   windowDays: number
   nowMs: number
 }
@@ -168,6 +198,7 @@ function buildAdoption(usage: readonly UsageRow[], sessions: number): TriageAnal
     voice: mixRows(dimsOf(usage, USAGE_METRICS.setupVoice)),
     cursorRing: mixRows(dimsOf(usage, USAGE_METRICS.setupCursorRing)),
     autoHide: mixRows(dimsOf(usage, USAGE_METRICS.setupAutoHide)),
+    machine: buildMachineClass(usage),
     alertsFired: sumOf(usage, USAGE_METRICS.alertsFired),
     alertsSpoken: sumOf(usage, USAGE_METRICS.alertsSpoken)
   }
@@ -250,9 +281,32 @@ function updateRows(counts: Map<string, number>): TriageUpdateRow[] {
   })
 }
 
+/**
+ * The FLEET-WIDE error mix — every build's counts, added up, keyed by error class alone.
+ *
+ * The `health` dim became `<version>:<field>` in JOS-96, so the version is stripped back off here
+ * and the fields re-summed. That is deliberate rather than lazy: this section answers "what goes
+ * wrong in this app", which is a question about the CODE and wants every build's evidence
+ * together, while `releaseHealth` below answers "which build did it start going wrong in" and
+ * keeps them apart. Two questions, two sections, one set of rows.
+ *
+ * A dim with no colon is a row folded by an ingest Lambda older than that change; it is counted
+ * under its bare field name, which is exactly right for this section — the fleet total does not
+ * care which build a crash came from.
+ */
+function errorClasses(usage: readonly UsageRow[]): TriageMixRow[] {
+  const counts = new Map<string, number>()
+  for (const [dim, n] of dimsOf(usage, USAGE_METRICS.health)) {
+    const cut = dim.lastIndexOf(':')
+    const field = cut > 0 && cut < dim.length - 1 ? dim.slice(cut + 1) : dim
+    counts.set(field, (counts.get(field) ?? 0) + n)
+  }
+  return mixRows(counts)
+}
+
 function buildHealth(usage: readonly UsageRow[]): TriageAnalyticsHealth {
   return {
-    errors: mixRows(dimsOf(usage, USAGE_METRICS.health)),
+    errors: errorClasses(usage),
     reports: sumOf(usage, USAGE_METRICS.healthReports),
     update: updateRows(dimsOf(usage, USAGE_METRICS.update)),
     updateFailures: mixRows(dimsOf(usage, USAGE_METRICS.updateFailure))
@@ -320,7 +374,48 @@ function startupRow(
     // like every other rate here — so the division by 100 belongs at this boundary, once.
     dutyAchieved: dutyMean === null ? null : dutyMean / 100,
     meanEventsReplayed: ratio(events, launches),
-    blocksOver50: dimsOf(usage, USAGE_METRICS.startupBlocksOver50).get(version) ?? 0
+    blocksOver50: dimsOf(usage, USAGE_METRICS.startupBlocksOver50).get(version) ?? 0,
+    ...startupDiscriminators(version, usage)
+  }
+}
+
+/**
+ * THE TWO DISCRIMINATORS, per build (JOS-57 scope addition) — split out so `startupRow` stays
+ * inside the repo's factoring ceilings, and because they share one property the six above do not.
+ *
+ * THEY HAVE THEIR OWN DENOMINATOR. `launches` counts every launch that reported a replay; a
+ * stutter reading needs a fold long enough to hold a distribution and a first-MB reading needs a
+ * log at least that big, so both populations are SUBSETS. Dividing the late-tick sum by `launches`
+ * would silently deflate it toward zero on exactly the builds where short launches are common —
+ * so the divisor is the histogram's own total, which counts one row per launch that measured one.
+ */
+function startupDiscriminators(
+  version: string,
+  usage: readonly UsageRow[]
+): Pick<
+  TriageStartupRow,
+  | 'p50StutterLabel'
+  | 'p95StutterLabel'
+  | 'stutterLaunches'
+  | 'stutterLatePct'
+  | 'p50FirstMbLabel'
+  | 'p95FirstMbLabel'
+> {
+  const p50 = startupHistogram(dimsOf(usage, USAGE_METRICS.startupStutterP50), version)
+  const p95 = startupHistogram(dimsOf(usage, USAGE_METRICS.startupStutterP95), version)
+  const firstMb = startupHistogram(dimsOf(usage, USAGE_METRICS.startupFirstMbMs), version)
+  const measured = p95.reduce((sum, n) => sum + n, 0)
+  const late = ratio(dimsOf(usage, USAGE_METRICS.startupStutterLatePct).get(version) ?? 0, measured)
+  return {
+    p50StutterLabel: bucketLabelAt(p50, 50, stutterMsBucketLabel),
+    p95StutterLabel: bucketLabelAt(p95, 95, stutterMsBucketLabel),
+    stutterLaunches: measured,
+    // Whole percents on the wire, a fraction in this shape — the same boundary `dutyAchieved` keeps.
+    stutterLatePct: late === null ? null : late / 100,
+    // The first-MB histogram borrows the block ladder (see USAGE_METRICS.startupFirstMbMs), so it
+    // borrows its label function too rather than growing a second copy of the same ranges.
+    p50FirstMbLabel: bucketLabelAt(firstMb, 50, blockMsBucketLabel),
+    p95FirstMbLabel: bucketLabelAt(firstMb, 95, blockMsBucketLabel)
   }
 }
 
@@ -334,15 +429,32 @@ function buildStartup(usage: readonly UsageRow[]): TriageAnalyticsStartup {
     logSizes: mixRows(dimsOf(usage, USAGE_METRICS.startupLogSize)).map((r) => ({
       id: logSizeBucketLabel(Number(r.id)),
       n: r.n
+    })),
+    newBytes: mixRows(dimsOf(usage, USAGE_METRICS.startupNewBytes)).map((r) => ({
+      id: byteBucketLabel(NEW_BYTES_EDGES, Number(r.id)),
+      n: r.n
     }))
   }
 }
 
 /** A `logSizeBucket` index as the range it means — the same edges `setupLogSize` uses. */
 function logSizeBucketLabel(i: number): string {
-  const { lo, hi } = bucketRange(LOG_SIZE_BYTES_EDGES, Number.isInteger(i) ? i : 0)
-  const mb = (bytes: number): string => `${String(Math.round(bytes / 1_048_576))} MB`
-  return hi === null ? `≥ ${mb(lo)}` : i === 0 ? `< ${mb(hi)}` : `${mb(lo)}–${mb(hi)}`
+  return byteBucketLabel(LOG_SIZE_BYTES_EDGES, i)
+}
+
+/**
+ * A byte-bucket index as the range it means. ONE renderer for both byte ladders (JOS-57's scope
+ * addition brought the second), so a size and a delta can never be printed in two different
+ * vocabularies — and it prints KB below a megabyte, because the new-bytes ladder starts at 64 KB
+ * and `0 MB-0 MB` says nothing at all.
+ */
+function byteBucketLabel(edges: readonly number[], i: number): string {
+  const { lo, hi } = bucketRange(edges, Number.isInteger(i) ? i : 0)
+  const size = (bytes: number): string =>
+    bytes >= 1_048_576
+      ? `${String(Math.round(bytes / 1_048_576))} MB`
+      : `${String(Math.round(bytes / 1024))} KB`
+  return hi === null ? `≥ ${size(lo)}` : i === 0 ? `< ${size(hi)}` : `${size(lo)}-${size(hi)}`
 }
 
 // ---- versions ------------------------------------------------------------------------
@@ -460,6 +572,22 @@ export function buildAnalytics(input: AnalyticsInput): TriageAnalyticsData {
     funnels: buildFunnels(input.funnels, input.usage),
     health: buildHealth(input.usage),
     startup: buildStartup(input.usage),
+    // …and the same question asked of the hours AFTER the launch (JOS-367): how late our own two
+    // clocks ran, whether they went late together (the machine-or-us verdict), what our reads of
+    // the log cost, and what was switched on while all of it was measured. Its own file, like the
+    // machine class, because this one is at the line ceiling.
+    live: buildLiveStalls(input.usage),
+    // …and WHERE those stalls landed (JOS-372). The section above counts them fleet-wide; this
+    // one crosses them with the three facts a counter table cannot cross them with.
+    perf: buildPerfCube(input.perf ?? []),
+    // Beside Health and Startup, and reading the same rows from the other end: those two ask what
+    // goes wrong and how launches went; this one asks WHICH BUILD, over time, against how many
+    // people were on it. Its own file (./releaseHealth.ts) — this one is at the line ceiling.
+    releaseHealth: buildReleaseHealth(input.usage, input.bugReports ?? [], days, input.issues ?? []),
+    // …and the section that describes the LIMITS of all of the above: who turned it off, and how
+    // much of the fleet these counters can see at all (JOS-109). Its own file for the same reason
+    // release health has one, and because the argument it has to carry is longer than its code.
+    coverage: buildCoverage(input.usage, input.installs),
     versions: buildVersions(input.usage, input.installs),
     retention: buildRetention(input.installs, ref)
   }

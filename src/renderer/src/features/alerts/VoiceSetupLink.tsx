@@ -14,6 +14,11 @@
 // failure (a Windows voice speaks meanwhile), so it is secondary text; 'no-voices' is genuine
 // silence and is the one case worth a warning colour.
 //
+// …AND SO ARE THE TWO ENGINE FAULTS (JOS-247). A Windows voice speaks through those too, so by the
+// first rule they would be secondary text — but the difference is whose fault it is. Not-downloaded
+// is a step the user has not taken; a downloaded engine that will not run is broken, on their
+// machine, with no step of theirs left to take. That earns the same colour silence does.
+//
 // The link degrades to plain text when no router was supplied (`onOpen` absent — see AlertsView's
 // optional prop): the fact stays visible, only the shortcut goes.
 
@@ -41,7 +46,7 @@ export default function VoiceSetupLink({
   return (
     <Typography
       variant="caption"
-      color={gap === 'no-voices' ? 'warning.main' : 'text.secondary'}
+      color={gap === 'engine-not-installed' ? 'text.secondary' : 'warning.main'}
       data-testid={testId ?? 'voice-setup-note'}
       sx={{ display: 'block', lineHeight: 1.4 }}
     >

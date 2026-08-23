@@ -4,6 +4,7 @@
 
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
+import { normalizeEarlyWarnSec } from '../../shared/earlyWarning'
 import { alertsModule, eventFeedModule, registry } from '../pipeline'
 import {
   deleteAlert,
@@ -30,10 +31,26 @@ function sanitizeCooldownScope(def: AlertDef): AlertDef {
   return clean
 }
 
+/**
+ * Re-validate the early-warning offset (JOS-216) — the same rule, for the same reason: the number
+ * reaches a scheduler, so main states the legal range itself rather than trusting the dialog's own
+ * bounds. Out of range or not a number ⇒ the key is DROPPED, which reads as "no early warning" and
+ * is the safe answer; the rest of the def still saves.
+ */
+function sanitizeEarlyWarn(def: AlertDef): AlertDef {
+  if (def.earlyWarnSec === undefined) return def
+  const sec = normalizeEarlyWarnSec(def.earlyWarnSec)
+  if (sec === def.earlyWarnSec) return def
+  const clean = { ...def }
+  if (sec === undefined) delete clean.earlyWarnSec
+  else clean.earlyWarnSec = sec
+  return clean
+}
+
 export function registerAlertsIpc(): void {
   ipcMain.handle(IPC.listAlerts, () => getAlerts())
   ipcMain.handle(IPC.saveAlert, (_e, def: AlertDef) => {
-    const list = saveAlert(sanitizeCooldownScope(def))
+    const list = saveAlert(sanitizeEarlyWarn(sanitizeCooldownScope(def)))
     alertsModule.setDefs(list) // keep the live evaluator in sync
     return list
   })

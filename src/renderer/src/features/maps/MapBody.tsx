@@ -2,7 +2,8 @@
 //
 // Split out of MapsView.tsx, which owns WHICH zone is open and nothing about how it is drawn.
 // Everything here is the drawing: the positioned host the viewport measures, the canvas, the
-// label layer, the two markers, and the sidebar column beside them.
+// label layer, the three marks — the search flash, the selection ring and the typed-/loc crosshair
+// — and the sidebar column beside them.
 //
 // WHEN THE SIDEBAR IS OFF IT IS NOT RENDERED AT ALL, so the surface is the row's only flex child
 // and takes the full width. That is the whole anti-flicker design: no zero-width box, no width
@@ -16,28 +17,35 @@
 // this row can be in, including the one where no map is drawn and there is no surface to float
 // over.
 //
-// THE SIDEBAR RENDERS WITHOUT A MAP. Its "Other zones" section searches every installed map, so
-// "which zone is Ambassador D`Vinn in?" is answerable from the state where nothing is open —
-// which is exactly the state that question gets asked in.
+// THE SIDEBAR RENDERS WITHOUT A MAP. Its "Other zones" section searches every installed map AND
+// the whole wiki bestiary (crossZone.ts), so "which zone is Ambassador D`Vinn in?" is answerable
+// from the state where nothing is open — which is exactly the state that question gets asked in.
 
 import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode, type RefObject } from 'react'
 import { Box, IconButton, Stack } from '@mui/material'
 import ViewSidebarIcon from '@mui/icons-material/ViewSidebar'
-import type { MapData, MapSearchHit, ZoneShort } from '@shared/maps'
+import type { MapData, ZoneShort } from '@shared/maps'
+import type { JumpTarget } from './crossZone'
 import { MapCanvas } from './MapCanvas'
 import { MapPointsLayer, labelPosition } from './MapPointsLayer'
 import { MapMobPins } from './MapMobPins'
+import { MapLocMarker } from './MapLocMarker'
 import MapMobPane from './MapMobPane'
 import { paneOverlay, type PaneOverlay, type ZonePaneState } from './useMapPane'
-import type { LayerMask } from './mapGeometry'
+import { mapFromLoc, type EqLoc, type LayerMask } from './mapGeometry'
 import { bandRange, type FloorBand } from './floorSlice'
 import type { MapViewport } from './useMapViewport'
 import { Tooltip } from '../../lib/Tooltip'
 
 /** How long the jump-to marker stays on screen. Long enough to find, short enough to forget. */
 const MARKER_MS = 2600
-/** Scale bump when jumping from a fitted view — a fitted zone puts a POI at a couple of pixels. */
-const JUMP_ZOOM = 6
+/**
+ * Scale bump when jumping from a fitted view — a fitted zone puts a POI at a couple of pixels.
+ *
+ * EXPORTED so the `/loc` marker jumps with exactly the same feel (useLocMarker.ts). Two constants
+ * for one gesture is how two gestures start behaving differently for no stated reason.
+ */
+export const JUMP_ZOOM = 6
 
 /** The transient "here it is" pip a cross-zone hit leaves behind. */
 export interface Marker {
@@ -53,17 +61,22 @@ export interface Marker {
  * be fetched and the pane re-measured first, so the hit is PARKED and the jump fires from an
  * effect once `data.zone` matches and the host has a real size. Jumping into a zero-size pane
  * would clamp against a fit scale of 1 and land nowhere near the point.
+ *
+ * A TARGET MAY CARRY NO POSITION (JOS-135). The bestiary answers "which zone" far more often than
+ * "where in it" — a wiki page may state no coordinate, or state one while naming several zones —
+ * so a jump with `at: null` changes the map and stops there rather than flashing a mark at a
+ * position nothing stated. The zone change is still the answer the user asked for.
  */
 export function useSearchJump(args: {
   vp: MapViewport
   /** The zone actually ON SCREEN (`data.zone`), never the one being fetched. */
   zone: ZoneShort | undefined
   pick: (zone: ZoneShort) => void
-}): { marker: Marker | null; onJump: (hit: MapSearchHit) => void } {
+}): { marker: Marker | null; onJump: (to: JumpTarget) => void } {
   const { vp, zone, pick } = args
   const { centerOn, zoomedIn, view, size } = vp
   const [marker, setMarker] = useState<Marker | null>(null)
-  const [pending, setPending] = useState<MapSearchHit | null>(null)
+  const [pending, setPending] = useState<JumpTarget | null>(null)
 
   const jump = useCallback(
     (x: number, y: number) => {
@@ -76,19 +89,21 @@ export function useSearchJump(args: {
   )
 
   const onJump = useCallback(
-    (hit: MapSearchHit) => {
-      if (hit.zone === zone) jump(hit.point.x, hit.point.y)
-      else {
-        pick(hit.zone)
-        setPending(hit)
+    (to: JumpTarget) => {
+      if (to.zone === zone) {
+        if (to.at) jump(to.at.x, to.at.y)
+        return
       }
+      pick(to.zone)
+      // Nothing to park when the row states no position: the zone change IS the whole jump.
+      setPending(to.at ? to : null)
     },
     [zone, jump, pick]
   )
 
   useEffect(() => {
-    if (pending == null || zone !== pending.zone || size.w <= 0) return
-    jump(pending.point.x, pending.point.y)
+    if (pending?.at == null || zone !== pending.zone || size.w <= 0) return
+    jump(pending.at.x, pending.at.y)
     setPending(null)
   }, [pending, zone, size.w, jump])
 
@@ -147,6 +162,7 @@ function MapSurface({
   bands,
   floor,
   marker,
+  locMarker,
   pane
 }: {
   data: MapData
@@ -156,6 +172,8 @@ function MapSurface({
   bands: readonly FloorBand[]
   floor: number | null
   marker: Marker | null
+  /** The `/loc` the user typed for THIS zone, still in the game's own axes (JOS-98). */
+  locMarker: EqLoc | null
   /** The sidebar's contribution, or null when it is closed and draws nothing. */
   pane: PaneOverlay | null
 }): JSX.Element {
@@ -191,6 +209,9 @@ function MapSurface({
       {pane != null && <MapMobPins pins={pane.pins} vp={vp} selectedId={pane.selectedId} />}
       {ringAt != null && <MarkerRing at={ringAt} size={26} testId="maps-pane-marker" />}
       {at != null && <MarkerRing at={at} size={22} testId="maps-marker" />}
+      {/* THE ONE SEAM, AGAIN: the typed reading reaches the screen through `mapFromLoc` and then
+          the same `project` every other mark uses. Nothing here knows which way north is. */}
+      {locMarker != null && <MapLocMarker at={mapFromLoc(locMarker)} loc={locMarker} vp={vp} />}
     </Box>
   )
 }
@@ -233,12 +254,15 @@ export interface MapBodyProps {
   /** The LONG zone name the catalog was joined on, for the sidebar's own honesty. */
   zoneName: string | null
   marker: Marker | null
+  /** This zone's typed-/loc marker, or null. Persistent, unlike `marker` above it. */
+  locMarker: EqLoc | null
   /** A cross-zone hit was clicked — `useSearchJump`'s handler, which changes zone first. */
-  onJump: (hit: MapSearchHit) => void
+  onJump: (to: JumpTarget) => void
 }
 
 export default function MapBody(props: MapBodyProps): JSX.Element {
   const { data, empty, vp, hostRef, layers, bands, floor, pane, zoneName, marker, onJump } = props
+  const { locMarker } = props
   return (
     <Stack direction="row" spacing={1.5} sx={{ position: 'relative', flexGrow: 1, minHeight: 0 }}>
       {data != null ? (
@@ -250,6 +274,7 @@ export default function MapBody(props: MapBodyProps): JSX.Element {
           bands={bands}
           floor={floor}
           marker={marker}
+          locMarker={locMarker}
           pane={paneOverlay(pane)}
         />
       ) : (

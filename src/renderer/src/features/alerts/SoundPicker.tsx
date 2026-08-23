@@ -13,6 +13,7 @@ import type { JSX } from 'react'
 import { MenuItem, Select, Stack } from '@mui/material'
 import type { SoundPack } from '@shared/types'
 import { USER_SOUNDS_PACK_ID } from '@shared/userSounds'
+import { preferredPack } from '@shared/soundPacks'
 import { DEFAULT_PACK_ID } from './suggestions'
 
 /**
@@ -27,13 +28,17 @@ export function packLabel(p: SoundPack): string {
 }
 
 /**
- * The pack a picker falls back to when the alert's own pack is missing (uninstalled) or
- * a brand-new alert has no pack yet: the SHIPPED default (Alan Rickman), never
- * "whatever happens to sort first". Only if that pack somehow isn't installed do we
- * take the first available one.
+ * The pack a picker falls back to when the alert's own pack is missing (uninstalled) or a
+ * brand-new alert has no pack yet — never "whatever happens to sort first".
+ *
+ * IT IS THE USER'S DEFAULT FIRST NOW (JOS-273). It used to be the shipped pack, full stop, which
+ * is half of why deleting that pack accomplished nothing: every picker went straight back to it.
+ * `preferred` is the stored default-pack preference (useAlertsStore feeds it down); the shipped
+ * pack is what an install with no preference means, and the first installed pack is the last
+ * resort for a machine that has neither.
  */
-export function fallbackPack(packs: SoundPack[]): SoundPack | undefined {
-  return packs.find((p) => p.id === DEFAULT_PACK_ID) ?? packs[0]
+export function fallbackPack(packs: SoundPack[], preferred?: string): SoundPack | undefined {
+  return preferredPack(packs, preferred, DEFAULT_PACK_ID) ?? undefined
 }
 
 /** First selectable soundId in a pack ('' when packs haven't loaded yet). */
@@ -46,14 +51,17 @@ export default function SoundPicker({
   packs,
   packId,
   soundId,
+  defaultPackId,
   onChange
 }: {
   packs: SoundPack[]
   packId: string
   soundId: string
+  /** The user's default pack (JOS-273) — what an unresolvable pack falls back to. */
+  defaultPackId?: string
   onChange: (packId: string, soundId: string) => void
 }): JSX.Element {
-  const pack = packs.find((p) => p.id === packId) ?? fallbackPack(packs)
+  const pack = packs.find((p) => p.id === packId) ?? fallbackPack(packs, defaultPackId)
   const soundIds = pack ? Object.keys(pack.sounds) : []
   return (
     <Stack direction="row" spacing={1}>

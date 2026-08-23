@@ -42,14 +42,17 @@ import {
   LOG_WINDOW_CHOICES,
   MAX_DESCRIPTION,
   MAX_ENV_FIELD,
+  MAX_INVENTORY_LINES,
   MAX_SLICE_LINES,
   MAX_UPLOAD_BYTES,
   MIN_DESCRIPTION,
   validateDraft,
+  validateInventoryMeta,
   validateLogMeta,
   validateSubmit,
   type FeedbackDraft,
   type FeedbackEnv,
+  type InventoryDumpMeta,
   type LogSliceMeta,
   type SubmitRequest
 } from '../src/shared/feedback'
@@ -241,6 +244,64 @@ test('a slice cannot end before it starts, and its digest is 64 hex', () => {
 })
 
 // ---------------------------------------------------------------------------------------
+// validateInventoryMeta — the SECOND attachment's metadata (JOS-296)
+// ---------------------------------------------------------------------------------------
+//
+// Same job as `validateLogMeta` and therefore the same test shape: the bounds ARE the presign's
+// cost model, so each one is pinned at the limit, one past it and one under it.
+
+const invMeta = (over: Partial<InventoryDumpMeta> = {}): unknown => ({
+  bytes: 2_048,
+  lines: 295,
+  updatedAt: 1_754_000_000_000,
+  sha256: 'b'.repeat(64),
+  ...over
+})
+
+test('inventory metadata is bounded exactly where the presign policy is', () => {
+  assert.equal(validateInventoryMeta(invMeta()).ok, true)
+  // THE SIZE CAP, and it is the SAME constant the slice uses — one budget for one upload leg.
+  assert.equal(validateInventoryMeta(invMeta({ bytes: 1 })).ok, true)
+  assert.equal(validateInventoryMeta(invMeta({ bytes: MAX_UPLOAD_BYTES })).ok, true)
+  const tooBig = validateInventoryMeta(invMeta({ bytes: MAX_UPLOAD_BYTES + 1 }))
+  assert.equal(tooBig.ok, false)
+  assert.equal(!tooBig.ok && tooBig.field, 'inventory.bytes')
+  // 0 bytes is not an upload: `content-length-range` starts at 1, and an empty dump is sent as
+  // `inventory: null` rather than as a zero-row attachment.
+  assert.equal(validateInventoryMeta(invMeta({ bytes: 0 })).ok, false)
+  assert.equal(validateInventoryMeta(invMeta({ bytes: 2048.5 })).ok, false)
+
+  assert.equal(validateInventoryMeta(invMeta({ lines: 1 })).ok, true)
+  assert.equal(validateInventoryMeta(invMeta({ lines: MAX_INVENTORY_LINES })).ok, true)
+  assert.equal(validateInventoryMeta(invMeta({ lines: MAX_INVENTORY_LINES + 1 })).ok, false)
+  assert.equal(validateInventoryMeta(invMeta({ lines: 0 })).ok, false)
+})
+
+test('the dump freshness stamp is a timestamp, and its digest is 64 hex', () => {
+  // `updatedAt` is the file's mtime as the CLIENT's filesystem reports it. It is bounded like
+  // any epoch stamp and deliberately NOT compared to a server clock — a machine with a wrong
+  // clock is a machine whose bug report we still want.
+  assert.equal(validateInventoryMeta(invMeta({ updatedAt: 0 })).ok, true)
+  const negative = validateInventoryMeta(invMeta({ updatedAt: -1 }))
+  assert.equal(negative.ok, false)
+  assert.equal(!negative.ok && negative.field, 'inventory.updatedAt')
+  assert.equal(validateInventoryMeta(invMeta({ updatedAt: 1.5 })).ok, false)
+  assert.equal(validateInventoryMeta(invMeta({ updatedAt: '2026-08-13' as unknown as number })).ok, false)
+
+  for (const bad of ['b'.repeat(63), 'b'.repeat(65), `${'b'.repeat(63)}z`, '', 12]) {
+    const res = validateInventoryMeta(invMeta({ sha256: bad as string }))
+    assert.equal(res.ok, false, `sha256 ${String(bad)} must be rejected`)
+    assert.equal(!res.ok && res.field, 'inventory.sha256')
+  }
+
+  for (const bad of [null, 'a dump', 42, []]) {
+    const res = validateInventoryMeta(bad)
+    assert.equal(res.ok, false)
+    assert.equal(!res.ok && res.field, 'inventory')
+  }
+})
+
+// ---------------------------------------------------------------------------------------
 // validateSubmit — the whole request, as the Lambda sees it
 // ---------------------------------------------------------------------------------------
 
@@ -268,6 +329,7 @@ const submit = (over: Record<string, unknown> = {}): unknown => ({
   clientReportId: UUID_B,
   clientTs: 1_754_000_000_000,
   log: meta(),
+  inventory: invMeta(),
   ...over
 })
 
@@ -282,6 +344,79 @@ test('validateSubmit accepts a real request, with and without an attachment', ()
   // an absent key is the same statement as an explicit null
   const absent = validateSubmit(submit({ log: undefined }))
   assert.equal(absent.ok && absent.value.log, null)
+})
+
+// ---------------------------------------------------------------------------------------
+// JOS-296 — the SECOND attachment on the whole request. Four properties, and the second and
+// third are what make "additive" a fact rather than an intention.
+// ---------------------------------------------------------------------------------------
+
+/** The accepted request. Asserts acceptance itself, so callers below read the VALUE and never
+ *  re-branch on `ok` — which is what keeps a four-case table a table. */
+function accepted(over: Record<string, unknown>): SubmitRequest {
+  const res = validateSubmit(submit(over))
+  assert.equal(res.ok, true, `expected acceptance of ${JSON.stringify(Object.keys(over))}`)
+  if (!res.ok) throw new Error('unreachable')
+  return res.value
+}
+
+test('validateSubmit accepts BOTH attachments, either one alone, or neither', () => {
+  const both = accepted({})
+  assert.equal(both.log?.lines, 4_812)
+  assert.equal(both.inventory?.lines, 295)
+  assert.equal(both.inventory?.updatedAt, 1_754_000_000_000)
+
+  const invOnly = accepted({ log: null })
+  assert.equal(invOnly.log, null)
+  assert.equal(invOnly.inventory?.bytes, 2_048)
+
+  const logOnly = accepted({ inventory: null })
+  assert.equal(logOnly.inventory, null)
+  assert.equal(logOnly.log?.bytes, 131_072)
+
+  const neither = accepted({ log: null, inventory: null })
+  assert.equal(neither.log, null)
+  assert.equal(neither.inventory, null)
+})
+
+test('an OLD client that never heard of the dump is accepted, not 400d — the field is additive', () => {
+  // The whole reason FEEDBACK_API_VERSION stays 1: `v` is a hard gate, so a bump would turn
+  // every installed client's report into a 400 the moment the new server deployed. An absent
+  // `inventory` must therefore read exactly as "attached no dump".
+  const absent = accepted({ inventory: undefined })
+  assert.equal(absent.inventory, null)
+  assert.equal(absent.v, FEEDBACK_API_VERSION)
+})
+
+test('unknown fields are STILL dropped, dump or no dump — the validator constructs, never copies', () => {
+  // The retired `title`/`contact` law, re-asserted at the whole-request level now that a second
+  // optional attachment exists: a client sending something the contract does not name gets a
+  // value built out of the fields it DOES name, and nothing rides along.
+  const res = validateSubmit(
+    submit({
+      title: 'gear counts are wrong',
+      contact: 'me@example.com',
+      inventoryText: 'Location\tName\tID\tCount\tSlots',
+      attachments: ['log', 'inventory'],
+      v: FEEDBACK_API_VERSION
+    })
+  )
+  assert.equal(res.ok, true)
+  const value = res.ok ? (res.value as unknown as Record<string, unknown>) : {}
+  for (const stray of ['title', 'contact', 'inventoryText', 'attachments']) {
+    assert.equal(stray in value, false, `${stray} must not survive validation`)
+  }
+  assert.deepEqual(Object.keys(value).sort(), [
+    'achievements',
+    'clientReportId',
+    'clientTs',
+    'draft',
+    'env',
+    'installId',
+    'inventory',
+    'log',
+    'v'
+  ])
 })
 
 test('the version is a hard gate — an unknown wire version never reaches the model', () => {
@@ -359,6 +494,11 @@ test('a nested failure names the nested field, so the dialog can focus it', () =
   assert.equal(!res.ok && res.field, 'description')
   const logRes = validateSubmit(submit({ log: meta({ bytes: MAX_UPLOAD_BYTES + 1 }) }))
   assert.equal(!logRes.ok && logRes.field, 'log.bytes')
+  // …and a malformed DUMP names ITS field, so a failure is never blamed on the wrong attachment.
+  const invRes = validateSubmit(submit({ inventory: invMeta({ lines: MAX_INVENTORY_LINES + 1 }) }))
+  assert.equal(!invRes.ok && invRes.field, 'inventory.lines')
+  const notAnObject = validateSubmit(submit({ inventory: 'yes please' }))
+  assert.equal(!notAnObject.ok && notAnObject.field, 'inventory')
 })
 
 test('validateSubmit returns a value that round-trips through JSON unchanged', () => {

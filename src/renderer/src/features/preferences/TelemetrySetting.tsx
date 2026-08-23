@@ -22,32 +22,51 @@
 import { type JSX, useCallback, useEffect, useState } from 'react'
 import { Box, Button, FormControlLabel, Stack, Switch, Typography } from '@mui/material'
 import type { TelemetryPayloadView } from '@shared/telemetry'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 
 /** Poll cadence while the pane is open — the buffer grows from main, which has no push channel
  *  for it (and should not gain one for a settings pane nobody watches for minutes). */
 const REFRESH_MS = 4_000
 
-function usePayload(): [TelemetryPayloadView | null, () => void] {
-  const [payload, setPayload] = useState<TelemetryPayloadView | null>(null)
+/**
+ * The payload, SEEDED from the pane's hydration snapshot and then polled.
+ *
+ * IT USED TO START `null` AND RENDER "Loading…" (JOS-340) — a per-control skeleton, which is the
+ * shape the gate exists to replace: thirteen cards each announcing their own wait is worse than
+ * one pane that simply arrives. Worse here than elsewhere, because the thing behind the skeleton
+ * is a PRIVACY switch, and "Loading…" where a user expects to read whether they are opted out is
+ * the one place in this app that should never hesitate.
+ *
+ * THE POLL STAYS. The buffer grows from main, which has no push channel for it (and should not
+ * gain one for a settings pane nobody watches for minutes), so the seed is a starting point and
+ * the interval keeps it honest. Every read it takes goes back into the snapshot, so re-opening
+ * the section starts from the newest counts rather than from the ones the pane first loaded.
+ */
+function usePayload(): [TelemetryPayloadView, () => void] {
+  const [payload, setPayload] = useState<TelemetryPayloadView>(usePrefsSeed().telemetry)
+
+  const adopt = useCallback((p: TelemetryPayloadView): void => {
+    setPayload(p)
+    recordPref('telemetry', p)
+  }, [])
 
   const refresh = useCallback((): void => {
-    void window.eq.getTelemetryPayload().then(setPayload)
-  }, [])
+    void window.eq.getTelemetryPayload().then(adopt)
+  }, [adopt])
 
   useEffect(() => {
     let alive = true
     const read = (): void => {
       void window.eq.getTelemetryPayload().then((p) => {
-        if (alive) setPayload(p)
+        if (alive) adopt(p)
       })
     }
-    read()
     const timer = setInterval(read, REFRESH_MS)
     return () => {
       alive = false
       clearInterval(timer)
     }
-  }, [])
+  }, [adopt])
 
   return [payload, refresh]
 }
@@ -111,7 +130,7 @@ function LastSentPanel({ payload }: { payload: TelemetryPayloadView }): JSX.Elem
       <Typography variant="caption" color="text.secondary" data-testid="telemetry-last-batch-empty">
         {payload.endpointConfigured
           ? 'Nothing has been sent yet.'
-          : 'Nothing, and nothing ever will be from this build — it has no analytics endpoint compiled in, and there is no code in it that could send one. This panel exists so that when that changes, you can read exactly what left.'}
+          : 'Nothing, and nothing ever will be from this build - it has no analytics endpoint compiled in, and there is no code in it that could send one. This panel exists so that when that changes, you can read exactly what left.'}
       </Typography>
     </Stack>
   )
@@ -136,7 +155,7 @@ function IdentityRow({
         </Button>
       </Stack>
       <Typography variant="caption" color="text.secondary">
-        A random id made on your machine, and deliberately not the one a bug report uses — the
+        A random id made on your machine, and deliberately not the one a bug report uses - the
         two can’t be joined. Replacing it also throws away everything buffered, and looks like a
         brand-new install from then on.
       </Typography>
@@ -157,8 +176,6 @@ export function TelemetrySetting(): JSX.Element {
     void window.eq.rotateAnalyticsId().then(refresh)
   }, [refresh])
 
-  if (payload === null) return <Typography variant="body2">Loading…</Typography>
-
   const enabled = payload.prefs.enabled
   return (
     <Stack spacing={2} data-testid="pref-telemetry">
@@ -178,8 +195,8 @@ export function TelemetrySetting(): JSX.Element {
         />
         <Typography variant="caption" color="text.secondary">
           {enabled
-            ? 'Counts only, from a fixed list of events — never your character names, zones, chat, searches or log lines. There is no field in what’s sent that could hold them.'
-            : 'Off. Nothing is collected. Everything that had been buffered — and the random id itself — was thrown away the moment you switched it off; turning it back on starts from empty with a new one.'}
+            ? 'Counts only, from a fixed list of events - never your character names, zones, chat, searches or log lines. There is no field in what’s sent that could hold them.'
+            : 'Off. Nothing is collected. Everything that had been buffered (and the random id itself) was thrown away the moment you switched it off; turning it back on starts from empty with a new one.'}
         </Typography>
       </Stack>
 

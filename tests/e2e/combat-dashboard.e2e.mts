@@ -72,19 +72,21 @@ import {
 import { mainWindow } from './appWindow.mjs'
 import { launchOnFixture } from './logFixture.mjs'
 import type { FixtureLog } from './logFixture.mjs'
-import { meterRows } from './drill.mjs'
+import { meterRows, stepDrillAcrossFights, stepDrillRoundTrip } from './drill.mjs'
 import {
   clickScope,
   clickView,
+  stepChartLegendToggles,
   stepFrozenList,
   stepHealingDimension,
   stepMeterDrill,
   stepMeterScope,
-  stepMultiAttackPanel,
+  stepAbilityStats,
   stepPetAnswersWhoLeads,
   stepPetNeverAsked,
   stepScriptedPull
 } from './combatSteps.mjs'
+import { stepPetPreferenceMovesTheYouLine } from './petPrefSteps.mjs'
 
 // ── the run, one step per numbered section ─────────────────────────────────────────────
 //
@@ -551,14 +553,24 @@ async function main(): Promise<void> {
     snap = await stepCombatLogAndRegression(page, log)
     await stepHealingDimension(page)
     await stepMeterDrill(page)
-    await stepMultiAttackPanel(page)
+    await stepAbilityStats(page)
+    await stepDrillRoundTrip(page)
     await stepPickAFight(page, snap)
+    // 10a-bis. THE DRILL SURVIVES A CHANGE OF FIGHT (JOS-240). After stepPickAFight, because it
+    //          needs the picker proven to work and two finalized fights to move between; before
+    //          the live-pull steps, because a fight opening under it would move the head row.
+    await stepDrillAcrossFights(page)
     await stepFrozenList(page, log)
     await stepSearch(page, snap)
     await stepResponsive(app, page)
     // 13. HOVER on the real charts (crosshair + shared tooltip + the drag seam) — see the
     //     harness, which owns the steps: this file is at its factoring ceiling.
     await checkChartHover(page)
+    // 13a. THE DPS LEGEND IS A CONTROL (JOS-264) — straight after the hover, because it needs the
+    //      same thing that step does (a selection whose curve is actually drawn) and it hands the
+    //      chart back exactly as it found it. Before the live-pull steps: they change what the
+    //      curve is drawing, and this asserts the DRAWING.
+    await stepChartLegendToggles(page)
     // 14. THE PET NOBODY ASKS ABOUT (JOS-49) — an unbound pet is invisible and silent, and one
     //     `/pet attack` puts it on the meter. LAST, because it scripts a pull and leaves it OPEN
     //     so the assertions read a live meter. Nothing below it may assume a quiet log.
@@ -567,6 +579,10 @@ async function main(): Promise<void> {
     //     never ordered, forward only, and retires the pet it replaced. Straight after 14 because
     //     it inherits that step's bound pet: the succession is half of what it proves.
     await stepPetAnswersWhoLeads(page, log)
+    // 16. …AND THE LINE ABOVE THE ROWS ANSWERS THE PET PREFERENCE (JOS-170). It inherits 14 and 15
+    //     because it needs exactly what they leave: a live fight carrying YOUR damage and a bound
+    //     pet's, so the folded and unfolded You totals are two different numbers.
+    await stepPetPreferenceMovesTheYouLine(page)
 
     check('no renderer console errors', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))
 

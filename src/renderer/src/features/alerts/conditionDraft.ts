@@ -76,13 +76,48 @@ export function draftFromPrimitive(t: AlertTriggerPrimitive): ConditionDraft {
   return d
 }
 
-/** Build a stored primitive trigger from a condition draft. */
+/**
+ * Build a stored primitive trigger from a condition draft.
+ *
+ * A `where` needs BOTH halves — `{'': '/Mote of /'}` is not a matcher, it is a key nothing can
+ * ever carry — so a value without a field name still cannot become one here. What stops that
+ * combination from silently EATING the value is `conditionFieldKeyErr` below, which refuses the
+ * save while the pair is half-written; by the time a draft reaches this function the form has
+ * already established that a typed value has a field to live in (JOS-348).
+ */
 export function primitiveFromDraft(d: ConditionDraft): AlertTriggerPrimitive {
   if (d.ttype === 'raw') return { type: 'raw', regex: d.regex }
   if (d.ttype === 'app') return { type: 'app', signal: d.signal }
   const where =
     d.fieldKey.trim() && d.fieldVal.trim() ? { [d.fieldKey.trim()]: d.fieldVal.trim() } : undefined
   return { type: 'event', kind: d.kind, where }
+}
+
+/**
+ * THE FIELD NAME IS OPTIONAL UNTIL A VALUE IS TYPED, AND THEN IT IS REQUIRED (JOS-348).
+ *
+ * The report: *an alert with trigger type loot does not save the regex field parameter the user
+ * entered*. It is not a persistence defect — nothing between the dialog and electron-store touches
+ * `where` — it is this pair of boxes. The left one is labelled **Field (optional)**, so a user who
+ * wants "tell me when a Mote drops" types the pattern into the right one, leaves the left one
+ * alone, and saves an alert that fires on EVERY loot line. `primitiveFromDraft` needs both halves
+ * to build a `where`, so the pattern was dropped on the way to the def: no error, no warning, and
+ * the value simply gone the next time the dialog was opened.
+ *
+ * The rule is the narrowest one that makes the loss impossible: a value with no field name is an
+ * INCOMPLETE condition, and the Save button stays disabled while it is (`formCanSave`). The
+ * alternative — inferring the field from the event kind, `loot` ⇒ `item` — would be the app
+ * guessing at what the user meant, which world-model law 1 forbids and which has no honest answer
+ * for the kinds carrying several matchable fields (a loot line names an item, a source, a
+ * disposition and a created item). Say what is missing instead; the user names the field once.
+ *
+ * Only 'event' conditions have the pair at all — a 'raw' condition's regex is the whole trigger
+ * and has nowhere to go missing, and 'app' has no text at all.
+ */
+export function conditionFieldKeyErr(d: ConditionDraft): string | null {
+  if (d.ttype !== 'event') return null
+  if (!d.fieldVal.trim()) return null
+  return d.fieldKey.trim() ? null : 'Name the field this value matches (a loot item: item)'
 }
 
 /** The /regex/ validation error for a condition draft's field value, or null. */

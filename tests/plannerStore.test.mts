@@ -22,7 +22,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CURRENT_SCHEMA_VERSION, migrateStoreFile } from '../src/main/storeMigrations'
+import { CURRENT_SCHEMA_VERSION } from '../src/main/storeMigrations'
+// The FILE half is its own module since JOS-272 — same function, one import line further down.
+import { migrateStoreFile } from '../src/main/storeFile'
 import { sanitizeExaltPlans } from '../src/main/planner/validate'
 import type { ExaltPlan } from '../src/shared/planner/types'
 
@@ -80,6 +82,15 @@ const goodPlan: ExaltPlan = {
       hostKey: 'ring of pureblood',
       hostName: 'Ring of Pureblood',
       sockets: { focus: { effect: 'Improved Healing II', donorKey: 'ring of pureblood' } }
+    },
+    // JOS-104 — an ANY SLOT, the other cell key that is not an equip-slot name, and here for the
+    // same reason: the widening is additive in both directions, so a plan naming a place the
+    // eighteen do not have must survive the round trip untouched. Note the host is a CHEST item,
+    // which is what an any-slot is FOR.
+    ANY1: {
+      hostKey: 'brigandine tunic',
+      hostName: 'Brigandine Tunic',
+      sockets: { worn: { effect: 'Improved Healing III', donorKey: 'brigandine tunic' } }
     }
   }
 }
@@ -159,6 +170,7 @@ test('malformed input is STRIPPED field by field, never thrown and never wholesa
           CHARM: { hostKey: 'nope', sockets: {} }, // not a slot in this corpus
           BOOTS: { hostKey: 'nope', sockets: {} }, // never a slot name at all
           HEAD2: { hostKey: 'nope', sockets: {} }, // JOS-67: only EAR/WRIST/FINGER have a second
+          ANY3: { hostKey: 'nope', sockets: {} }, // JOS-104: the game gives exactly two any-slots
           FEET: { sockets: {} } // empty cell: no host, no sockets
         }
       }

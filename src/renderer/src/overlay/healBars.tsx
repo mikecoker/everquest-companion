@@ -17,22 +17,24 @@ import type { OverlayDrill } from '@shared/types'
 import type { HealSourceView, HealSpellView, MitigationView, SegmentView } from '@shared/combat'
 import type { MeterScope, RosterSnap } from '@shared/roster'
 import { scopeHealing } from '../features/combat/meterScope'
-import { MeterCrumb } from './meterCrumb'
+import { MeterCrumb, type CrumbTotal } from './meterCrumb'
 // The app's ONE `m:ss` spelling — see meterBars.tsx for why it comes from here.
 import { fmtDur } from '../features/combat/copyTable'
-import { formatNum as fmt } from '../lib/formatRate'
+import { formatNum as fmt, formatHealRate } from '../lib/formatRate'
+// `spellTitle` / `healerTitle` / `healTotalTitle` are deliberately NOT imported any more
+// (JOS-358): the builders live on in healRows.ts for the Combat tab's Healing dimension, which is
+// the surface that can print them — this window carries no hover at all outside its title bar.
 import {
   ABSORB_NOTE,
+  UNSTATED_AMOUNT,
   hasAbsorbCounts,
   healPanel,
   healerAmount,
   healerStat,
-  healerTitle,
   isAbsorbLane,
   isUnstatedLane,
   laneAmount,
-  spellStat,
-  spellTitle
+  spellStat
 } from '../features/combat/healRows'
 
 // Re-exported so HealMeter (and anything else in this bundle) keeps one import site for the
@@ -42,6 +44,14 @@ export { ABSORB_NOTE }
 /** Absorption is a different KIND of number, so it gets a deliberately different, cooler hue —
  *  a rune bar can never be mistaken for a green "hit points restored" bar at a glance. */
 export const MIT_COLOR = '#8fb8d8'
+
+/**
+ * The healing meter's accent — the green its window border and header title wear, and since
+ * JOS-158 the colour of the aggregate on the crumb row. Spelled out rather than borrowed from
+ * `KIND_COLOR.you`: the aggregate is the one number here that is emphatically NOT yours.
+ */
+const ACCENT = '#7fd1a0'
+
 const KIND_COLOR: Record<string, string> = {
   you: '#7fd1a0',
   pet: '#6fb3d2',
@@ -49,7 +59,8 @@ const KIND_COLOR: Record<string, string> = {
   enemy: '#cf6679'
 }
 
-/** A single horizontal bar: label + right-text + pct-fill. Same treatment as the DPS overlay. */
+/** A single horizontal bar: label + right-text + pct-fill. Same treatment as the DPS overlay —
+ *  including NO hover (JOS-358): what a bar states is what is printed on it. */
 function Bar({
   color,
   pct: fill,
@@ -57,8 +68,7 @@ function Bar({
   label,
   right,
   onClick,
-  accent,
-  title
+  accent
 }: {
   color: string
   pct: number
@@ -67,12 +77,10 @@ function Bar({
   right: string
   onClick?: () => void
   accent?: string
-  title?: string
 }): JSX.Element {
   return (
     <div
       onClick={onClick}
-      title={title}
       style={{
         position: 'relative',
         height: 18,
@@ -150,6 +158,20 @@ function NothingToRank({ live, mit }: { live: boolean; mit: MitigationView | nul
 }
 
 /**
+ * THE AGGREGATE THE TITLE BAR USED TO CARRY (JOS-158) — the SEGMENT's own `HealingView.hps`,
+ * moved and not recomputed, so the number a pinned meter shows did not change on the day its
+ * label appeared. What the number COVERS is said by the crumb row's own label; see
+ * overlay/meterCrumb.tsx.
+ *
+ * IT USED TO CARRY THE RESTORED/ABSORBED SENTENCE on hover as well (`healTotalTitle`, inherited
+ * from the header tail). JOS-358 took it: this window keeps hovers only in the title bar. The
+ * sentence is unchanged on the Combat tab's segment header, which is where it can be read.
+ */
+function healTotal(seg: SegmentView | undefined): CrumbTotal {
+  return { text: formatHealRate(seg?.healing.hps ?? 0), accent: ACCENT }
+}
+
+/**
  * The bar body: healers → that healer's spell list. Every decision below — which level, which
  * rows, the stale-drill fallback, what rides under level 1 — comes from `healPanel`, the SAME
  * call the Combat tab's Healing dimension makes. This function is the chrome around it.
@@ -177,12 +199,18 @@ export function HealBars({
   // and one builder, so the pinned overlay and the docked tab can never rank a fight differently.
   const panel = healPanel(scopeHealing(seg?.healing, scope, roster), drill?.entityId ?? null)
   const dur = fmtDur(seg?.durationSec ?? 0)
+  const total = healTotal(seg)
 
   // Level 2: the healer's spells. Back is offered here and on every other meter kind now — the
   // SAME component, so the four kinds cannot drift into four opinions again (JOS-35).
   if (panel.level === 2) {
     return (
-      <MeterCrumb name={panel.subject.name} dur={dur} onBack={setDrill ? () => setDrill(null) : null}>
+      <MeterCrumb
+        name={panel.subject.name}
+        dur={dur}
+        total={total}
+        onBack={setDrill ? () => setDrill(null) : null}
+      >
         {/* ONE flat ranked list: heal spells and the absorption lane together, biggest first.
             No grouping level — that is what hid the flat breakdown in the damage drill-down.
             The absorption lane is told apart by COLOR + chip, never by where it sits. */}
@@ -197,7 +225,7 @@ export function HealBars({
 
   // Level 1: healers, then the absorption section.
   return (
-    <MeterCrumb name={null} dur={dur} onBack={null}>
+    <MeterCrumb name={null} dur={dur} total={total} onBack={null}>
       {panel.healers.map((h, i) => (
         <HealerBar
           key={h.id}
@@ -237,7 +265,7 @@ function SpellBar({ s, healerKind }: { s: HealSpellView; healerKind: string }): 
               The suffix is what stops the zero-length bar beside it reading as a heal that did
               nothing. */}
           {isUnstatedLane(s) && (
-            <span style={{ color: 'rgba(255,255,255,0.5)', fontWeight: 400 }}> ·unvalued</span>
+            <span style={{ color: 'rgba(255,255,255,0.5)', fontWeight: 400 }}> ·{UNSTATED_AMOUNT}</span>
           )}
           <span style={{ marginLeft: 6, color: 'rgba(255,255,255,0.62)', fontWeight: 400 }}>
             {spellStat(s)}
@@ -245,7 +273,6 @@ function SpellBar({ s, healerKind }: { s: HealSpellView; healerKind: string }): 
         </>
       }
       right={laneAmount(s)}
-      title={spellTitle(s)}
     />
   )
 }
@@ -279,7 +306,6 @@ function HealerBar({
       }
       right={healerAmount(h)}
       onClick={onDrill}
-      title={healerTitle(h)}
     />
   )
 }
@@ -292,14 +318,10 @@ function EnemyHealedLine({
   enemy: { total: number; healers: HealSourceView[] }
 }): JSX.Element | null {
   if (enemy.total <= 0) return null
+  // The line names itself; the per-healer breakdown behind it went with the hover (JOS-358) and is
+  // one drill away on the Combat tab's Healing dimension.
   return (
-    <div
-      style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', padding: '6px 2px 0' }}
-      title={`Healing that landed on mobs you fought. Top: ${enemy.healers
-        .slice(0, 3)
-        .map((h) => `${h.name} ${fmt(h.total)}`)
-        .join(', ')}`}
-    >
+    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', padding: '6px 2px 0' }}>
       enemies healed {fmt(enemy.total)}
     </div>
   )

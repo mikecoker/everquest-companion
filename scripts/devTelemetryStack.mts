@@ -36,8 +36,14 @@ import {
   cohortOf,
   rollupBatch,
   utcDay,
+  type ErrorReportRow,
   type UsageCohort
 } from '../src/shared/telemetryRollup'
+import {
+  perfDimsFromEvents,
+  perfDimsOf,
+  type PerfInstallDims
+} from '../src/shared/telemetryPerfCube'
 
 /** One in-memory `analytics_install` row. Exactly the columns the real table has. */
 interface Install {
@@ -50,6 +56,11 @@ interface Install {
   cohort: UsageCohort
   quotaDay: string
   quotaN: number
+  /** The perf cube's two setup dims (JOS-372), written whenever a `setupSnapshot` arrives and
+   *  read back by every later batch — the local twin of the real UPSERT's two `COALESCE`s. NULL
+   *  columns in DSQL; `undefined` here, which is the same fact. */
+  machineClass?: string
+  windowMode?: string
 }
 
 export interface TelemetryMode {
@@ -65,6 +76,21 @@ export interface TelemetryState {
   /** `day|cohort|funnel|step|outcome|version` → n. */
   funnels: Map<string, number>
   installs: Map<string, Install>
+  /**
+   * `day|cohort|version|fingerprint` → the `error_report` row (JOS-100). A Map because the
+   * real table is a Map with a primary key; the FIRST-WINS rule on the exemplar is the one
+   * behaviour worth rehearsing locally, since it is the half a `DO UPDATE` clause gets wrong
+   * silently.
+   */
+  errors: Map<string, { count: number; exemplar: unknown }>
+  /**
+   * `day|cohort|windowMode|machineClass|locked|stall|tail` → n, i.e. `perf_daily` keyed by its own
+   * seven-column primary key (JOS-372). The behaviour worth rehearsing here is the DIM
+   * RESOLUTION — a batch with no `setupSnapshot` has to fold against the install row's stored
+   * dims — because that is the half that silently produces a cube full of `unknown` when it is
+   * wrong, and a cube of `unknown` looks exactly like a healthy fleet nobody could class.
+   */
+  perf: Map<string, number>
 }
 
 export function emptyTelemetryState(maxEventsPerDay = 20_000): TelemetryState {
@@ -72,7 +98,9 @@ export function emptyTelemetryState(maxEventsPerDay = 20_000): TelemetryState {
     mode: { closed: false, maxEventsPerDay },
     usage: new Map(),
     funnels: new Map(),
-    installs: new Map()
+    installs: new Map(),
+    errors: new Map(),
+    perf: new Map()
   }
 }
 
@@ -97,6 +125,38 @@ interface InstallFacts {
    *  PK lookup taken before its UPSERT; here the stored row is simply still in hand. */
   upgraded: boolean
   cohort: UsageCohort
+  /** The resolved perf dims — this batch's snapshot if it carried one, else the row's. */
+  perf: PerfInstallDims
+}
+
+/** The `INSERT` half of the UPSERT: an id nothing has ever been heard from. It cannot be over the
+ *  cap (there is no counter yet), it cannot be an upgrade (there is no previous version), and its
+ *  perf dims are whatever this first batch stated — `unknown` when it stated none. */
+function firstEverBatch(
+  state: TelemetryState,
+  batch: TelemetryBatch,
+  day: string,
+  stated: PerfInstallDims | null
+): InstallFacts {
+  const cohort = cohortForChannel(batch.env.channel)
+  state.installs.set(batch.env.analyticsId, {
+    firstSeenDay: day,
+    lastSeenDay: day,
+    daysSeen: 1,
+    appVersion: batch.env.appVersion,
+    channel: batch.env.channel,
+    cohort,
+    quotaDay: day,
+    quotaN: batch.events.length,
+    ...(stated === null ? {} : { machineClass: stated.machineClass, windowMode: stated.windowMode })
+  })
+  return {
+    firstOfDay: true,
+    newInstall: true,
+    upgraded: false,
+    cohort,
+    perf: perfDimsOf(stated?.machineClass, stated?.windowMode)
+  }
 }
 
 /**
@@ -110,20 +170,14 @@ interface InstallFacts {
 function touchInstall(state: TelemetryState, batch: TelemetryBatch, day: string): InstallFacts | null {
   const events = batch.events.length
   const byChannel = cohortForChannel(batch.env.channel)
+  // NULL when this batch carried no `setupSnapshot` — the two fallbacks below are the local twin
+  // of the real statement's `COALESCE`s, and they are what makes a heartbeat-only batch fold its
+  // cube rows against the box this install already told us about.
+  const stated = perfDimsFromEvents(batch.events)
   const held = state.installs.get(batch.env.analyticsId)
-  if (held === undefined) {
-    state.installs.set(batch.env.analyticsId, {
-      firstSeenDay: day,
-      lastSeenDay: day,
-      daysSeen: 1,
-      appVersion: batch.env.appVersion,
-      channel: batch.env.channel,
-      cohort: byChannel,
-      quotaDay: day,
-      quotaN: events
-    })
-    return { firstOfDay: true, newInstall: true, upgraded: false, cohort: byChannel }
-  }
+  // The INSERT arm, split out so this function stays inside the repo's complexity ceiling — the
+  // two arms share nothing but their return type, which is what makes it a clean cut.
+  if (held === undefined) return firstEverBatch(state, batch, day, stated)
   // The GUARD, read before the increment — exactly what the SQL `WHERE` evaluates.
   if (held.quotaDay === day && held.quotaN >= state.mode.maxEventsPerDay) return null
   // Read BEFORE `held.appVersion` is overwritten below — the same ordering the Lambda buys with
@@ -135,13 +189,45 @@ function touchInstall(state: TelemetryState, batch: TelemetryBatch, day: string)
   held.appVersion = batch.env.appVersion
   held.channel = batch.env.channel
   held.cohort = byChannel === 'owner' ? 'owner' : cohortOf(held.cohort)
+  held.machineClass = stated?.machineClass ?? held.machineClass
+  held.windowMode = stated?.windowMode ?? held.windowMode
   held.quotaN = held.quotaDay === day ? held.quotaN + events : events
   held.quotaDay = day
-  return { firstOfDay: held.quotaN === events, newInstall: false, upgraded, cohort: held.cohort }
+  return {
+    firstOfDay: held.quotaN === events,
+    newInstall: false,
+    upgraded,
+    cohort: held.cohort,
+    perf: perfDimsOf(held.machineClass, held.windowMode)
+  }
 }
 
 function bump(table: Map<string, number>, key: string, n: number): void {
   table.set(key, (table.get(key) ?? 0) + n)
+}
+
+/**
+ * The `error_report` half (JOS-100), and the ONE behaviour worth rehearsing locally is the
+ * asymmetry: `count` accumulates, `exemplar` is FIRST WINS — the local mirror of the real
+ * statement's `COALESCE(error_report.exemplar, EXCLUDED.exemplar)`. That is the half a
+ * `DO UPDATE` clause gets wrong silently, and a reader of the panel would never notice the
+ * exemplar quietly changing under them.
+ *
+ * Its own function rather than a third loop inside `telemetryRoute`, which is at the repo's
+ * complexity ceiling.
+ */
+function writeErrors(
+  state: TelemetryState,
+  errors: readonly ErrorReportRow[],
+  day: string,
+  cohort: UsageCohort
+): void {
+  for (const e of errors) {
+    const key = `${day}|${cohort}|${e.appVersion}|${e.fingerprint}`
+    const held = state.errors.get(key)
+    if (held) held.count += e.n
+    else state.errors.set(key, { count: e.n, exemplar: e.exemplar })
+  }
 }
 
 /** The route. `now` is injectable so a test can drive two days without waiting for one. */
@@ -176,6 +262,11 @@ export function telemetryRoute(state: TelemetryState, body: Buffer, now = Date.n
   for (const f of roll.funnels) {
     bump(state.funnels, `${day}|${co}|${f.funnel}|${f.step}|${f.outcome}|${f.appVersion}`, f.n)
   }
+  writeErrors(state, roll.errors, day, co)
+  for (const p of roll.perf) {
+    const key = [day, co, p.windowMode, p.machineClass, p.locked, p.stallBucket, p.tailBucket].join('|')
+    bump(state.perf, key, p.n)
+  }
   return {
     status: 202,
     json: { ok: true, accepted: v.value.events.length },
@@ -183,7 +274,7 @@ export function telemetryRoute(state: TelemetryState, body: Buffer, now = Date.n
   }
 }
 
-/** `GET /devstack/usage` — the three tables, in the shape the triage reader consumes. */
+/** `GET /devstack/usage` — the five tables, in the shape the triage reader consumes. */
 export function telemetryTables(state: TelemetryState): TelemetryRes {
   const split = (key: string): string[] => key.split('|')
   return {
@@ -205,8 +296,29 @@ export function telemetryTables(state: TelemetryState): TelemetryRes {
         days_seen: i.daysSeen,
         app_version: i.appVersion,
         channel: i.channel,
-        cohort: i.cohort
-      }))
+        cohort: i.cohort,
+        machine_class: i.machineClass ?? null,
+        window_mode: i.windowMode ?? null
+      })),
+      // The cube, in the column names `toPerfRows` reads — so a dev-stack dump can be fed
+      // straight into the same readout the panel uses.
+      perfDaily: [...state.perf.entries()].map(([key, n]) => {
+        const [day, cohort, windowMode, machineClass, locked, stall, tail] = split(key)
+        return {
+          day,
+          cohort,
+          window_mode: windowMode,
+          machine_class: machineClass,
+          locked,
+          stall_bucket: stall,
+          tail_bucket: tail,
+          n
+        }
+      }),
+      errorReport: [...state.errors.entries()].map(([key, row]) => {
+        const [day, cohort, version, fingerprint] = split(key)
+        return { day, cohort, version, fingerprint, count: row.count, exemplar: row.exemplar }
+      })
     },
     note: `${String(state.usage.size)} counters`
   }

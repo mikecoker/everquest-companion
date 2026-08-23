@@ -1,5 +1,5 @@
 {{Classic Era}}
-{{Spellpage|
+{{Spellpagesmart|
 
 | spellname = Elementalkin: Earth
 | spellicon = 38
@@ -8,18 +8,18 @@
 | classes = * [[Magician]] - Level 5
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Elementalkin: Earth Summon|Elementalkin: Earth]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 5 [[Elementalkin: Earth Summon|Earth Elemental]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 40
-| range =  
+| range = 
 | casting_time = 6.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 1.50
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 

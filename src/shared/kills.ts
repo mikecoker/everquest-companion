@@ -17,6 +17,8 @@
 // hand. See world-model law 10: the tier is a fact ABOUT a kill, so it lives with the kill —
 // the combo interval, which is revisable, is still joined at read time and never stamped.
 
+import { mobKey } from './mobKey'
+
 /**
  * How far BACK a kill line may reach for the experience line that credits it. The measured gap
  * is 0 s or 1 s (the full-log sweep quoted in main/modules/progression.ts: the exp line PRECEDES
@@ -30,9 +32,58 @@
  */
 export const KILL_EXP_JOIN_MS = 2500
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE TIER KEY — what a kill record's `tiers` map is keyed BY (JOS-166)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A key is either one of the game's FIVE difficulties (0 = base … 4 = Refined) or one of the two
+// NON-difficulties below. Before 2026-08-09 there were only the five, and key 0 carried three
+// different worlds at once: a base-difficulty instance, the open world (which has no lockout of
+// any kind), and a kill folded before the scan had seen any zone line at all. The owner clears
+// d0 through d4 every week, so that conflation was not an edge case — it was the base rung of
+// every weekly ladder, which the UI had to draw as an unfilled outline because the model could
+// not commit to what it meant.
+//
+// The ZONE LINE can commit, and always could (`zoneTier`, main/log/parseWorld.ts): an instance
+// entry carries a `- Solo`/`- Group N` suffix, an ordinal, or a difficulty adjective; the open
+// world carries a bare zone name and nothing else. So the three worlds are now three different
+// keys, and only the five difficulties are difficulties.
+
 /**
- * One mob's kills at ONE instance difficulty tier. `firstTs`/`lastTs` bracket that tier's
- * kills only — which is what makes an honest per-tier time join possible.
+ * The kill happened in the OPEN WORLD — a bare zone name, no instance of any kind.
+ *
+ * It is not d0 and it is not a lesser d0: the community wiki's instances-and-lockouts guide puts
+ * the weekly lockout on a boss PER DIFFICULTY of its INSTANCE, and an open-world spawn has no
+ * instance to be locked out of. These kills are counted (a boss that died is a boss that died —
+ * the roster is right to record it) and they can never fill a ladder rung.
+ */
+export const TIER_OPEN_WORLD = -1
+
+/**
+ * The log did not STATE where this kill happened, so nothing about its difficulty is known.
+ *
+ * Two causes, both real: a kill folded before the scan reached any `You have entered` line (a log
+ * that starts mid-session), and an instance whose difficulty adjective this app has never decoded.
+ * Claiming d0 for either is the exact lie this vocabulary exists to stop — "the log didn't say"
+ * is not "the base difficulty" (world-model law 1).
+ */
+export const TIER_UNKNOWN = -2
+
+/** Every instance difficulty the game offers, base first. Mirrors TIER_STYLES / TIER_LABELS. */
+export const DIFFICULTY_TIERS = [0, 1, 2, 3, 4]
+
+/**
+ * True when a tier key names one of the game's five difficulties — i.e. when it can carry a
+ * weekly lockout. False for the two non-difficulties above and for any key outside the five.
+ */
+export function isDifficultyTier(tier: number): boolean {
+  return DIFFICULTY_TIERS.includes(tier)
+}
+
+/**
+ * One mob's kills at ONE tier key — a difficulty, or one of the two non-difficulties above.
+ * `firstTs`/`lastTs` bracket that key's kills only — which is what makes an honest per-tier
+ * time join possible.
  */
 export interface KillTierRun {
   count: number
@@ -73,7 +124,14 @@ export interface KillTierRun {
 export interface KillInfo {
   /** DERIVED from `tiers`: total kills across every tier. */
   count: number
-  /** DERIVED from `tiers`: highest instance difficulty tier (0=base … 4=Refined). */
+  /**
+   * DERIVED from `tiers`: the HIGHEST tier key with kills on it (0=base … 4=Refined).
+   *
+   * A mob only ever killed outside an instance has no difficulty to report, and says so rather
+   * than defaulting to 0: the key ordering puts both non-difficulties below d0, so this reads
+   * TIER_OPEN_WORLD for an open-world-only record and TIER_UNKNOWN for one with no zone line
+   * behind it (or for a mob with no kills at all).
+   */
   bestTier: number
   /** DERIVED from `tiers`: first time this mob was killed at ANY tier (ms). */
   firstTs: number
@@ -89,8 +147,9 @@ export interface KillInfo {
    */
   display: string
   /**
-   * THE RECORD. Per-instance-tier breakdown keyed by tier number; a tier with no kills is
-   * absent, never a zero row. Every scalar above is a fold of this map.
+   * THE RECORD. Per-tier breakdown keyed by the tier key (the five difficulties plus
+   * TIER_OPEN_WORLD / TIER_UNKNOWN); a key with no kills is absent, never a zero row. Every
+   * scalar above is a fold of this map.
    */
   tiers: Record<number, KillTierRun>
 }
@@ -103,7 +162,12 @@ export type KillMap = Record<string, KillInfo>
  *
  * 1 = the five-scalar record (no `tiers`); 2 = the per-tier record; 3 = the same with each run
  * carrying how many of its kills were exp-CREDITED; 4 = the same with each run also carrying
- * WHEN its most recent credited kill landed (`lastCreditedTs`, the weekly lockout's input).
+ * WHEN its most recent credited kill landed (`lastCreditedTs`, the weekly lockout's input);
+ * 5 = the same runs under a WIDER tier key (JOS-166) — key 0 now means the base-difficulty
+ * INSTANCE alone, and the open world and the unknown zone have keys of their own. No field
+ * changed shape, but 0 changed MEANING, which is exactly what this stamp is for: a renderer
+ * merging v5 deltas into a v4 baseline would keep untouched mobs whose key 0 still conflates
+ * three worlds, and would green ladder rungs off them.
  * It exists for ONE
  * hazard, which is real in dev and at every app update: the delta is a PER-MOB merge, so a
  * renderer holding a v1 baseline that starts receiving v2 deltas would keep every untouched
@@ -112,7 +176,7 @@ export type KillMap = Record<string, KillInfo>
  * throws the baseline away and re-hydrates rather than merging across shapes. Bump this
  * whenever a KillInfo field changes meaning.
  */
-export const KILLS_SHAPE_VERSION = 4
+export const KILLS_SHAPE_VERSION = 5
 
 /** kills module snapshot: the map plus the shape version its entries were written at. */
 export interface KillsSnap {
@@ -139,7 +203,11 @@ export function killTotals(tiers: Record<number, KillTierRun>): {
   credited: number
 } {
   let count = 0
-  let bestTier = 0
+  // Seeded at the FLOOR of the key ordering, not at 0: a record whose only runs are open-world
+  // (or whose zone was never stated) has no difficulty to report, and seeding 0 would have it
+  // claim a base-instance clear it never made. An empty map folds to TIER_UNKNOWN for the same
+  // reason — no kills, nothing known.
+  let bestTier = TIER_UNKNOWN
   let firstTs = 0
   let lastTs = 0
   let credited = 0
@@ -201,6 +269,68 @@ export function addTierRun(into: Record<number, KillTierRun>, tier: number, run:
  */
 export function killsBaselineStale(state: KillsSnap, delta: KillsDelta): boolean {
   return state.v !== delta.v
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE JOIN — reading a mob's kills BY NAME (JOS-350)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A KillMap is written by the kills module under `idKey(<the slain line's spelling>)`, which is
+// nothing but trim + lowercase. That is the right WRITE key — it is what the log said — but it is
+// the wrong key to look a mob up WITH, and every surface that wanted a count had spelled its own
+// inline `name.trim().toLowerCase()` against it. Two names miss that way:
+//
+//   · `WorldModel.label()`'s spawn-generation suffix — the Overview Target card names the mob you
+//     just killed as "an elemental capturer (14)", and no record is ever keyed that way (the
+//     suffix appears in NO log line — world-model law 2). THIS is the bug JOS-350 reports: the
+//     Mobs tab, searching the catalog's suffix-free spelling, showed the real total while the
+//     same mob opened from the combat-fed surface read 0.
+//   · the three apostrophe glyphs — the log writes ``Innoruuk`s Chosen`` with a backtick, the
+//     catalog and the wiki write it with `'` or `’`, so a catalog-spelled lookup missed a record
+//     the log had been filing all along.
+//
+// So the join canonicalizes BOTH SIDES with `mobKey`: `killIndex` re-keys the map once (folding
+// any two spellings that were one mob into one record), `killsFor` reads it. Same shape as
+// bosses' `lowerKillMap` — re-key, don't re-implement — and it is the ONE join now, so the mob
+// page cannot disagree with the row that opened it.
+
+/**
+ * Re-key a KillMap by `mobKey(display)` — the canonical mob key — merging any entries that were
+ * one mob spelled two ways. The result is still a KillMap, so consumers read it unchanged.
+ *
+ * The merge is a real fold, not a last-wins overwrite: the per-tier runs union through
+ * `addTierRun` and the scalars are recomputed by `killTotals`, so a mob whose kills were split
+ * across two spellings reports ONE honest total rather than whichever half sorted last. `display`
+ * is the first spelling seen, which keeps law 2's "display raw" intact.
+ *
+ * O(entries) — call it once per snapshot (memoize in a hook), never per row.
+ */
+export function killIndex(kills: KillMap): KillMap {
+  const out: KillMap = {}
+  for (const [rawKey, info] of Object.entries(kills)) {
+    // The stored `display` is the log's own spelling; `rawKey` is the fallback for a record
+    // written before displays existed. Either way the FOLD is the same.
+    const key = mobKey(info.display || rawKey)
+    const prev = out[key]
+    if (!prev) {
+      out[key] = { ...info, tiers: { ...info.tiers } }
+      continue
+    }
+    for (const [tier, run] of Object.entries(info.tiers)) addTierRun(prev.tiers, Number(tier), run)
+    Object.assign(prev, killTotals(prev.tiers))
+  }
+  return out
+}
+
+/**
+ * What the kills module knows about ONE mob, whatever spelling the caller holds — a catalog row,
+ * a con line, or a `WorldModel.label()` with a ` (N)` suffix on it.
+ *
+ * `index` must be a `killIndex` result, not a raw snapshot map: the whole point is that both
+ * sides of the join were folded by the same rule.
+ */
+export function killsFor(index: KillMap, name: string): KillInfo | undefined {
+  return index[mobKey(name)]
 }
 
 /**

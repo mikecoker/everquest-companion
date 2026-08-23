@@ -20,10 +20,11 @@ import {
 } from '@mui/material'
 import { getBossData } from '../../data'
 import { useBossKills } from './useBossKills'
-import type { TargetStatus } from './bossStatus'
+import type { BossKill, TargetStatus } from './bossStatus'
 import { CategorySection, LoadoutSections } from './BossSections'
 import { untilReset } from './lockout'
 import { useLockoutWeek } from './useLockoutWeek'
+import { defeatedThisWeek, everDefeated, filterRoster } from './rosterFilter'
 import type { MobTarget } from '../mobs/mobTarget'
 import Confetti from '../../lib/Confetti'
 
@@ -34,12 +35,33 @@ const DENSITY_KEY = 'eq.bossDensity'
 type Density = 'compact' | 'comfortable'
 
 /**
- * The two readings of the same roster (JOS-74). OVERALL is the default and is the view this tab
- * has always been — everything you have ever killed. THIS WEEK is the loot-lockout view: of those
- * kills, the ones inside the current lockout window (lockout.ts). Deliberately NOT persisted —
- * the roster's job is progression, so a new session opens on progression.
+ * The two readings of the same roster (JOS-74). OVERALL is the default: it is the view this tab
+ * has always been, everything you have ever killed. THIS WEEK is the loot-lockout view: of those
+ * kills, the ones inside the current lockout window (lockout.ts).
+ *
+ * IT IS PERSISTED NOW (JOS-152), and JOS-74 said the opposite in this very comment: "deliberately
+ * NOT persisted - the roster's job is progression, so a new session opens on progression." That
+ * was a guess about who the tab is for, and a reporter (01KZM0T1YNREY466752BQZVFBR) corrected it:
+ * a raid coordinator opens this tab to run a week, so the week view IS their progression and the
+ * app threw it away on every trip to another tab. Owner disposition 2026-08-09: remember the
+ * selected tab. The mechanism is JOS-90's, for JOS-90's reason - `App`'s `ViewContent` mounts
+ * exactly one feature view at a time, so plain `useState` here does not survive leaving the tab,
+ * let alone a restart, and a stored key is one promise for both.
  */
 type Mode = 'overall' | 'week'
+
+const MODE_KEY = 'eq.bosses.mode'
+
+/**
+ * The stored mode. An absent key is the DEFAULT (overall), never a claim the user chose it, and
+ * anything that is not one of the two words reads as the default too - a hand-edited or
+ * future-written value degrades to the view this tab has always opened on rather than to a blank
+ * screen. Same shape as `useStoredSort` on the Sky tab.
+ */
+function loadMode(): Mode {
+  const v = localStorage.getItem(MODE_KEY)
+  return v === 'week' || v === 'overall' ? v : 'overall'
+}
 
 const bosses = getBossData()
 
@@ -72,13 +94,18 @@ function BossToolbar({
   return (
     <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
       <ToggleButtonGroup
+        data-testid="boss-mode"
         size="small"
         exclusive
         value={mode}
         onChange={(_e, v: Mode | null) => onModeChange(v)}
       >
-        <ToggleButton value="overall">Overall</ToggleButton>
-        <ToggleButton value="week">This week</ToggleButton>
+        <ToggleButton data-testid="boss-mode-overall" value="overall">
+          Overall
+        </ToggleButton>
+        <ToggleButton data-testid="boss-mode-week" value="week">
+          This week
+        </ToggleButton>
       </ToggleButtonGroup>
       <TextField
         size="small"
@@ -90,15 +117,21 @@ function BossToolbar({
       <FormControlLabel
         control={
           <Switch
+            data-testid="boss-defeated-only"
             checked={filters.defeatedOnly}
             onChange={(e) => filters.onDefeatedOnlyChange(e.target.checked)}
           />
         }
-        label="Defeated only"
+        // THE LABEL FOLLOWS THE MODE (JOS-237). The switch filters on what "defeated" means in
+        // the view you are standing in (rosterFilter.ts), so on the week view it must SAY so —
+        // "Defeated only" beside a roster of this week's clears reads as the all-time filter it
+        // used to be, which is the wrong answer written the wrong way round.
+        label={mode === 'week' ? 'Defeated this week' : 'Defeated only'}
       />
       <FormControlLabel
         control={
           <Switch
+            data-testid="boss-by-loadout"
             checked={filters.byLoadout}
             onChange={(e) => filters.onByLoadoutChange(e.target.checked)}
           />
@@ -115,7 +148,7 @@ function BossToolbar({
         <ToggleButton value="comfortable">Comfortable</ToggleButton>
       </ToggleButtonGroup>
       <Box sx={{ flexGrow: 1 }} />
-      <Typography variant="body2" color="text.secondary">
+      <Typography data-testid="boss-tally" variant="body2" color="text.secondary">
         {tally}
       </Typography>
     </Stack>
@@ -127,7 +160,7 @@ function BossToolbar({
  *                   longer owns a detail surface of its own — one mob, one page, everywhere.
  */
 export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => void }): JSX.Element {
-  const [mode, setMode] = useState<Mode>('overall')
+  const [mode, setMode] = useState<Mode>(loadMode)
   const [query, setQuery] = useState('')
   const [defeatedOnly, setDefeatedOnly] = useState(false)
   // Sectioning: progression category (the default — it is what the roster is for) or the class
@@ -148,13 +181,15 @@ export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => v
   // The bossDefeat *sound* rides
   // the same predicate from App's always-mounted detector, so the two agree on every
   // kill and the alert's cooldown stops the pair double-playing.
-  const onKill = useCallback((s: TargetStatus) => {
+  // The payload carries the kill's own tier (JOS-165); this surface wants only WHICH target,
+  // because the card it flashes goes on saying the highest-ever tier a card is right to say.
+  const onKill = useCallback(({ status }: BossKill) => {
     setBurst((n) => (n ?? 0) + 1)
-    setFlashing((prev) => new Set(prev).add(s.target.name))
+    setFlashing((prev) => new Set(prev).add(status.target.name))
     window.setTimeout(() => {
       setFlashing((prev) => {
         const next = new Set(prev)
-        next.delete(s.target.name)
+        next.delete(status.target.name)
         return next
       })
     }, 3000)
@@ -169,13 +204,24 @@ export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => v
   }
   const compact = density === 'compact'
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    let list = statuses
-    if (defeatedOnly) list = list.filter((s) => s.killed)
-    if (q) list = list.filter((s) => s.target.name.toLowerCase().includes(q))
-    return list
-  }, [statuses, query, defeatedOnly])
+  // The week's clock, and it is the ONLY one on this view: the ladder, the chips, the tally and
+  // — since JOS-237 — the "Defeated only" filter all read this same window. Idle on OVERALL.
+  const { week, lockOf } = useLockoutWeek(mode === 'week')
+
+  /**
+   * WHAT THE SWITCH FILTERS ON, and the whole of JOS-237 (rosterFilter.ts carries the argument).
+   * The all-time flag is right for the OVERALL roster and wrong for the week view, which is about
+   * this reset week and nothing else — so the predicate is the mode's, not the roster's.
+   */
+  const defeated = useMemo(
+    () => (mode === 'week' ? defeatedThisWeek(week) : everDefeated),
+    [mode, week]
+  )
+
+  const filtered = useMemo(
+    () => filterRoster(statuses, { query, defeatedOnly, defeated }),
+    [statuses, query, defeatedOnly, defeated]
+  )
 
   const byCategory = useMemo(() => {
     const map = new Map<string, TargetStatus[]>()
@@ -189,13 +235,14 @@ export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => v
     )
   }, [filtered])
 
-  const { week, lockOf } = useLockoutWeek(mode === 'week')
+  // The tally counts the WHOLE roster, never `filtered` — it is the denominator the filter is
+  // measured against, so it must not move when a switch is flipped.
   const locked = statuses.filter((s) => lockOf(s).length > 0).length
-  const defeated = statuses.filter((s) => s.killed).length
+  const everKilled = statuses.filter((s) => s.killed).length
   const tally =
     mode === 'week'
-      ? `${locked} / ${statuses.length} locked this week · resets in ${untilReset(week)}`
-      : `${defeated} / ${statuses.length} defeated · badge = highest instance tier`
+      ? `${locked} / ${statuses.length} locked this week · resets in ${untilReset(week)} · green rung = cleared`
+      : `${everKilled} / ${statuses.length} defeated · badge = highest instance tier`
   const section = {
     compact,
     minCol: compact ? 116 : 180,
@@ -210,7 +257,11 @@ export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => v
       <BossToolbar
         mode={mode}
         onModeChange={(m) => {
-          if (m) setMode(m)
+          // A null `m` is MUI re-clicking the active button in an exclusive group: it is not a
+          // choice, so it neither changes the view nor rewrites the stored one.
+          if (!m) return
+          localStorage.setItem(MODE_KEY, m)
+          setMode(m)
         }}
         query={query}
         onQueryChange={setQuery}
@@ -227,7 +278,16 @@ export default function BossView({ onOpenMob }: { onOpenMob: (t: MobTarget) => v
 
       <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
         {byLoadout ? (
-          <LoadoutSections {...section} list={filtered} />
+          // THE SWITCH REACHES THE CARDS, NOT ONLY THE TARGETS (JOS-237). Sectioning by loadout
+          // splits a target into one card per tier run, so filtering the roster alone would leave
+          // a card describing kills that took no lockout this week sitting under "Defeated this
+          // week" — grey, chipped `open`, and drawn only because ANOTHER of the target's runs was
+          // cleared. The same predicate, applied at the same grain the cards are.
+          <LoadoutSections
+            {...section}
+            list={filtered}
+            keep={defeatedOnly ? defeated : undefined}
+          />
         ) : (
           byCategory.map(([category, list]) => (
             <CategorySection key={category} {...section} category={category} list={list} />

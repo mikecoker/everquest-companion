@@ -8,6 +8,13 @@
 // still the one import site for consumers and no import path changed.
 
 import type { AlertDef, OverlayKind, AlertPrefs } from './types'
+import { OVERLAY_KIND_LABEL } from './overlayLabels'
+import {
+  DEFAULT_OVERLAY_BG_ALPHA,
+  deriveBgAlphaPrefs,
+  normalizeOverlayBgAlpha,
+  type OverlayBgAlphaPrefs
+} from './overlayBgAlpha'
 import {
   canonicalJson,
   checksum,
@@ -109,7 +116,7 @@ export function planAlertMerge(
         action: 'skip',
         finalId: twin.id,
         finalName: twin.name,
-        reason: `Already have this — “${twin.name}”`,
+        reason: `Already have this - “${twin.name}”`,
         missingPackId,
         behaviorKey
       })
@@ -122,7 +129,7 @@ export function planAlertMerge(
     if (byId.has(finalId)) {
       finalId = `${def.id}~${behaviorKey.slice(0, 4)}`
       action = 'rekey'
-      reason = `Id “${def.id}” is taken by a different alert — imported alongside it`
+      reason = `Id “${def.id}” is taken by a different alert - imported alongside it`
     }
 
     let finalName = def.name
@@ -189,20 +196,49 @@ export interface ScalarChange {
 export interface ScalarContext {
   alertPrefs: AlertPrefs
   overlays: Partial<Record<OverlayKind, { bgAlpha: number }>>
+  /** The shared transparency preference (JOS-407). Optional: a caller that predates it — every
+   *  test written before this ticket — compares against the shipped answer. */
+  overlayBgAlpha?: OverlayBgAlphaPrefs
   ui: Record<string, string>
 }
 
-const OVERLAY_KIND_LABEL: Record<OverlayKind, string> = {
-  fight: 'Fight meter',
-  overall: 'Overall meter',
-  'heal-fight': 'Healing (fight)',
-  'heal-overall': 'Healing (overall)',
-  events: 'Event feed',
-  // The toast strip has no bgAlpha row to share today (src/main/share.ts's KINDS list
-  // does not include it), but the label map is keyed by the whole union, so it is named here
-  // rather than letting a future shared field render as a raw kind id.
-  toast: 'Celebration toasts'
+/**
+ * THE TRANSPARENCY PREFERENCE A BUNDLE IS ASKING FOR, INCLUDING WHEN IT DOES NOT SAY (JOS-407).
+ *
+ * A bundle written by 1.5.0 or later carries `overlayBgAlpha` and this simply reads it. An OLDER
+ * bundle carries only per-kind alphas, and the honest reading of those is the same least-harm rule
+ * the store's own upgrade uses (shared/overlayBgAlpha.ts `deriveBgAlphaPrefs`): if the sender's
+ * overlays all agreed, they were asking for one transparency; if they differed, they were asking
+ * for exactly those differences, which is independent mode. Either way the preview offers the
+ * recipient the same two rows and the import cannot land in a state the sender's screen was not in.
+ *
+ * `null` means the bundle says nothing at all about transparency — no prefs and no overlays — and a
+ * row is not offered. AN ABSENT KIND IS NOT A VOTE HERE, which is the one place this differs from
+ * the store's derivation: a bundle carries what it carries (five kinds today), so a kind the sender
+ * did not export is silence, not a window at 0.72.
+ */
+export function bodyBgAlphaPrefs(body: SettingsBundleBody): OverlayBgAlphaPrefs | null {
+  if (body.overlayBgAlpha) return normalizeOverlayBgAlpha(body.overlayBgAlpha)
+  const incoming = body.overlays
+  if (!incoming) return null
+  const alphas = EXPORTABLE_OVERLAY_KINDS.map((k) => incoming[k]?.bgAlpha).filter(
+    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+  )
+  return alphas.length ? deriveBgAlphaPrefs(alphas) : null
 }
+
+// THE KIND LABELS ARE NOT THIS FILE'S ANY MORE (JOS-405).
+//
+// There were two maps — this one and the title bar's Overlay menu — and they DISAGREED about two
+// windows: a bundle offered to change the opacity of an "Overall meter" and an "Event feed" that
+// the menu, three inches away, calls the Zone meter and the Event log. Neither spelling was wrong;
+// having two was, because an import preview is read beside the menu it describes.
+//
+// `shared/overlayLabels.ts` now holds the one map, in the MENU's wording — the name a user meets
+// first, because it is what they clicked to make the window exist. It is keyed by the WHOLE union
+// for the reason every row of the local copy said it was: kinds with no shared field today are
+// named there too (only `EXPORTABLE_OVERLAY_KINDS` below decides what actually travels), so a
+// future shared field can never render as a raw kind id.
 
 /**
  * Everything a scalar row compares is a PRIMITIVE (a volume, a flag, a density, a JSON
@@ -244,6 +280,16 @@ function pushAlertPrefRows(out: ScalarChange[], body: SettingsBundleBody, ctx: S
     incoming: body.alertPrefs.muted,
     merge: 'replace'
   })
+  // JOS-222. Absent on both sides means OFF on both sides, and pushScalar's String(x ?? '')
+  // makes absent and false the same reading — so a bundle written before this preference existed
+  // offers no row here, which is exactly right: it has no opinion to import.
+  pushScalar(out, {
+    id: 'alertPrefs.alwaysPlayAll',
+    label: 'Always play all alerts',
+    current: ctx.alertPrefs.alwaysPlayAll ?? false,
+    incoming: body.alertPrefs.alwaysPlayAll ?? false,
+    merge: 'replace'
+  })
 }
 
 function pushOverlayRows(out: ScalarChange[], body: SettingsBundleBody, ctx: ScalarContext): void {
@@ -253,7 +299,7 @@ function pushOverlayRows(out: ScalarChange[], body: SettingsBundleBody, ctx: Sca
     const cur = ctx.overlays?.[kind]
     pushScalar(out, {
       id: `overlay.${kind}.bgAlpha`,
-      label: `${OVERLAY_KIND_LABEL[kind]} — background opacity`,
+      label: `${OVERLAY_KIND_LABEL[kind]} - background opacity`,
       current: cur?.bgAlpha,
       incoming: inc.bgAlpha,
       merge: 'replace'
@@ -279,10 +325,49 @@ function pushUiPrefRows(out: ScalarChange[], body: SettingsBundleBody, ctx: Scal
   }
 }
 
-/** Diff a settings body against the current state; only genuinely different rows come back. */
+/** How a transparency mode reads in a preview row. Not `true`/`false`: the row is a sentence a
+ *  person opts into, and "Independent transparency per overlay: false → true" is not one. */
+const alphaMode = (independent: boolean): string => (independent ? 'On' : 'Off')
+
+/**
+ * The overlays' shared TRANSPARENCY, as two rows (JOS-407): the alpha, and whether it is in force.
+ *
+ * TWO ROWS RATHER THAN ONE, because they are two decisions and this list is opt-in per row: a
+ * person taking a friend's transparency should not have to take their independent-mode answer with
+ * it, and vice versa.
+ */
+function pushBgAlphaRows(out: ScalarChange[], body: SettingsBundleBody, ctx: ScalarContext): void {
+  const incoming = bodyBgAlphaPrefs(body)
+  if (!incoming) return
+  const current = ctx.overlayBgAlpha ?? DEFAULT_OVERLAY_BG_ALPHA
+  pushScalar(out, {
+    id: 'overlayBgAlpha.shared',
+    label: 'Overlay transparency',
+    current: `${String(Math.round(current.shared * 100))}%`,
+    incoming: `${String(Math.round(incoming.shared * 100))}%`,
+    merge: 'replace'
+  })
+  pushScalar(out, {
+    id: 'overlayBgAlpha.independent',
+    label: 'Independent transparency per overlay',
+    current: alphaMode(current.independent),
+    incoming: alphaMode(incoming.independent),
+    merge: 'replace'
+  })
+}
+
+/**
+ * Diff a settings body against the current state; only genuinely different rows come back.
+ *
+ * THE PREFERENCE ROWS COME BEFORE THE PER-KIND ONES, and the order is load-bearing: turning
+ * independent transparency on for the first time SEEDS every kind from the shared alpha
+ * (main/storeOverlayBgAlpha.ts), so a per-kind value applied first would be overwritten moments
+ * later by the mode row the same import selected. `applySelectedScalars` walks this list in order.
+ */
 export function planScalarChanges(body: SettingsBundleBody, ctx: ScalarContext): ScalarChange[] {
   const out: ScalarChange[] = []
   pushAlertPrefRows(out, body, ctx)
+  pushBgAlphaRows(out, body, ctx)
   pushOverlayRows(out, body, ctx)
   pushUiPrefRows(out, body, ctx)
   return out

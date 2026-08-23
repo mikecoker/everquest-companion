@@ -109,11 +109,45 @@ export const DEFAULT_PACK_IDS: string[] = DEFAULT_PACKS.map((p) => p.name)
 // user who reinstalls one can re-point any alert at it, and this migration never runs
 // again to undo that.
 
-/** Packs whose alert refs the one-time migration rewrites onto the shipped default. */
+/**
+ * Packs whose alert refs the one-time migration rewrites onto the shipped default.
+ *
+ * ADDING AN ID HERE POINTS EVERY UNSTAMPED USER'S ALERTS AWAY FROM THAT PACK, so the list is
+ * pinned verbatim by tests/alertSoundMigrationPin.test.mts. In particular
+ * `DEFAULT_ALERT_PACK_ID` may never appear in it: that would make the rewrite a rewrite of
+ * itself and, paired with a version bump, would re-point every alert in the fleet.
+ */
 export const LEGACY_ALERT_PACK_IDS: string[] = ['default', 'peon', 'sc_marine', 'bastion']
 
-/** Bumped when the mapping below changes in a way that should re-run for every user. */
+/**
+ * Bumped when the mapping below changes in a way that should re-run for every user.
+ *
+ * IT IS A FLEET-WIDE REWRITE SWITCH, NOT A VERSION NUMBER (JOS-272). A bump makes
+ * `alertSoundMigrationPending` true again for EVERY install that has ever run this app, and the
+ * next `getAlerts()` on each of them re-runs the rewrite against whatever the mapping says at that
+ * moment. That is a legitimate thing to want — a retired pack really can need re-pointing later —
+ * but it is never a thing to do incidentally, and it has no undo: the stamp records that the
+ * rewrite ran, not what it did.
+ *
+ * `tests/alertSoundMigrationPin.test.mts` freezes this number, `LEGACY_ALERT_PACK_IDS`, and the
+ * whole input→output table below. Bumping any of them turns that suite red, which is the point: the
+ * change becomes something a human states in a diff rather than something that happens.
+ */
 export const ALERT_SOUND_MIGRATION_VERSION = 1
+
+/**
+ * Does this store still owe the retired-pack rewrite? The gate `store.ts` runs, extracted so it can
+ * be driven without Electron (JOS-272).
+ *
+ * A store stamped at or ABOVE the current version is finished — including a store stamped by a
+ * NEWER build, which must never be walked backwards through an older build's mapping. Anything that
+ * is not a whole number at all (absent, or hand-edited to nonsense) counts as never migrated, which
+ * is the safe direction: running the rewrite once too often on legacy refs costs nothing, and
+ * legacy refs are the only thing it can touch.
+ */
+export function alertSoundMigrationPending(stamp: unknown): boolean {
+  return !(typeof stamp === 'number' && Number.isInteger(stamp) && stamp >= ALERT_SOUND_MIGRATION_VERSION)
+}
 
 /**
  * CESP category → the Alan Rickman line a legacy sound in that category becomes.

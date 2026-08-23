@@ -64,11 +64,28 @@ function slice(ranges, out) {
 // followed immediately by `You have entered The Plane of Hate.`
 slice([[641920, 641945]], 's1-session-overnight-camp.log')
 
-// S2 CRASH / QUIT — a Welcome with NO camp (Fri Jul 31 21:20–22:07, Nagafen's Lair). The last
-// in-world line is a DoT tick at 21:20:59; the next thing the log says is the reconnect
-// preamble 46 minutes later. Nothing announced the logout, which is exactly the point: the
-// absence is real and `camped` must read false.
-slice([[747676, 747690]], 's2-session-crash-relog.log')
+// S2 CRASH / QUIT — a Welcome with NO camp (Fri Jul 31 21:03–22:07, Nagafen's Lair). Nothing
+// announced the logout, which is exactly the point: the absence is real and `camped` must read
+// false.
+//
+// TWO SPANS SINCE JOS-262, and the reason is the anchor rule (sessionDetector.ts). The player
+// went A.F.K. at 20:50 and stood in somebody else's raid: the last line the log prints ABOUT
+// HIM is `Your power fades.` at 21:03:14 (span A), and everything after it — the DoT ticks, the
+// stone spider, all of it — is other people's combat, which is exactly what a reconnect
+// preamble also carries. So the one-span window this fixture used to be contained no in-world
+// evidence at all and could no longer date the absence.
+//
+// The join is HONEST rather than convenient: replaying the WHOLE 1.6M-line log through the real
+// detector puts this login's `fromTs` at 21:03:14 too (measured 2026-08-12), because the 64
+// minutes the join skips contain nothing that names the character. The fixture answers what the
+// full log answers.
+slice(
+  [
+    [746083, 746086],
+    [747676, 747690]
+  ],
+  's2-session-crash-relog.log'
+)
 
 // S3 ABORTED CAMPS (Sun Aug 02 01:31–01:35, Butcherblock Mountains). The only two
 // `You abandon your preparations to camp.` lines in the entire log, each in the SAME second as

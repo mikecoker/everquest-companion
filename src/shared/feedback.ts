@@ -14,9 +14,9 @@
 // cannot act on.
 //
 // LAWS THIS FILE OBEYS:
-//   * PURE. Its ONLY import is the pure sibling `./sanitizeText` — no `node:`, no Electron, no
-//     DOM. `src/shared/**` compiles under BOTH tsconfigs and this module additionally has to
-//     bundle into a Lambda.
+//   * PURE. Its only imports are the pure siblings `./sanitizeText` and `./feedbackPerf` — no
+//     `node:`, no Electron, no DOM. `src/shared/**` compiles under BOTH tsconfigs and this module
+//     additionally has to bundle into a Lambda.
 //   * REJECT, NEVER TRUNCATE (§8.3 step 2). A description that is too long is an error the
 //     user is told about; silently cutting it is a lie to both parties. The validators trim
 //     SURROUNDING whitespace (normalization) and never shorten content.
@@ -44,9 +44,50 @@
 //
 // Plan of record: docs/plans/feedback-triage.md §3.1 (shape), §8.3 (handler contract).
 
+import { validatePerf, type FeedbackPerf } from './feedbackPerf'
 import { hasWireControls, sanitizeMultiline } from './sanitizeText'
+import {
+  MAX_ACHIEVEMENTS_LINES,
+  MAX_INVENTORY_LINES,
+  type AchievementsDumpMeta,
+  type InventoryDumpMeta,
+} from './feedbackAttachments'
 
-/** Bumped only for a BREAKING wire change; the server rejects anything else outright. */
+/**
+ * WHAT AN ATTACHED DUMP IS, re-exported so this file is still the one place the contract is read
+ * from. It moved to `./feedbackAttachments` for FILE MASS ONLY (JOS-441) — that file's header
+ * carries the split and the storePlans.ts precedent behind it — and every import path in the
+ * renderer, main, the triage CLI and the ingest Lambda is unchanged.
+ *
+ * NAMED, NEVER `export *`, and this cost one red test to learn: under tsx a star re-export is CJS
+ * interop that `cjs-module-lexer` cannot see through, so every named import THROUGH this file
+ * stops resolving at runtime while the typechecker stays green. `src/main/triage/store.ts`'s
+ * export block records the same trap in the same words.
+ */
+export {
+  MAX_ACHIEVEMENTS_LINES,
+  MAX_INVENTORY_LINES,
+  type AchievementsDumpMeta,
+  type FeedbackAchievementsPreview,
+  type FeedbackInventoryPreview,
+  type InventoryDumpMeta,
+  type InventoryUnavailable,
+} from './feedbackAttachments'
+
+/** Bumped only for a BREAKING wire change; the server rejects anything else outright.
+ *
+ *  IT STAYS 1 FOR THE INVENTORY ATTACHMENT (JOS-296) AND FOR THE ACHIEVEMENTS ONE (JOS-441), and
+ *  that is a decision, not an omission — the second time on exactly the argument below, which is
+ *  what makes it a rule rather than a one-off.
+ *  `v` is a HARD GATE — `validateSubmit` refuses any other value outright — so bumping it would
+ *  make every already-installed client's report a 400 the instant the new server deployed. An
+ *  ADDITIVE field cannot break either side: an old client simply omits `inventory` (which reads
+ *  as `null`, the same as attaching nothing), and an old SERVER drops it, because these
+ *  validators construct their return value field by field rather than passing the input through.
+ *  A version bump is for a change that makes an old payload WRONG; this one makes it incomplete,
+ *  which the contract already has a spelling for. What the ordering law still demands is that
+ *  the SERVER ship first — a client that declares an attachment the server has no column for
+ *  would upload nothing and say it did (infra/README.md carries the runbook). */
 export const FEEDBACK_API_VERSION = 1
 
 // ---- the record ------------------------------------------------------------------------
@@ -102,6 +143,22 @@ export interface FeedbackEnv {
   electron: string // process.versions.electron
   chrome: string // process.versions.chrome
   node: string // process.versions.node
+  /**
+   * THE LAST TEN MINUTES OF STALL AND TAIL-READ TIMING (JOS-369) — the one field here that is not
+   * a runtime string, and the reason is that it is not a fact about the BUILD, it is a fact about
+   * the SESSION being complained about (`shared/feedbackPerf.ts` states why it is raw rather than
+   * bucketed).
+   *
+   * IT RIDES `env` RATHER THAN GETTING A COLUMN, and that is the whole design: `env_json` is
+   * already `JSON.stringify(req.env)` in the ingest INSERT, so a sub-object here reaches the
+   * database with NO schema change and NO Lambda change beyond this validator. What it does cost
+   * is the ordering law JOS-296 wrote down — the SERVER (which bundles this file) must ship before
+   * a client that sends the field, or the field is dropped on the way in.
+   *
+   * ABSENT is the normal state, not an error: a report composed before `replayDone`, or on a build
+   * with no probe, has no timeline, and an empty block is not a block.
+   */
+  perf?: FeedbackPerf
 }
 
 /** Metadata about an attached slice. The BYTES go to S3, never through this JSON. */
@@ -122,10 +179,26 @@ export interface SubmitRequest {
   clientReportId: string // uuid v4 — IDEMPOTENCY key across offline retries (§6.4)
   clientTs: number // client clock, untrusted, kept for skew diagnostics
   log: LogSliceMeta | null
+  /** The SECOND attachment (JOS-296). Additive: absent reads as null, so a client built before
+   *  this field existed is a client that attached no dump, which is exactly what it meant. */
+  inventory: InventoryDumpMeta | null
+  /** The THIRD (JOS-441), on the identical additive terms — which is the whole argument for
+   *  keeping `v` at 1 a second time. */
+  achievements: AchievementsDumpMeta | null
 }
 
 export type SubmitResponse =
-  | { ok: true; reportId: string; upload: PresignedUpload | null }
+  | {
+      ok: true
+      reportId: string
+      upload: PresignedUpload | null
+      /** The dump's own presign. Optional on the wire so a server that predates JOS-296 is a
+       *  server that minted none — the client then uploads nothing and says `false`, rather
+       *  than reading a missing field as a failure. */
+      inventoryUpload?: PresignedUpload | null
+      /** The achievements dump's presign (JOS-441), optional for the same reason. */
+      achievementsUpload?: PresignedUpload | null
+    }
   | {
       ok: false
       error: SubmitErrorCode
@@ -167,8 +240,28 @@ export interface FeedbackContext {
   queued: number
   /** False when no character log is resolved, so the attach section cannot be offered. */
   logAvailable: boolean
+  /** False when `/outputfile inventory` has never been run on this machine — the dump control
+   *  is then DISABLED with the command as its hint, rather than hidden (JOS-296). Hiding it
+   *  would leave the user with no idea the option exists, which is the state the hint fixes. */
+  inventoryAvailable: boolean
+  /** The dump's mtime, epoch ms, or null when there is none. Carried on the CONTEXT and not
+   *  only on the preview so the dialog can state the age BEFORE anything is read or gzipped. */
+  inventoryUpdatedAt: number | null
+  /** False when `/outputfile achievements` has never been run on this machine (JOS-441) — same
+   *  disabled-with-a-hint treatment as the dump above, for the same reason. */
+  achievementsAvailable: boolean
+  /** The achievements dump's mtime, epoch ms, or null when there is none. */
+  achievementsUpdatedAt: number | null
 }
 
+/**
+ * Why there is no dump to attach. Exactly one of these or a built dump, never both.
+ *
+ * ONE TYPE FOR BOTH KINDS (JOS-441 kept it that way rather than cloning a second identical union):
+ * the four states are properties of "a file we tried to package", not of what is in the file, and
+ * the four sentences the dialog says about them differ only in the command they name — which the
+ * dialog already has to know. A second union would be four more members that must never drift.
+ */
 /**
  * What crosses IPC for the preview (§5.4): the true counts plus AT MOST `PREVIEW_MAX_LINES`
  * lines of text. The gz BYTES never cross — a 4 MB string does not belong on the bridge.
@@ -185,7 +278,13 @@ export interface FeedbackSlicePreview extends LogSliceMeta {
  * is one of these values (§4.2).
  */
 export type SubmitResult =
-  | { ok: true; reportId: string; logUploaded: boolean }
+  | {
+      ok: true
+      reportId: string
+      logUploaded: boolean
+      inventoryUploaded: boolean
+      achievementsUploaded: boolean
+    }
   | { ok: false; error: SubmitErrorCode; message: string; queued: boolean }
 
 /** The "Save a copy…" escape hatch: the OS save dialog lives in main (§4.2). */
@@ -204,6 +303,7 @@ export const MAX_DESCRIPTION = 4_000
 export const MAX_BODY_BYTES = 32 * 1024 // whole JSON request
 export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 // gzipped slice
 export const MAX_SLICE_LINES = 50_000
+/** The two DUMP row caps live in ./feedbackAttachments and are re-exported above. */
 export const PREVIEW_MAX_LINES = 5_000 // what crosses IPC for the preview (§5.4)
 export const LOG_WINDOW_CHOICES = [15, 30, 60] as const // minutes
 export const DEFAULT_LOG_WINDOW = 30
@@ -369,6 +469,14 @@ export function validateDraft(input: unknown): Validated<FeedbackDraft> {
   }
 }
 
+/**
+ * The free-form runtime strings on `env` (`process.platform`, `os.release()`,
+ * `process.versions.*`): present, bounded, and SINGLE-LINE — `lineText` rejects any control or
+ * invisible character outright, because these values are printed straight into the owner's
+ * terminal by the triage CLI and none of them can legitimately carry one.
+ */
+const ENV_LINE_FIELDS = ['platform', 'osRelease', 'arch', 'electron', 'chrome', 'node'] as const
+
 /** What the client says about itself. Every field is required — main always knows all of them. */
 export function validateEnv(input: unknown): Validated<FeedbackEnv> {
   if (!isRecord(input)) return fail('env', 'env is required.')
@@ -389,22 +497,20 @@ export function validateEnv(input: unknown): Validated<FeedbackEnv> {
   )
   if (!updateChannel.ok) return updateChannel
 
-  // The remaining fields are free-form runtime strings (`process.platform`, `os.release()`,
-  // `process.versions.*`): present, bounded, and SINGLE-LINE — `lineText` rejects any control
-  // or invisible character outright, because these values are printed straight into the owner's
-  // terminal by the triage CLI and none of them can legitimately carry one.
-  const platform = lineText(input.platform, 'env.platform', MAX_ENV_FIELD)
-  if (!platform.ok) return platform
-  const osRelease = lineText(input.osRelease, 'env.osRelease', MAX_ENV_FIELD)
-  if (!osRelease.ok) return osRelease
-  const arch = lineText(input.arch, 'env.arch', MAX_ENV_FIELD)
-  if (!arch.ok) return arch
-  const electron = lineText(input.electron, 'env.electron', MAX_ENV_FIELD)
-  if (!electron.ok) return electron
-  const chrome = lineText(input.chrome, 'env.chrome', MAX_ENV_FIELD)
-  if (!chrome.ok) return chrome
-  const node = lineText(input.node, 'env.node', MAX_ENV_FIELD)
-  if (!node.ok) return node
+  // The six free-form runtime strings, read in ONE loop rather than six copies of the same three
+  // lines. They are validated identically by construction, so the loop is not a compression of
+  // six decisions — it is the honest spelling of one decision applied six times.
+  const runtime = {} as Record<(typeof ENV_LINE_FIELDS)[number], string>
+  for (const key of ENV_LINE_FIELDS) {
+    const value = lineText(input[key], `env.${key}`, MAX_ENV_FIELD)
+    if (!value.ok) return value
+    runtime[key] = value.value
+  }
+
+  // The perf timeline (JOS-369), validated where its shape is DECLARED. Absent reads as null and
+  // the field is then omitted below — the additive spelling, same as both attachments.
+  const perf = validatePerf(input.perf)
+  if (!perf.ok) return perf
 
   return {
     ok: true,
@@ -412,12 +518,8 @@ export function validateEnv(input: unknown): Validated<FeedbackEnv> {
       appVersion: appVersion.value,
       channel: channel.value,
       updateChannel: updateChannel.value,
-      platform: platform.value,
-      osRelease: osRelease.value,
-      arch: arch.value,
-      electron: electron.value,
-      chrome: chrome.value,
-      node: node.value,
+      ...runtime,
+      ...(perf.value === null ? {} : { perf: perf.value }),
     },
   }
 }
@@ -463,6 +565,98 @@ export function validateLogMeta(input: unknown): Validated<LogSliceMeta> {
 }
 
 /**
+ * The attached DUMP's metadata (JOS-296) — `validateLogMeta`'s twin, and bounded in the same
+ * places for the same reason: these numbers size the presign policy
+ * (`content-length-range 1..MAX_UPLOAD_BYTES`) before a byte of the dump exists in the cloud.
+ *
+ * `updatedAt` is bounded as any epoch-ms stamp is and NOT compared against the server's clock:
+ * it is the file's mtime as the CLIENT's filesystem reports it, and a machine with a wrong clock
+ * is a machine whose bug report we still want. It is diagnostic, never authoritative —
+ * `received_at` is the authority for when anything happened, exactly as with `clientTs`.
+ *
+ * An EMPTY dump is not an attachment: main sends `inventory: null` rather than a zero-row dump,
+ * so `lines >= 1` and `bytes >= 1` are both real conditions here.
+ */
+export function validateInventoryMeta(input: unknown): Validated<InventoryDumpMeta> {
+  if (!isRecord(input)) return fail('inventory', 'inventory must be an object or null.')
+
+  const bytes = integerInRange(input.bytes, 'inventory.bytes', 1, MAX_UPLOAD_BYTES)
+  if (!bytes.ok) return bytes
+  const lines = integerInRange(input.lines, 'inventory.lines', 1, MAX_INVENTORY_LINES)
+  if (!lines.ok) return lines
+  const updatedAt = integerInRange(
+    input.updatedAt,
+    'inventory.updatedAt',
+    0,
+    Number.MAX_SAFE_INTEGER,
+  )
+  if (!updatedAt.ok) return updatedAt
+  const sha256 = matching(input.sha256, 'inventory.sha256', SHA256_HEX_RE, '64 hex characters')
+  if (!sha256.ok) return sha256
+
+  return {
+    ok: true,
+    value: {
+      bytes: bytes.value,
+      lines: lines.value,
+      updatedAt: updatedAt.value,
+      sha256: sha256.value,
+    },
+  }
+}
+
+/**
+ * The attached ACHIEVEMENTS dump's metadata (JOS-441) — the same four bounds over its own field
+ * names, so a rejection says `achievements.lines` and not `inventory.lines`. The field names are
+ * the only reason this is not one function with a prefix argument: an error message that names the
+ * wrong attachment is a report nobody can act on.
+ */
+export function validateAchievementsMeta(input: unknown): Validated<AchievementsDumpMeta> {
+  if (!isRecord(input)) return fail('achievements', 'achievements must be an object or null.')
+
+  const bytes = integerInRange(input.bytes, 'achievements.bytes', 1, MAX_UPLOAD_BYTES)
+  if (!bytes.ok) return bytes
+  const lines = integerInRange(input.lines, 'achievements.lines', 1, MAX_ACHIEVEMENTS_LINES)
+  if (!lines.ok) return lines
+  const updatedAt = integerInRange(
+    input.updatedAt,
+    'achievements.updatedAt',
+    0,
+    Number.MAX_SAFE_INTEGER,
+  )
+  if (!updatedAt.ok) return updatedAt
+  const sha256 = matching(input.sha256, 'achievements.sha256', SHA256_HEX_RE, '64 hex characters')
+  if (!sha256.ok) return sha256
+
+  return {
+    ok: true,
+    value: {
+      bytes: bytes.value,
+      lines: lines.value,
+      updatedAt: updatedAt.value,
+      sha256: sha256.value,
+    },
+  }
+}
+
+/**
+ * AN OPTIONAL ATTACHMENT, in ONE place for all of them.
+ *
+ * `null` and ABSENT are the same statement — "nothing attached" — and this is the only function
+ * in the contract that says so. That matters more since there are two attachments than it did
+ * when there was one: the rule that makes a new optional field ADDITIVE (an old client omits it,
+ * a new server reads the omission as null) is now written down once rather than copied per
+ * field, so the next attachment cannot accidentally be spelled as required.
+ */
+function optionalMeta<T>(
+  raw: unknown,
+  validate: (v: unknown) => Validated<T>,
+): Validated<T | null> {
+  if (raw === null || raw === undefined) return { ok: true, value: null }
+  return validate(raw)
+}
+
+/**
  * The whole request, as the Lambda sees it (§8.3 step 2). Cheapest checks first; the first
  * failure wins and names its field.
  *
@@ -492,12 +686,14 @@ export function validateSubmit(input: unknown): Validated<SubmitRequest> {
   if (typeof input.clientTs !== 'number' || !Number.isFinite(input.clientTs))
     return fail('clientTs', 'clientTs must be a number.')
 
-  let log: LogSliceMeta | null = null
-  if (input.log !== null && input.log !== undefined) {
-    const meta = validateLogMeta(input.log)
-    if (!meta.ok) return meta
-    log = meta.value
-  }
+  // ALL THREE ATTACHMENTS, read the same way (JOS-296, JOS-441): absent and null are the same
+  // answer, and a present-but-malformed one is a named 400 rather than a silently dropped field.
+  const log = optionalMeta(input.log, validateLogMeta)
+  if (!log.ok) return log
+  const inventory = optionalMeta(input.inventory, validateInventoryMeta)
+  if (!inventory.ok) return inventory
+  const achievements = optionalMeta(input.achievements, validateAchievementsMeta)
+  if (!achievements.ok) return achievements
 
   return {
     ok: true,
@@ -508,7 +704,9 @@ export function validateSubmit(input: unknown): Validated<SubmitRequest> {
       installId: installId.value,
       clientReportId: clientReportId.value,
       clientTs: input.clientTs,
-      log,
+      log: log.value,
+      inventory: inventory.value,
+      achievements: achievements.value,
     },
   }
 }

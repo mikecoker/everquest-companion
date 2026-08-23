@@ -247,6 +247,41 @@ export function bandRects(bands: readonly ZoneBand[], scale: ChartScale, minW = 
   return out
 }
 
+/** How the strip is DRAWN: its height in user units, the alpha its rectangles take, and which of
+ *  the two jobs it is doing — carried so a test and the DOM can name it rather than infer it. */
+export interface BandStripStyle {
+  kind: 'full' | 'quiet'
+  height: number
+  opacity: number
+}
+
+/** The strip doing its ordinary job — telling several zones apart along the top of a plot. */
+const STRIP_NORMAL: BandStripStyle = { kind: 'full', height: BAND_H, opacity: 0.75 }
+/** …and the strip with nothing to distinguish: one zone, the whole window. */
+const STRIP_QUIET: BandStripStyle = { kind: 'quiet', height: 3, opacity: 0.4 }
+/** How much of the plot one band must cover before it counts as "the whole window". Not 100%:
+ *  the merge clips to the domain and a zone line landing a second inside it leaves a sliver. */
+const FULL_COVERAGE = 0.98
+
+/**
+ * THE STRIP'S WEIGHT, WHICH DEPENDS ON WHETHER IT IS SAYING ANYTHING (JOS-339).
+ *
+ * The owner's report: a single zone covering the whole window renders as a thick slab across the
+ * top of both plots — it reads as chrome, or worse as a bar of its own, when it is context. And it
+ * is context with nothing to contrast against: one band spanning everything distinguishes NOTHING.
+ * The legend under the lower plot already names the zone and its dwell, so at full coverage the
+ * strip's whole job is "and you were somewhere the entire time", which a 3-unit rule at 0.4 says
+ * as well as an 8-unit slab at 0.85 and without shouting over the curve beneath it.
+ *
+ * TWO ZONES AND IT IS BACK TO FULL WEIGHT, because then the strip is doing the job it exists for:
+ * where one zone ends and the next begins is a real edge and the eye has to be able to find it.
+ */
+export function bandStripStyle(rects: readonly ZoneBandRect[], scale: ChartScale): BandStripStyle {
+  if (rects.length !== 1) return STRIP_NORMAL
+  const plotW = scale.w - 2 * scale.padX
+  return plotW > 0 && rects[0].w >= plotW * FULL_COVERAGE ? STRIP_QUIET : STRIP_NORMAL
+}
+
 /**
  * The legend rows: the top `limit` zones by dwell inside the visible domain, plus how many
  * distinct zones did not fit. This is the identification path that does NOT depend on hover

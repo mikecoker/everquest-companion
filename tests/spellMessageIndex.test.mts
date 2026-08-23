@@ -103,7 +103,7 @@ function wikiDb(): SpellDb {
 function effectiveDb(): SpellDb {
   const db = wikiDb()
   const miner = new MessageOverlayMiner(db.byKey)
-  miner.merge(baselineJson as unknown as MessageOverlay)
+  miner.merge(baselineJson as unknown as MessageOverlay, 'baseline')
   applyOverlayCorrections(db, miner.deriveLandingCorrections())
   return db
 }

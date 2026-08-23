@@ -128,6 +128,12 @@ test('the "only Rogue poison disciplines are on Legends" statement is carried, n
   // prose. The CLASS pages do not, so BER/MNK/RNG rows ship — but labeled, never silently
   // (law 1). If this line ever disappears the disciplines half is asserting more than the
   // wiki does.
+  //
+  // THIS IS THE SCRAPE, AND THE SCRAPE STAYS PRISTINE (JOS-351). The wiki still disputes RNG,
+  // so the sentence is still here; whether a ROW wears the chip is decided one layer up by
+  // `CONFIRMED_UNLOCKS` (src/main/data/levelUnlocks.ts), where a player's in-game sighting can
+  // clear it. Do not delete a line from `disputed[]` to un-chip a row — `npm run scrape:classes`
+  // would put it back, and the wiki would still be saying what it says.
   const lines = classes.disputed.filter((d) => d.startsWith('discUnlocks '))
   assert.ok(lines.length >= 3, `only ${lines.length} discipline disputes`)
   for (const abbr of ['BER', 'MNK', 'RNG']) {

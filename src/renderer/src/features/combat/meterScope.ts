@@ -22,13 +22,27 @@
 // `effectiveScope` is a VALUE, so it is imported RELATIVELY — the same rule useGlobalFight.ts and
 // dashboardData.ts state in their own headers. The node tests run without the renderer's
 // `@shared/*` alias, and this module has its own test file (tests/meterScope.test.mts).
-import { effectiveScope } from '../../../../shared/roster'
+import { effectiveScope, isScopedKind } from '../../../../shared/roster'
 import type { MeterScope, RosterSnap } from '@shared/roster'
 import type { HealSourceView, SourceView } from '@shared/combat'
 
-/** The canonical roster key behind a `member:<key>` source id, or null for any other row. */
+/** The canonical roster key behind a `member:<key>` source id, or null for any other row. Both the
+ *  `'member'` and the `'other'` kind carry this id shape (JOS-430) — one person, one row, whether
+ *  or not the roster has learned their name yet. */
 export function memberKeyOf(id: string): string | null {
   return id.startsWith('member:') ? id.slice('member:'.length) : null
+}
+
+/**
+ * The CHARMER's canonical key behind an ally-pet row id (JOS-250). The id is
+ * `allypet:<charmerKey>:<petKey>` — the charmer sits in the middle because the pet's own key may
+ * itself contain a colon-free but space-bearing mob name, and because the ROW is about the person.
+ */
+export function charmerKeyOf(id: string): string | null {
+  if (!id.startsWith('allypet:')) return null
+  const rest = id.slice('allypet:'.length)
+  const cut = rest.indexOf(':')
+  return cut <= 0 ? null : rest.slice(0, cut)
 }
 
 /** The canonical key behind a healer id (`heal:<key>`, or 'you' for your own row). */
@@ -50,9 +64,14 @@ export function scopeSources(rows: SourceView[], scope: MeterScope, roster: Rost
   const eff = effectiveScope(scope, roster)
   if (eff === 'everyone') return rows
   const kept = rows.filter((r) => {
-    if (r.kind !== 'member') return true
+    // An ally's charm pet filters like the person who charmed it (shared/roster.ts scopeAllows
+    // carries the argument); the key it filters on is the CHARMER's, off the row id.
+    if (!isScopedKind(r.kind)) return true
     if (eff === 'you') return false
-    const key = memberKeyOf(r.id)
+    // `'other'` (JOS-430) reads its key exactly where `'member'` does — same id namespace — and is
+    // then asked the same question of the ROSTER, which is what makes Group an allowlist rather
+    // than a statement about the kind a row happened to be recorded under.
+    const key = r.kind === 'allyPet' ? charmerKeyOf(r.id) : memberKeyOf(r.id)
     return key !== null && onRoster(roster, key)
   })
   if (kept.length === rows.length) return rows

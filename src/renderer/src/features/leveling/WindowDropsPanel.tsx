@@ -27,7 +27,9 @@ import { windowItemRows, type WindowItemRow } from '@shared/lootRates'
 import { formatDropRate } from '../../lib/formatRate'
 import { EQ_ITEM_COLORS } from '../../lib/ItemWindow'
 import { useLootHistory } from '../loot/useLootHistory'
-import { NONE, activeSpanText } from './rangeStatsRows'
+import { basisRead, pickRate, type BasisRead } from '@shared/rateBasis'
+import { useRateBasis } from '../timeslice/useRateBasis'
+import { NONE, basisSpanText, withBasis } from './rangeStatsRows'
 import type { ScopedStats } from './windowScope'
 
 export interface WindowDropsPanelProps {
@@ -50,13 +52,35 @@ export interface WindowDropsPanelProps {
 function useScopedDrops(scope: ScopedStats): WindowItemRow[] {
   const events = useLootHistory()
   return useMemo(
-    () => windowItemRows({ events, t0: scope.range.t0, t1: scope.range.t1, activeMs: scope.stats.activeMs }),
+    () =>
+      windowItemRows({
+        events,
+        t0: scope.range.t0,
+        t1: scope.range.t1,
+        // The scope's own spans, whole (JOS-288) — `RangeStats` is assignable to `WindowSpans`, so
+        // both denominators arrive together and the panel picks the one in force.
+        spans: scope.stats,
+        // BOTH halves of the slice (JOS-130). `spans` above is already the zone's own time when
+        // the slice carries a zone, so counting every zone's drops against it would put a rate
+        // under a denominator it was never measured over.
+        zoneKey: scope.zoneKey,
+        zoneExactKey: scope.zoneExactKey
+      }),
     [events, scope]
   )
 }
 
-function DropRow({ row, onOpenItem }: { row: WindowItemRow; onOpenItem?: (item: string) => void }): JSX.Element {
-  const rate = row.dropsPerHourActive == null ? NONE : formatDropRate(row.dropsPerHourActive)
+function DropRow({
+  row,
+  read,
+  onOpenItem
+}: {
+  row: WindowItemRow
+  read: BasisRead
+  onOpenItem?: (item: string) => void
+}): JSX.Element {
+  const perHour = pickRate(read, row.dropsPerHourActive, row.dropsPerHourWall)
+  const rate = perHour == null ? NONE : formatDropRate(perHour)
   return (
     <Stack direction="row" spacing={1} alignItems="baseline" sx={{ py: 0.35 }} data-testid="leveling-drop-row">
       <Box sx={{ flexGrow: 1, minWidth: 0 }}>
@@ -100,26 +124,48 @@ function DropRow({ row, onOpenItem }: { row: WindowItemRow; onOpenItem?: (item: 
   )
 }
 
+/**
+ * The panel's ceiling in px — about eighteen rows, which is the "generous, not a porthole" the
+ * JOS-289 constraint asks for. A pixel count rather than a percentage on purpose: the tab has no
+ * fixed height any more, so a `%` max-height has nothing to be a percentage OF and resolves to
+ * none — which for a 641-row `All` scope would be twenty thousand pixels of page.
+ */
+const DROPS_MAX_H = 520
+
 export function WindowDropsPanel({ scope, onOpenItem }: WindowDropsPanelProps): JSX.Element {
   const rows = useScopedDrops(scope)
-  const activeMs = scope.stats.activeMs
+  // ONE basis read for the panel (JOS-288): the caption's span and every row's denominator are the
+  // same number, and the just-arrived gate fires once for all of them.
+  const { basis } = useRateBasis()
+  const read = basisRead(basis, scope.stats)
   return (
     <Paper
       variant="outlined"
-      // THE FIXED-HEIGHT LAW, on a column that already holds two other panels: an explicit floor
-      // AND ceiling, with the scroll on the list inside. Without the floor this is just another
-      // shrinkable flex item — MEASURED in the e2e, where the three-panel column squeezed it to a
-      // clipped strip whose rows were in the DOM and unclickable. The ceiling is the AA ledger's
-      // own recipe (a share of the column, never a pixel count), so a tall window gives the list
-      // more room and a short one still leaves the progress feed something.
-      sx={{ p: 2, display: 'flex', flexDirection: 'column', minHeight: 132, maxHeight: '40%' }}
+      // THE ONE PANEL ON THIS TAB THAT KEEPS A WINDOW, AND IT IS A CEILING RATHER THAN A HEIGHT
+      // (JOS-289). Every other panel here now takes its honest height and lets the page scroll;
+      // this list cannot, because its row count is unbounded by the SCOPE rather than by the data:
+      // 641 distinct looted item names in the owner's log (measured 2026-08-13), all of which the
+      // `All` slice legitimately asks for. So the rule is the JOS-260 one — windowed where the row
+      // count demands it, and GENEROUS rather than a porthole. `maxHeight` (never `height`, never
+      // the old `40%` share of a column height that no longer exists) means a scope with a dozen
+      // drops shows all twelve with no scrollbar at all, and only a genuinely long list scrolls.
+      sx={{ p: 2, display: 'flex', flexDirection: 'column', maxHeight: DROPS_MAX_H }}
       data-testid="leveling-drops"
     >
       <Typography variant="subtitle2">Dropping in this window</Typography>
-      <Typography variant="caption" color="text.secondary" gutterBottom display="block">
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        gutterBottom
+        display="block"
+        // The span every drops/hr on this panel divides by, so it hovers what that span IS
+        // (JOS-249). Native title, no popper.
+        title={rows.length > 0 ? withBasis('How much of this window the rates below are per.', read) : undefined}
+      >
         {/* ONE span for the whole panel — every rate below divides by it, stated once rather
             than repeated on every row. Nothing is said when there is nothing to measure. */}
-        {rows.length > 0 ? activeSpanText(activeMs) : null}
+        {rows.length > 0 ? basisSpanText(read) : null}
+        {rows.length > 0 && !read.measurable ? ' · too short to rate' : null}
       </Typography>
       {rows.length === 0 && (
         // An empty window is a STATE and says which window it is empty for. A silently blank box
@@ -128,10 +174,11 @@ export function WindowDropsPanel({ scope, onOpenItem }: WindowDropsPanelProps): 
           no drops in {scope.label}
         </Typography>
       )}
-      {/* The list owns the scroll — a long window can hold hundreds of distinct items. */}
-      <Box sx={{ flexGrow: 1, minHeight: 0, overflow: 'auto', pr: 0.75 }}>
+      {/* The list owns the scroll, and only once it has outgrown the ceiling above — a long
+          window really can hold hundreds of distinct items (641 measured). */}
+      <Box sx={{ minHeight: 0, overflowY: 'auto', pr: 0.75 }} data-testid="leveling-drops-list">
         {rows.map((r) => (
-          <DropRow key={r.key} row={r} onOpenItem={onOpenItem} />
+          <DropRow key={r.key} row={r} read={read} onOpenItem={onOpenItem} />
         ))}
       </Box>
     </Paper>

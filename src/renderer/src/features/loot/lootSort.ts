@@ -1,6 +1,13 @@
 // THE grouped-loot sort orders, pure — the same shape questSort.ts has for the Quests tab.
-// `groupLootRows` tallies, then calls exactly one comparator from here, then re-pins favorites,
-// so a new order is a case in this file and a line in LOOT_SORT_OPTIONS, and nothing else moves.
+// `groupLootRows` tallies and then calls exactly one comparator from here, so a new order is a
+// case in this file and a line in LOOT_SORT_OPTIONS, and nothing else moves.
+//
+// THERE IS NO SECOND PASS ANY MORE (JOS-345). The grouped table used to re-sort the comparator's
+// output by a favorited flag, pinning starred items into a block on top; the star column left the
+// loot window with the owner's ruling, and its ordering rule went with the control that set it —
+// a pin nobody can see or toggle from this window is just an order the reader cannot explain.
+// What the table shows now is EXACTLY what the chosen comparator says, which is what the Sort
+// control has always claimed it was.
 //
 // WHY THIS IS ITS OWN MODULE and not a few lines inside lootGrouping.ts: lootGrouping imports
 // lootItemData → data/index → `@shared/profiles`, a VALUE import that does not resolve outside

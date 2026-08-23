@@ -30,7 +30,13 @@ import type {
   ReportStatus,
   Severity
 } from '../../shared/feedback'
-import { sanitizeAndFlag, sanitizeMultiline, sanitizeOneLine } from '../../shared/sanitizeText'
+import { validatePerf, type FeedbackPerf } from '../../shared/feedbackPerf'
+import {
+  sanitizeAndFlag,
+  sanitizeMultiline,
+  sanitizeOneLine,
+  sanitizeTabbedAndFlag
+} from '../../shared/sanitizeText'
 import { scrubLines } from '../../shared/logScrub'
 
 /** A DSQL row as node-postgres hands it over: every column is `unknown` until proven. */
@@ -68,6 +74,9 @@ const optNum = (v: unknown): number | undefined => (typeof v === 'number' ? v : 
  */
 export function parseEnv(raw: unknown): Record<string, string> {
   if (typeof raw !== 'string' || raw.trim().length === 0) return {}
+  // `perf` is the one key that is NOT a one-line runtime string (JOS-369) — it is a sixty-row
+  // timeline, and flattening it here would put five kilobytes of JSON in a caption cell. It gets
+  // its own parsed field on the detail (`parsePerf`), so it is skipped rather than stringified.
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -77,9 +86,32 @@ export function parseEnv(raw: unknown): Record<string, string> {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (k === 'perf') continue
     out[sanitizeOneLine(k)] = sanitizeOneLine(typeof v === 'string' ? v : JSON.stringify(v))
   }
   return out
+}
+
+/**
+ * The perf timeline off `env_json` (JOS-369), or `undefined`.
+ *
+ * TOTAL, like `parseEnv`, and RE-VALIDATED rather than trusted: the rows in this table were
+ * accepted by `validatePerf` at ingest, but a table also holds rows written by older code and
+ * rows an owner has hand-edited, and the panel reconstructs the block field by field so a
+ * malformed one renders as absence instead of as a broken grid. Nothing here is sanitized because
+ * nothing here is text — every field the validator returns is a whole number, a boolean, or a
+ * member of a closed enum.
+ */
+export function parsePerf(raw: unknown): FeedbackPerf | undefined {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const checked = validatePerf((parsed as { perf?: unknown }).perf)
+    return checked.ok && checked.value !== null ? checked.value : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** `log_json` holds the LogSliceMeta the client sent. Total, like parseEnv. */
@@ -137,12 +169,14 @@ export function toDetail(row: Row, logLanded: boolean): TriageDetail {
   const issueUrl = opt(row.issue_url)
   const note = opt(row.disposition)
   const redactedAt = optNum(row.redacted_at)
+  const perf = parsePerf(row.env_json)
   const log: TriageLogState = !declaresLog(row) && !key ? 'none' : logLanded ? 'present' : 'missing'
   return {
     row: toRow(row),
     installId: str(row.install_id),
     clientTs: num(row.client_ts),
     env: parseEnv(row.env_json),
+    ...(perf === undefined ? {} : { perf }),
     ...(dupeOf ? { dupeOf } : {}),
     ...(issueUrl ? { issueUrl } : {}),
     ...(note ? { note } : {}),
@@ -225,7 +259,7 @@ export function rescrubNotes(re: SliceRescrub): string[] {
     notes.push(
       `WARNING: re-scrub removed ${String(re.dropped)} line(s) of third-party chat from this ` +
         'slice. Our own client removes them BEFORE uploading, so an honest upload has a delta ' +
-        'of zero — this one was not scrubbed by our client. The S3 object is untouched (it is ' +
+        'of zero - this one was not scrubbed by our client. The S3 object is untouched (it is ' +
         'the evidence); only the local copy was cleaned.'
     )
   }
@@ -236,6 +270,111 @@ export function rescrubNotes(re: SliceRescrub): string[] {
     )
   }
   return notes
+}
+
+// ---- the inventory dump (JOS-296) ----------------------------------------------------
+
+/**
+ * THE DUMP'S THIRD LEG — the twin of `rescrubSlice`, minus the scrubber, and the missing half is
+ * the point.
+ *
+ * `scrubLines` exists to drop OTHER PEOPLE'S WORDS out of a log window. An inventory export has
+ * none: it is a tab-separated table of slot names, item names, item ids and counts, swept row by
+ * row before this was written (the finding, with what the sweep looked for and did not find, is
+ * in the header of `src/main/feedback/inventory.ts`). Running a chat-line drop list over it could
+ * only ever remove a row whose ITEM NAME tripped a pattern, which would corrupt the evidence to
+ * protect nobody. So the scrub is deliberately absent and this comment is why.
+ *
+ * WHAT DOES STILL APPLY is the other half of the slice's argument: the presign policy pins an
+ * upload's key, size and content-type and CANNOT pin its content, and this file is one an
+ * operator will eventually `cat`. So every line goes through the SAME shared text sanitizer — an
+ * ESC in a "row" of a forged dump is an escape sequence in the owner's shell. `cleaned` is
+ * therefore "lines that carried something no real dump has ever contained", and for an honest
+ * upload it is ZERO.
+ *
+ * AND THE SANITIZER IS `sanitizeTabbedLine`, NOT `sanitizeOneLine` (JOS-404). A dump is
+ * TAB-SEPARATED — `Location<TAB>Name<TAB>ID<TAB>Count<TAB>Slots` — so the one-line fold counted
+ * every honest row as "carried a control character" (1079 of 1080 on report
+ * 01M081TPHPGB173YCC4YH7AMZB) and the local copy lost the columns the app's own dump parser reads.
+ * A warning that fires on every genuine dump is a warning nobody reads, which is exactly what the
+ * silence in `inventoryNotes` is for. The shared helper's header carries the full argument for why
+ * TAB survives here and in no other display path.
+ *
+ * THE LINE TERMINATORS ARE PRESERVED BYTE FOR BYTE, hence the capturing split rather than
+ * `split(/\r?\n/).join('\n')`: a real dump is CRLF (both committed fixtures are), and the claim
+ * this module lets the CLI make about an honest upload is that the local copy is IDENTICAL to the
+ * S3 object. Normalizing newlines would quietly falsify it. A stray CR *inside* a row is not a
+ * terminator, is not content either, and is still stripped and counted.
+ */
+export function sanitizeInventory(raw: string): { text: string; cleaned: number } {
+  let cleaned = 0
+  const parts = raw.split(/(\r\n|\n)/)
+  const out = parts.map((part, i) => {
+    if (i % 2 === 1) return part // the captured terminator, passed through untouched
+    const s = sanitizeTabbedAndFlag(part)
+    if (s.changed) cleaned++
+    return s.text
+  })
+  return { text: out.join(''), cleaned }
+}
+
+/**
+ * THE ACHIEVEMENTS DUMP'S THIRD LEG (JOS-441) — the same function, and deliberately the same one.
+ *
+ * Every sentence above is true of this file too, on ITS OWN sweep rather than by inheritance
+ * (`src/main/feedback/achievements.ts` carries it): tab-separated, no chat to scrub, an operator
+ * will `cat` it, and it is CRLF so the terminators must survive byte for byte. So this is an
+ * ALIAS rather than a copy — two identical sanitizers would be two things to keep in step, and
+ * the JOS-404 lesson (the wrong sanitizer flagged 1,079 of 1,080 honest rows) is one worth
+ * learning once.
+ */
+export const sanitizeAchievements = sanitizeInventory
+
+/** What the owner-side read of a dump found, as `store.ts downloadInventory` reports it. */
+export interface InventoryDownload {
+  /** Where the (sanitized) copy lives on this machine. */
+  path: string
+  /** Lines that carried control characters or ANSI escapes and were cleaned. */
+  cleaned: number
+  /** True when this is a CACHED copy whose count was never recorded. */
+  fromLegacyCache: boolean
+}
+
+/**
+ * The dump's verdict as PROSE, for the CLI to print. Empty when there is nothing to say — which
+ * is the honest-client case, and the case that must stay silent so the other one is loud.
+ */
+export function inventoryNotes(dl: InventoryDownload): string[] {
+  if (dl.fromLegacyCache) {
+    return [
+      '[inventory: this copy was cached before the sanitize-on-read counter existed, so what it ' +
+        `cleaned was never measured. Delete ${dl.path} and re-run for a real answer.]`
+    ]
+  }
+  if (dl.cleaned === 0) return []
+  return [
+    `WARNING: ${String(dl.cleaned)} row(s) of this inventory export carried control characters ` +
+      'or ANSI escapes and were sanitized before being written to disk. A real dump contains ' +
+      'none - this one did not come from the game. The S3 object is untouched (it is the ' +
+      'evidence); only the local copy was cleaned.'
+  ]
+}
+
+/** The same verdict for the achievements export (JOS-441), naming the file it is about. */
+export function achievementsNotes(dl: InventoryDownload): string[] {
+  if (dl.fromLegacyCache) {
+    return [
+      '[achievements: this copy was cached before the sanitize-on-read counter existed, so what ' +
+        `it cleaned was never measured. Delete ${dl.path} and re-run for a real answer.]`
+    ]
+  }
+  if (dl.cleaned === 0) return []
+  return [
+    `WARNING: ${String(dl.cleaned)} row(s) of this achievements export carried control ` +
+      'characters or ANSI escapes and were sanitized before being written to disk. A real dump ' +
+      'contains none - this one did not come from the game. The S3 object is untouched (it is ' +
+      'the evidence); only the local copy was cleaned.'
+  ]
 }
 
 /** Default kill-switch prose for a cluster whose seed row is missing entirely. */

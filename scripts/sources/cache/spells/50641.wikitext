@@ -1,5 +1,5 @@
 {{Classic Era}}
-{{Spellpage|
+{{Spellpagesmart|
 
 | spellname = Minor Conjuration: Water
 | spellicon = 38
@@ -8,18 +8,18 @@
 | classes = * [[Magician]] - Level 31
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Minor Conjuration: Water Summon|Minor Conjuration: Water]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 29 [[Minor Conjuration: Water Summon|Water Elemental]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 200
 | range =  
 | casting_time = 10.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 1.50
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 

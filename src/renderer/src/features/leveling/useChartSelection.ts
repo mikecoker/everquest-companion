@@ -21,9 +21,17 @@
 // so a press lands on IT and bubbles up. Capturing on the wrapper also means a drag that
 // leaves the element keeps tracking, and `ev.currentTarget` stays the chart the drag STARTED
 // on — which is the rect every later coordinate is measured against.
+//
+// THE DRAFT IS NOT VIEW STATE (JOS-290). It used to be `useState` in this hook, which is called
+// from `LevelingView` — so a pointermove re-rendered the entire tab, MEASURED at 284 ms of main
+// thread per move on the owner's log. It now goes into a one-slot external store that only the
+// two `SelectionBand`s subscribe to (selectionDraft.ts states the whole measurement). What is
+// still React state here is `sel` and `dragging`, and both of those change at most twice per
+// gesture. Nothing about WHAT a drag selects moved: `draftRange` is the old formula, lifted.
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { pxToUser, tOf, type ChartScale } from './levelChartGeometry'
+import { createDraftStore, draftRange, type DraftStore } from './selectionDraft'
 
 /** Travel, in CSS px, before a press counts as a drag rather than a click. */
 export const DRAG_THRESHOLD_PX = 5
@@ -50,8 +58,16 @@ export interface SelectionPointerHandlers {
 export interface SelectionApi extends SelectionPointerHandlers {
   /** committed selection, or null. */
   sel: ChartSelection | null
-  /** live band while the pointer is down and past the threshold (the ghost rect). */
-  draft: ChartSelection | null
+  /**
+   * The live band while the pointer is down and past the threshold (the ghost rect) — as a
+   * SUBSCRIPTION rather than a value (JOS-290).
+   *
+   * It is handed down through `ChartChrome` and read by `SelectionBand` alone. A caller that
+   * merely wants "is a drag happening" wants `dragging`; a caller that renders the band reads
+   * this. Nothing else may subscribe: the whole point is that a pointermove reaches exactly the
+   * components that draw the rectangle and no others.
+   */
+  draft: DraftStore
   /** TRUE from the moment the drag threshold is crossed until pointer-up. The hover tooltip
    *  MUST NOT render while this is true — the disambiguation contract. */
   dragging: boolean
@@ -68,7 +84,9 @@ interface Drag {
 
 export function useChartSelection(scale: ChartScale | null): SelectionApi {
   const [sel, setSel] = useState<ChartSelection | null>(null)
-  const [draft, setDraft] = useState<ChartSelection | null>(null)
+  // ONE store per mounted hook, created lazily — `useState`'s initializer, not a `useRef` written
+  // during render, so it is built exactly once and never on a re-render that throws it away.
+  const [draft] = useState(createDraftStore)
   const [dragging, setDragging] = useState(false)
   const dragRef = useRef<Drag | null>(null)
   // Mirrors `dragging` for the handlers: they run outside the render that would give them a
@@ -97,8 +115,8 @@ export function useChartSelection(scale: ChartScale | null): SelectionApi {
     dragRef.current = null
     draggingRef.current = false
     setDragging(false)
-    setDraft(null)
-  }, [])
+    draft.set(null)
+  }, [draft])
 
   const onPointerDown = useCallback(
     (ev: ReactPointerEvent<HTMLElement>): void => {
@@ -125,9 +143,11 @@ export function useChartSelection(scale: ChartScale | null): SelectionApi {
       }
       const ts = tsAt(d.el, ev.clientX)
       if (ts == null) return
-      setDraft({ t0: Math.min(d.originTs, ts), t1: Math.max(d.originTs, ts) })
+      // THE ONE WRITE A POINTERMOVE MAKES. It reaches the two bands and stops there; an equal
+      // value (the pointer moved inside one pixel of the domain) notifies nobody at all.
+      draft.set(draftRange(d.originTs, ts))
     },
-    [tsAt]
+    [tsAt, draft]
   )
 
   const onPointerUp = useCallback(
@@ -142,8 +162,8 @@ export function useChartSelection(scale: ChartScale | null): SelectionApi {
         return
       }
       if (ts == null) return
-      const t0 = Math.min(d.originTs, ts)
-      const t1 = Math.max(d.originTs, ts)
+      // THE SAME FORMULA THE BAND DREW WITH — one function, so what commits is what was shown.
+      const { t0, t1 } = draftRange(d.originTs, ts)
       if (t1 - t0 < MIN_SELECTION_MS) return
       setSel({ t0, t1 })
     },

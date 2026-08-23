@@ -169,7 +169,19 @@ export const ZONES: readonly ZoneEntry[] = [
   // Legends invented — and the player has walked it, so calling it out-of-era would be a lie.
   { short: 'newsebexp', name: 'New Sebilis Expedition' },
   { short: 'freportn', name: 'North Freeport', era: 'classic' },
-  { short: 'kaladima', name: 'North Kaladim', era: 'classic' },
+  // KALADIM'S STEMS RUN THE OTHER WAY, AND BOTH SOURCES SAY SO (JOS-415, reported 8AX84S:
+  // "When I zone into or manually select South Kaladim the North Kaladim map loads and visa
+  // versa"). The `a`/`b` suffixes read like `north`/`south` and the seed table was taken on that
+  // reading; the corpus refutes it twice over. (1) The game's OWN maps carry their zone lines as
+  // labels: `kaladima_1.txt` holds `to_Butcherblock_Mountains` + two `to_North_Kaladim`, so
+  // kaladima is the half that touches Butcherblock and neighbours North — i.e. SOUTH Kaladim;
+  // `kaladimb_1.txt` holds two `to_South_Kaladim` and no outside exit at all, i.e. NORTH.
+  // (2) The NPC rosters agree independently: brewall's `kaladima_1` labels King Kazon
+  // Stormhammer, Tumpy Irontoe, Canloe Nusback, Beno Targnarle, Guard Dinler — every one of
+  // which the mob catalog files under `South Kaladim` (51 rows); brewall's `kaladimb_1` labels
+  // Busey Nehart, Tempia Lauley, Gunlok Jure, Priestess Ghalea, the Everhot and Norkhitter
+  // families — all catalog `North Kaladim` (54 rows). Pinned by tests/zones.test.mts.
+  { short: 'kaladimb', name: 'North Kaladim', era: 'classic' },
   { short: 'qeynos2', name: 'North Qeynos', era: 'classic' },
   { short: 'oggok', name: 'Oggok', era: 'classic' },
   { short: 'paineel', name: 'Paineel', era: 'classic' },
@@ -186,7 +198,8 @@ export const ZONES: readonly ZoneEntry[] = [
     era: 'classic'
   },
   { short: 'qeytoqrg', name: 'Qeynos Hills', era: 'classic' },
-  { short: 'kaladimb', name: 'South Kaladim', era: 'classic' },
+  // The other half of the JOS-415 swap — evidence beside `North Kaladim` above.
+  { short: 'kaladima', name: 'South Kaladim', era: 'classic' },
   { short: 'qeynos', name: 'South Qeynos', era: 'classic' },
   // Guk is TWO zones and the log names them separately (see the header note under DEVIATIONS in
   // tests). Upper: the log's `The City of Guk` killed froglok ton/gaz knights + froglok sentries;
@@ -301,7 +314,13 @@ export const ZONES: readonly ZoneEntry[] = [
   { short: 'lfaydark', name: 'The Lesser Faydark', era: 'classic' },
   { short: 'beholder', name: 'Gorge of King Xorbb', aliases: ["Beholder's Maze"], era: 'classic' },
   { short: 'misty', name: 'Misty Thicket', era: 'classic' }, // classic stem; `mistythicket` is the Live revamp
-  { short: 'mistmoore', name: 'Castle Mistmoore', aliases: ['Mistmoore Castle'], era: 'classic' },
+  // The in-game zone line says `The Castle of Mistmoore`; wiki and catalog say `Mistmoore Castle`.
+  {
+    short: 'mistmoore',
+    name: 'Castle Mistmoore',
+    aliases: ['Mistmoore Castle', 'The Castle of Mistmoore'],
+    era: 'classic'
+  },
   { short: 'neriakc', name: 'Neriak - Third Gate', era: 'classic' },
   { short: 'neriakd', name: 'Neriak Palace', era: 'classic' }, // brewall only
   { short: 'nexus', name: 'The Nexus' },
@@ -497,4 +516,49 @@ export function zoneShortName(raw: string | undefined | null): ZoneShort | null 
 export function catalogZonesFor(raw: string | undefined | null): string[] {
   const names = zoneEntryFor(raw)?.mobCatalogNames
   return names ? [...names] : []
+}
+
+/**
+ * The OTHER DIRECTION of the same knowledge: a MOB-CATALOG zone spelling -> its map stem.
+ *
+ * `zoneEntryFor` indexes `name` + `aliases`, which is the right corpus for a name the LOG printed.
+ * The catalog is a third naming authority and spells nine zones in ways neither of those reaches
+ * (`EC`, `Lower Guk`, `The Hole`, `Dalnir`, …) — exactly the set `mobCatalogNames` already records
+ * for the forward direction. Reading them the other way turns "which zone is this mob in?" into
+ * "which map do I open", which is what the Maps tab's cross-zone search needs (JOS-135).
+ *
+ * A SECOND INDEX rather than widening `zoneEntryFor`, because the two questions have different
+ * corpora and only one of them should admit catalog spellings: a log line saying `EC` is not
+ * something this app has ever seen, and quietly teaching the log-side fold a wiki abbreviation
+ * would widen an inlet nothing asked for. MEASURED 2026-08-09 over the committed catalog's 192
+ * distinct zone strings: `zoneEntryFor` alone resolves 151, this resolves 160, and no
+ * `mobCatalogNames` entry collides with another zone's own name or alias (pinned by
+ * tests/zones.test.mts).
+ *
+ * The 32 that stay `null` are the ones the table deliberately refuses (see the TODO above): the
+ * ambiguous city names (`Freeport`, `Qeynos`, `Neriak`, `Kaladim`, `Felwithe`), the placeholders
+ * (`Various`), and the wiki table cells whose links ran together. Null means the caller states the
+ * zone as the wiki spells it and offers no map, never a nearest guess (world-model law 1).
+ */
+let CATALOG_INDEX: Map<string, ZoneEntry> | null = null
+
+function catalogIndex(): Map<string, ZoneEntry> {
+  if (CATALOG_INDEX) return CATALOG_INDEX
+  // Seeded from the log-side index so a name/alias always wins over a catalog spelling; the
+  // collision test proves there is never a contest, so this is order-as-documentation.
+  const m = new Map(index())
+  for (const entry of ZONES) {
+    for (const catalogName of entry.mobCatalogNames ?? []) {
+      const key = zoneKey(catalogName)
+      if (key !== '' && !m.has(key)) m.set(key, entry)
+    }
+  }
+  CATALOG_INDEX = m
+  return m
+}
+
+export function zoneShortNameFromCatalog(name: string | undefined | null): ZoneShort | null {
+  const key = zoneKey(name)
+  if (key === '') return null
+  return catalogIndex().get(key)?.short ?? null
 }

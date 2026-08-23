@@ -22,7 +22,14 @@ import { Box, Button, Chip, Paper, Stack, Typography } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import type { ComboInterval } from '@shared/classCombo'
 import { useComboSnap } from './ClassComboData'
-import { ConfidenceChip, LockedChip, OverruledChip, ProvenanceChip, SlotChips } from './ClassComboChips'
+import {
+  ConfidenceChip,
+  LockedChip,
+  OverruledChip,
+  ProvenanceChip,
+  SlotChips,
+  UncertainChip
+} from './ClassComboChips'
 import { levelRangeText, spanText, startFuzzText } from './ClassComboLabels'
 import ClassComboEditor from './ClassComboEditor'
 import LoadoutOverride from './LoadoutOverride'
@@ -61,6 +68,7 @@ function IntervalRow({
         <ProvenanceChip interval={interval} />
         <ConfidenceChip interval={interval} />
         {interval.userLocked && <LockedChip />}
+        <UncertainChip interval={interval} />
         <OverruledChip interval={interval} />
         <Button
           size="small"
@@ -113,7 +121,7 @@ export function ClassComboSetting(): JSX.Element {
         )}
       </Box>
       <Typography variant="caption" color="text.secondary">
-        Edit any past range you know better — your correction wins over autodetection until a
+        Edit any past range you know better - your correction wins over autodetection until a
         /who row says otherwise, and the panel tells you when one does.
       </Typography>
       <ClassComboEditor interval={editing} onClose={() => setEditing(null)} />

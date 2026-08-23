@@ -16,9 +16,16 @@
 // deliberately untouched: it was already right, and a celebration that arrives faster or
 // further would read as an alarm.
 //
-// THE ITEM CARD IS THE CLICK TARGET (T6) and the only affordance: it takes the pointer cursor
-// and a hairline highlight on hover. The card as a whole pins on hover; only the reward block
-// claims to go anywhere.
+// THE ITEM CARD IS THE CLICK TARGET (T6) where there is one: it takes the pointer cursor and a
+// hairline highlight on hover. The card as a whole pins on hover; only the reward block claims to
+// go anywhere.
+//
+// …AND WHERE THERE IS NO REWARD BLOCK, THE CARD SAYS SO IN WORDS (JOS-334). The level-up card is
+// the whole click target — a level is not a reward you can hold — and it spent its first release
+// advertising that with a pointer cursor and nothing else, which is an affordance only for a
+// reader who was already hovering a card they had no reason to hover. It now prints a compact
+// action naming where the click goes ("See what's new at 24"). The card-wide click is untouched:
+// the button fires the SAME `onOpen`, so this is the promise becoming visible, not a second path.
 //
 // EVERY CARD SAYS WHOSE IT IS, AND EVERY CARD CLOSES (JOS-83). A new user reported the strip as a
 // nameless rectangle they took for a malfunction, so the card grew a chrome row: the app's name on
@@ -29,7 +36,7 @@
 // button that closes the overlay for good.
 
 import { type CSSProperties, type JSX, type MouseEvent, useEffect, useState } from 'react'
-import { TOAST_INTRO_BODY, type ToastItemCard, type ToastPayload } from '@shared/toast'
+import { TOAST_INTRO_BODY, toastActionLabel, type ToastItemCard, type ToastPayload } from '@shared/toast'
 import { TOAST_ENTER_MS, TOAST_EXIT_MS } from './toastQueue'
 
 const GOLD = '#d9b25f'
@@ -93,8 +100,10 @@ function CardChrome({ onDismiss }: { onDismiss: () => void }): JSX.Element {
       <button
         type="button"
         data-testid="toast-close"
+        // The ARIA name and nothing else (JOS-358). A `title` here said 'Dismiss' over a ✕ that
+        // already says it, on a card rather than in a window title bar — and this window's cards
+        // slide away on their own timer, which is exactly the shape a stranded popup outlives.
         aria-label="Dismiss this celebration"
-        title="Dismiss"
         onClick={close}
         onMouseEnter={() => setHot(true)}
         onMouseLeave={() => setHot(false)}
@@ -152,6 +161,54 @@ function IntroBlock(): JSX.Element {
         }}
       >
         Turn this overlay off
+      </button>
+    </div>
+  )
+}
+
+/**
+ * THE CALL TO ACTION on a card whose own body is the link (JOS-334).
+ *
+ * WHY A BUTTON AND NOT A HINT. The alternative shapes were a permanent "click me" line of prose
+ * and a chevron, and both fail the same way: they describe the card instead of offering
+ * something. This is the shape the overlay already uses for an action — IntroBlock's "Turn this
+ * overlay off", down to the gold hairline, the 4px radius and the warm fill on hover — so the
+ * card gains a control the reader has met before rather than a new vocabulary in the one window
+ * that is supposed to be the cheapest thing on screen. Compact on purpose: a celebration is
+ * three seconds of attention, and a full-width button would read as a dialog.
+ *
+ * IT IS A PROMISE, NOT A SECOND PATH. `onClick` here IS the card's own `onOpen` — the same deep
+ * link, through the same `focusApp` door. Nothing new is reachable through this button; what is
+ * new is that the card admits, before it is hovered, that clicking goes somewhere.
+ */
+function CardAction({ label, onClick }: { label: string; onClick: () => void }): JSX.Element {
+  const [hot, setHot] = useState(false)
+  return (
+    <div style={{ marginTop: 9 }}>
+      <button
+        type="button"
+        data-testid="toast-action"
+        onClick={(e) => {
+          // `stop` is load-bearing exactly as it is on the × (CardChrome): the CARD behind this
+          // button fires the same link, and one click must be one landing — not two trips through
+          // `focusApp`, which would bump the focus nonce twice and pulse the panel twice for a
+          // single answer to a single question.
+          e.stopPropagation()
+          onClick()
+        }}
+        onMouseEnter={() => setHot(true)}
+        onMouseLeave={() => setHot(false)}
+        style={{
+          border: `1px solid ${hot ? GOLD : 'rgba(217,178,95,0.45)'}`,
+          borderRadius: 4,
+          background: hot ? 'rgba(217,178,95,0.16)' : 'transparent',
+          color: GOLD,
+          fontSize: 12,
+          padding: '3px 10px',
+          cursor: 'pointer'
+        }}
+      >
+        {label}
       </button>
     </div>
   )
@@ -246,6 +303,10 @@ export function ToastCard({
   // reward you can hold, but it still has somewhere to take you (the Leveling tab, at that
   // level). Where a reward block exists it stays the only affordance, exactly as T6 wrote it.
   const onCardClick = payload.item ? undefined : onOpen
+  // …and since JOS-334 it SAYS SO. The label is derived from the same focus that makes the card
+  // clickable, so the two can never disagree: no destination ⇒ no click target ⇒ no promise, and
+  // a destination the label module cannot name prints nothing rather than something invented.
+  const action = onCardClick ? toastActionLabel(focus) : undefined
 
   return (
     <div
@@ -278,6 +339,9 @@ export function ToastCard({
           {payload.subtitle}
         </div>
       )}
+      {/* The card's own link, made visible (JOS-334). It renders only where the CARD is the click
+          target, which is the same condition that made the pointer cursor appear. */}
+      {action && onCardClick && <CardAction label={action} onClick={onCardClick} />}
       {/* Nothing else is clickable: a toast says a thing happened, and the reward block is the
           one place that promises to take you somewhere. */}
       {payload.item && <RewardBlock item={payload.item} onClick={onOpen} />}

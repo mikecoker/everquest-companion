@@ -12,7 +12,7 @@
 
 | slots = 
 
-{{SpellSlotRowSmart | 1 | Increase Melee Haste by 3% | simple = {{#ifeq:{{{Table|0}}}|0|0|1}} }}
+{{SpellSlotRowSmart | 1 | Increase Attack Speed by 48% (L45) to 50% (L47) | simple = {{#ifeq:{{{Table|0}}}|0|0|1}} }}
 {{SpellSlotRowSmart | 2 | Increase STR by 13 (L45) to 17 (L60) | simple = {{#ifeq:{{{Table|0}}}|0|0|1}} }}
 {{SpellSlotRowSmart | 4 | Increase ATK by 13 (L45) to 17 (L60) | simple = {{#ifeq:{{{Table|0}}}|0|0|1}} }}
 {{SpellSlotRowSmart | Enhanced by instrument? | '''Yes (not attack speed)''' | simple = {{#ifeq:{{{Table|0}}}|0|0|1}} }}
@@ -35,10 +35,7 @@
 
 | where_to_obtain = 
 
-{{SpellWhereTable|
-{{SpellWhereRowB | [[Freeport|North Freeport]] | [[Inisis Trimpet]] | Bard Guild | (-119,576) }}
-{{SpellWhereRow  | [[Qeynos|South Qeynos]] | [[Chalea Volesga]] | Bard Guild | (515,-132) }}
-}}
-| TableLocations = Qeynos<br/>Freeport
-| TableEra = Classic
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 }}

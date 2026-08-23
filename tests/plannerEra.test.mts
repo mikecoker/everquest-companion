@@ -11,11 +11,15 @@
 //   2. THE ORDERING IS THE SEMANTIC, not today's constant. `CURRENT_ERA` is one line that flips
 //      when Kunark launches, so the tests exercise `eraVerdictAt` at each era instead of hard-
 //      coding "kunark is out" — the day the flip happens this file must stay green unchanged.
-//   3. THE LAYERING (added 2026-08-04 with the page-top `{{X Era}}` banner). Zones win in BOTH
-//      directions; the banner is consulted only where nothing resolved. The mapping from a banner
-//      token to an expansion is a hand-authored table and is pinned here token for token —
-//      including `FearHateRevamp`, whose row is re-derived from the mob catalog rather than
-//      asserted, so the decision cannot outlive its evidence.
+//   3. THE LAYERING (added 2026-08-04 with the page-top `{{X Era}}` banner). The banner is
+//      consulted where nothing resolved, and — since JOS-298 — its OUT claim overrules a zone
+//      outright. The mapping from a banner token to an expansion is a hand-authored table and is
+//      pinned here token for token; the in/out claim is a MIRROR of `Template:PageEra` and is
+//      pinned key for key against the switch this file quotes.
+//
+// WHAT THE OVERRIDE DOES TO THE 11,375 COMMITTED ITEM KEYS is the sibling file's job:
+// `tests/plannerEraCorpus.test.mts` sweeps the corpus, enumerates every verdict this rule changed,
+// and proves the change is one-directional. This file stays on the rules themselves.
 //
 // COVERAGE IS A FLOOR, NEVER AN EXACT COUNT (AGENTS.md: frozen numbers rot). Measured 2026-08-04
 // over the 192 distinct catalog zone strings / 8,214 mob-zone links: 159 names resolve, carrying
@@ -29,6 +33,8 @@ import assert from 'node:assert/strict'
 import {
   CURRENT_ERA,
   ERA_ORDER,
+  eraBadge,
+  eraBadgeOverrides,
   eraFromTag,
   eraRank,
   eraVerdict,
@@ -223,17 +229,24 @@ test('eraFromTag is the hand-authored table, token for token (law 12)', () => {
   ]
   for (const [tag, era] of TABLE) assert.equal(eraFromTag(tag), era, tag)
 
-  // FEARHATEREVAMP → CLASSIC, and this row was MEASURED, not reasoned. 53 pages carry the tag; 26
-  // of them appear in the EQL mob catalog's loot lists, and every one of those 26 drops off a
-  // Plane of Fear (14) or Plane of Hate (12) mob — zones this server ships. The catalog is a
-  // scrape of THIS server, so its revamp loot is live loot; anything but classic would hide
-  // Greenmist armour from a player who can camp it tonight. Re-derived from the catalog here so
-  // the decision cannot quietly outlive its evidence.
-  assert.equal(eraFromTag('FearHateRevamp'), 'classic')
+  // FEARHATEREVAMP NAMES NO EXPANSION (JOS-298). It read `classic` for a week on a MEASURED but
+  // mis-aimed argument: 26 of the 53 tagged pages appear in the mob catalog's loot lists and all
+  // 26 drop off a Plane of Fear or Plane of Hate mob, which was read as "this loot is live here".
+  // The catalog is a scrape of the same WIKI, not an observation of the server, and it documents
+  // the revamp on both sides — the droppers carry the banner on their own pages. So the zone says
+  // nothing, and the token names a PATCH, not an expansion. What it does claim is in/out, and
+  // that lives in the register (pinned below), which reads `out`.
+  assert.equal(eraFromTag('FearHateRevamp'), null)
+  assert.equal(eraBadge('FearHateRevamp'), 'out')
+
+  // The evidence that used to justify `classic` is re-derived here anyway, because it is still
+  // TRUE and still not enough: the Greenmist droppers really do live in a zone this server ships,
+  // and the armour is still out-of-era, because the zone cannot speak for a revamped drop table.
   const greenmist = catalog.mobs.filter((m) => (m.drops ?? []).some((d) => /^Greenmist /i.test(d)))
   assert.ok(greenmist.length > 0, 'the catalog no longer lists Greenmist armour at all')
   for (const mob of greenmist) {
     assert.equal(eraVerdict(mob.zones ?? []), 'in-era', `${mob.name} ${JSON.stringify(mob.zones)}`)
+    assert.equal(layeredVerdict(mob.zones ?? [], 'FearHateRevamp'), 'out-of-era', mob.name)
   }
 
   // CASE is folded (the corpus's one `{{kunark Era}}` typo), whitespace is already normalized by
@@ -242,6 +255,87 @@ test('eraFromTag is the hand-authored table, token for token (law 12)', () => {
   assert.equal(eraFromTag('  VELIOUS  '), 'velious')
   for (const junk of ['', 'Planes of Power', 'Hole', 'P99 Era Header', 'xyzzy']) {
     assert.equal(eraFromTag(junk), null, junk)
+  }
+})
+
+// ---- the wiki's own in/out register, mirrored ---------------------------------------------------
+
+test('eraBadge IS Template:PageEra’s switch, key for key (a mirror, not a judgement)', () => {
+  // QUOTED FROM THE SOURCE: the `{{#switch:{{{1}}}}}` inside `Template:PageEra`'s `<includeonly>`,
+  // read at revid 156232 (2026-07-12T16:02:29Z). Every row of the live template is here, in its
+  // own order, so a diff against the wiki is a diff against this literal.
+  const SWITCH: readonly (readonly [string, 'in' | 'out'])[] = [
+    ['classic', 'in'],
+    ['kunark', 'out'],
+    ['velious', 'out'],
+    ['luclin', 'out'],
+    ['chardok', 'out'],
+    ['chardokrevamp', 'out'],
+    ['fear', 'in'],
+    ['hate', 'in'],
+    ['hole', 'in'],
+    ['holevp', 'out'],
+    ['sky', 'in'],
+    ['stonebrunt', 'in'],
+    ['temple', 'in'],
+    // The template's own DOCUMENTATION block says `warrens = out` while the switch it documents
+    // says `in`. The switch is what renders the badge, so the switch is the record. Inert today:
+    // no item page carries a `{{Warrens Era}}` banner (asserted by the census test below).
+    ['warrens', 'in'],
+    ['warrensfearhaterevamp', 'out'],
+    ['fearhaterevamp', 'out'],
+    ['paineel', 'in'],
+    ['epics', 'out'],
+    ['epicquests', 'out'],
+    ['unknown', 'out']
+  ]
+  assert.equal(SWITCH.length, 20, 'the quoted switch has 20 rows')
+  for (const [key, answer] of SWITCH) assert.equal(eraBadge(key), answer, key)
+
+  // THE FOLD, which is what lets a BANNER TOKEN reach a SWITCH KEY. `{{Chardok Revamp Era}}`
+  // actually passes `chardok` and `{{FearHateRevamp Era}}` passes `FH Revamp` (which is in no row
+  // and lands on `#default`); both compose to `out` either way, so folding the token directly
+  // reproduces the wiki's rendered answer without a second table of wrapper templates.
+  assert.equal(eraBadge('Chardok Revamp'), 'out')
+  assert.equal(eraBadge('FH Revamp'), 'out')
+  assert.equal(eraBadge('EpicQuests'), 'out')
+  assert.equal(eraBadge('  VELIOUS  '), 'out')
+  assert.equal(eraBadge('kunark'), 'out') // the corpus's one lowercase typo
+  assert.equal(eraBadge('Chardok_Revamp'), 'out')
+  assert.equal(eraBadge('CLASSIC'), 'in')
+
+  // `#default = out` IS THE WIKI'S ANSWER, mirrored: a banner whose key the switch does not know
+  // renders the red box on the live page, so an unknown token here is `out`, not silence.
+  for (const unknown of ['Planes of Power', 'Ykesha', 'xyzzy', '']) {
+    assert.equal(eraBadge(unknown), 'out', unknown)
+  }
+})
+
+test('the OUT badge overrules zones; the IN badge never does; and the flip still moves it', () => {
+  // The predicate, stated on its own so the verdict below reads as one rule and not three.
+  // OUT + names no expansion → overrules at every era we will ever be on.
+  for (const era of ERA_ORDER) {
+    assert.equal(eraBadgeOverrides('FearHateRevamp', era), true, `FearHateRevamp @ ${era}`)
+    assert.equal(eraBadgeOverrides('Unknown', era), true, `Unknown @ ${era}`)
+  }
+  // OUT + names an expansion → overrules only until that expansion ships. This is the clause that
+  // keeps CURRENT_ERA the single line that moves.
+  assert.equal(eraBadgeOverrides('Kunark', 'classic'), true)
+  assert.equal(eraBadgeOverrides('Kunark', 'kunark'), false)
+  assert.equal(eraBadgeOverrides('Epics', 'classic'), true)
+  assert.equal(eraBadgeOverrides('Epics', 'kunark'), false)
+  assert.equal(eraBadgeOverrides('Velious', 'kunark'), true)
+  assert.equal(eraBadgeOverrides('Velious', 'velious'), false)
+  // IN never overrules anything, at any era — this is the one-directionality, at the source.
+  for (const era of ERA_ORDER) {
+    for (const tag of ['Classic', 'Sky', 'Fear', 'Hate', 'Temple', 'Paineel', 'Hole', 'Stonebrunt']) {
+      assert.equal(eraBadgeOverrides(tag, era), false, `${tag} @ ${era}`)
+    }
+  }
+  // No banner at all is not a claim (law 1).
+  for (const era of ERA_ORDER) {
+    assert.equal(eraBadgeOverrides(undefined, era), false)
+    assert.equal(eraBadgeOverrides('', era), false)
   }
 })
 
@@ -270,24 +364,40 @@ test('THE RAGEBRINGER PIN: an epic weapon nobody drops must read out-of-era on a
   assert.equal(layeredVerdict([], 'Epics'), 'out-of-era')
   assert.equal(layeredVerdict([], 'EpicQuests'), 'out-of-era')
 
-  // …and it is the ordinary rank comparison, not a special case: the day Kunark ships, the epics
-  // become farmable by flipping CURRENT_ERA, and a piece a classic zone DOES gate is still
-  // in-era today, because layer 1 outranks the banner in both directions.
-  assert.equal(layeredVerdictAt([], 'Epics', 'kunark'), 'in-era')
-  assert.equal(layeredVerdict(['Najena'], 'Epics'), 'in-era')
+  // AND THE RULING NOW REACHES THE WHOLE CHAIN, not only its dropperless end (JOS-298). Layer 1
+  // silently re-broke this the same week it was made: a chain piece a CLASSIC zone drops answered
+  // on its zone and the banner was never reached, so Cazic Quill (Kithicor Forest) and the four
+  // Torn Pages of Mastery (Najena, Cazic Thule) read as farmable again. They are not: what makes
+  // an epic 1.0 piece worth carrying is a KUNARK turn-in, and the wiki badges every one of them
+  // Out of Era. The zone-wins doctrine inverts here, which is exactly rule 0 in `layeredVerdictAt`.
+  assert.equal(layeredVerdict(['Najena'], 'Epics'), 'out-of-era')
+  assert.equal(layeredVerdict(['Kithicor Forest'], 'EpicQuests'), 'out-of-era')
   assert.equal(layeredVerdict(["Sleeper's Tomb"], 'Epics'), 'out-of-era')
+
+  // …and it is still the ordinary rank comparison, not a special case: the day Kunark ships, the
+  // whole chain becomes farmable by flipping CURRENT_ERA — the badge stops overruling the zone
+  // the moment the expansion it names is open.
+  assert.equal(layeredVerdictAt([], 'Epics', 'kunark'), 'in-era')
+  assert.equal(layeredVerdictAt(['Najena'], 'Epics', 'kunark'), 'in-era')
+  assert.equal(layeredVerdictAt(["Sleeper's Tomb"], 'Epics', 'kunark'), 'out-of-era')
 })
 
-test('layeredVerdict: the ZONE wins in both directions, the tag speaks only into silence', () => {
+test('layeredVerdict: an OUT badge beats the zone, an IN badge never does, silence takes either', () => {
   const guk = ['Lower Guk'] // classic
   const sleeper = ["Sleeper's Tomb"] // velious
   const junk = ['Various'] // resolves to nothing
 
-  // 1. Zone IN beats tag OUT. A Velious-bannered item that a Lower Guk mob drops is farmable
-  //    tonight — measured, 29 donors are exactly this shape (Blazing Gauntlets of Fennin Ro is
-  //    tagged Kunark and drops in Nagafen's Lair).
-  assert.equal(layeredVerdict(guk, 'Velious'), 'in-era')
-  assert.equal(layeredVerdict(guk, 'Kunark'), 'in-era')
+  // 1. TAG OUT BEATS ZONE IN — inverted 2026-08-13 (JOS-298), and this is the assertion that
+  //    changed. It used to read `in-era`, on the argument that a Velious-bannered item a Lower Guk
+  //    mob drops is farmable tonight. The wiki disagrees in writing: `{{Velious Era}}` renders a
+  //    red `Out of Era` box, and a zone cannot refute that, because a revamp replaces a classic
+  //    zone's CONTENTS without adding a zone. Blazing Gauntlets of Fennin Ro (tagged Kunark,
+  //    dropping in Nagafen's Lair) is the shape this line used to defend; it is out of era.
+  assert.equal(layeredVerdict(guk, 'Velious'), 'out-of-era')
+  assert.equal(layeredVerdict(guk, 'Kunark'), 'out-of-era')
+  //    An IN badge over an in-era zone is of course still in-era — the two witnesses agree.
+  assert.equal(layeredVerdict(guk, 'Classic'), 'in-era')
+  assert.equal(layeredVerdict(['Plane of Hate'], 'Hate'), 'in-era')
 
   // 2. Zone OUT beats tag IN. Stonebrunt Mountains is a Jan-2001 patch zone the owner observed as
   //    unreachable, and its pages are bannered `{{Classic Era}}`; where you have to go wins.
@@ -300,13 +410,26 @@ test('layeredVerdict: the ZONE wins in both directions, the tag speaks only into
   assert.equal(layeredVerdict(junk, 'Sky'), 'in-era')
   assert.equal(layeredVerdict(junk, 'Luclin'), 'out-of-era')
 
-  // 4. No tag, an unreadable tag, or an `Unknown` one leaves silence as silence (law 1).
-  for (const tag of [undefined, '', 'Unknown', 'Planes of Power']) {
+  // 4. NO TAG leaves silence as silence (law 1) — an absent banner is not a claim.
+  for (const tag of [undefined, '']) {
     assert.equal(layeredVerdict([], tag), 'unknown', String(tag))
     assert.equal(layeredVerdict(junk, tag), 'unknown', String(tag))
+    assert.equal(layeredVerdict(guk, tag), 'in-era', String(tag))
   }
 
-  // 5. With no tag at all, layeredVerdict IS eraVerdict — the layer adds, never alters.
+  // 5. A TAG THE REGISTER DOES NOT NAME reads `out`, because that is what the live page renders:
+  //    `#default = out` draws the red box. `Unknown` is the same answer stated explicitly — the
+  //    wiki not knowing WHICH era is still the wiki badging the page out of era, and it is only
+  //    two pages of the whole corpus. `eraFromTag` keeps its own `null` for these (the expansion
+  //    question genuinely has no answer); the register is the one that speaks here.
+  for (const tag of ['Unknown', 'Planes of Power']) {
+    assert.equal(eraFromTag(tag), null, tag)
+    assert.equal(layeredVerdict([], tag), 'out-of-era', tag)
+    assert.equal(layeredVerdict(junk, tag), 'out-of-era', tag)
+    assert.equal(layeredVerdict(guk, tag), 'out-of-era', tag)
+  }
+
+  // 6. With no tag at all, layeredVerdict IS eraVerdict — the layer adds, never alters.
   for (const zones of [guk, sleeper, junk, [], ['Kael Drakkel', 'Lower Guk']]) {
     assert.equal(layeredVerdict(zones, undefined), eraVerdict(zones), JSON.stringify(zones))
   }
@@ -324,8 +447,13 @@ test('the tag layer moves with CURRENT_ERA too — it is the same rank compariso
     const [classicTag, kunarkTag] = expected[era]
     assert.equal(layeredVerdictAt([], 'Classic', era), classicTag, `Classic tag @ ${era}`)
     assert.equal(layeredVerdictAt([], 'Kunark', era), kunarkTag, `Kunark tag @ ${era}`)
-    // A zone still overrules the tag at every ceiling.
-    assert.equal(layeredVerdictAt(['Lower Guk'], 'Luclin', era), 'in-era', `Guk @ ${era}`)
+    // A zone still overrules an IN tag at every ceiling — the classic-bannered Guk item is
+    // farmable whatever ceiling we are on.
+    assert.equal(layeredVerdictAt(['Lower Guk'], 'Classic', era), 'in-era', `Guk @ ${era}`)
+    // But an OUT tag overrules the zone until its own expansion opens. Luclin is the last era
+    // this app ranks, so the Guk drop of a Luclin-bannered item is hidden everywhere but there.
+    const luclin = era === 'luclin' ? 'in-era' : 'out-of-era'
+    assert.equal(layeredVerdictAt(['Lower Guk'], 'Luclin', era), luclin, `Guk/Luclin @ ${era}`)
   }
   // And the shipped wrapper is exactly the CURRENT_ERA case — no second opinion.
   for (const tag of ['Classic', 'Velious', 'Unknown', undefined]) {
@@ -431,3 +559,4 @@ test('the reverse index has one row per folded spelling — name, alias and cata
     }
   }
 })
+

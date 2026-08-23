@@ -120,6 +120,14 @@ export interface ModifierTally {
   count: number
   /** of those, how many carried no amount (an avoided swing). */
   avoided: number
+  /**
+   * Damage the LANDED annotated lines carried (JOS-354 — "riposte damage broken out inside my
+   * melee damage"). An INDEX over damage `addToSource` has already booked into the source, the
+   * category and the lane: it is read back out here, never accumulated a second time, so law 8's
+   * tripwire holds exactly as it did when this whole block was counts-only. Avoided swings
+   * contribute 0 by construction (they carry no amount at all).
+   */
+  total: number
 }
 
 /**
@@ -278,7 +286,7 @@ function addSwingCounters(src: SourceStat, ev: DamageEvent): void {
   // Melee-rounds heuristic (Task #51): only melee/slay hits cluster into "rounds" (spells and
   // DoTs are single applications). Bucket by (skill, whole-second).
   if (isSwing) accrueRound(src.rounds, ev.skill, ev.ts)
-  tallyModifiers(src, ev.modifiers, false)
+  tallyModifiers(src, ev.modifiers, false, ev.amount)
   // A SWING is a melee/slay line that named its VERB — the join key the round grouper is keyed
   // on. Spells, DoTs and damage shields name no verb and are not swings.
   if (isSwing && ev.verb !== undefined) {
@@ -289,12 +297,17 @@ function addSwingCounters(src: SourceStat, ev: DamageEvent): void {
   }
 }
 
-/** Fold the decomposed base modifiers of one line into a source's tallies. COUNTS ONLY. */
-function tallyModifiers(src: SourceStat, mods: readonly string[], avoided: boolean): void {
+/**
+ * Fold the decomposed base modifiers of one line into a source's tallies. COUNTS, plus the
+ * landed line's own amount re-read into `total` (see ModifierTally.total — an index, not a
+ * second accumulation). An avoided swing passes 0 and is the only caller that may.
+ */
+function tallyModifiers(src: SourceStat, mods: readonly string[], avoided: boolean, amount: number): void {
   for (const name of mods) {
-    const t = src.mods.get(name) ?? { name, count: 0, avoided: 0 }
+    const t = src.mods.get(name) ?? { name, count: 0, avoided: 0, total: 0 }
     t.count += 1
     if (avoided) t.avoided += 1
+    else t.total += amount
     src.mods.set(name, t)
   }
 }
@@ -310,7 +323,7 @@ function addMissToSource(src: SourceStat, m: MissFold): void {
   // ── ADDITIVE, AMOUNT-FREE (attack-round stats). An avoided swing carries no amount, so
   // none of this can move a total; it is the same first-class-but-damage-free treatment
   // misses already get (law 8).
-  tallyModifiers(src, m.modifiers ?? [], true)
+  tallyModifiers(src, m.modifiers ?? [], true, 0)
   if (m.verb !== undefined && m.ts !== undefined) {
     src.roundAcc.add({
       ts: m.ts, verb: m.verb, skill: m.laneSkill ?? m.skill, target: m.target ?? '',
@@ -483,9 +496,36 @@ export class Agg {
    * dependence on any event ring.
    */
   windows = new WindowAccum()
+  /**
+   * RE-STATE a row's identity from the ref that just arrived. The display name has always been
+   * refreshed this way (world-model law 2: the log's latest spelling wins).
+   *
+   * THE KIND MOVES TOO SINCE JOS-430, and ONE transition is allowed: `'other'` → `'member'`. A
+   * combatant recorded before your group learned their name is `'other'`; the moment the roster
+   * admits them the SAME row (`member:<key>` — one id, one aggregate, one bar) starts arriving as
+   * `'member'` and the bar re-labels itself without splitting.
+   *
+   * IT IS ONE-WAY ON PURPOSE, and the G1 golden window is why: that fixture ends with a DISBAND,
+   * and the roster's admission set is cleared by a self-leave. A free-running assignment would let
+   * the last line of a session decide what a fight two minutes earlier was, so a group-mate's bar
+   * would quietly stop saying `group` the moment you left the group. What this fight's damage WAS
+   * does not change when the group ends. Every other kind is a constant for a given row id
+   * (`you`, `pet:<instance>`, `allypet:…`), so nothing else can reach this line at all.
+   */
+  private reid(s: SourceStat, ref: SourceRef): void {
+    if (s.name !== ref.name) s.name = ref.name
+    if (s.kind === 'other' && ref.kind === 'member') s.kind = 'member'
+  }
+  /** DROP a recorded row (JOS-430). The one caller is `EngineState.retractOther`: a name a
+   *  stronger model has just claimed as a pet must not keep a second bar beside the pet's own.
+   *  Safe by construction — an `'other'` row is additive (it enters no `you`/`pet` total and no
+   *  target/engaged set), so removing it can move nothing that existed before it did. */
+  dropOut(id: string): boolean {
+    return this.out.delete(id)
+  }
   addOut(ref: SourceRef, ev: DamageEvent, ambiguous = false): void {
     const s = this.out.get(ref.id) ?? newSource(ref.name, ref.kind)
-    if (s.name !== ref.name) s.name = ref.name
+    this.reid(s, ref)
     addToSource(s, ev, ambiguous)
     this.out.set(ref.id, s)
   }
@@ -496,7 +536,7 @@ export class Agg {
   }
   addOutMiss(ref: SourceRef, m: MissFold): void {
     const s = this.out.get(ref.id) ?? newSource(ref.name, ref.kind)
-    if (s.name !== ref.name) s.name = ref.name
+    this.reid(s, ref)
     addMissToSource(s, m)
     this.out.set(ref.id, s)
   }
@@ -507,7 +547,7 @@ export class Agg {
   }
   addOutResist(ref: SourceRef, spell: string, category: DamageCategory): void {
     const s = this.out.get(ref.id) ?? newSource(ref.name, ref.kind)
-    if (s.name !== ref.name) s.name = ref.name
+    this.reid(s, ref)
     addResistToSource(s, spell, category)
     this.out.set(ref.id, s)
   }

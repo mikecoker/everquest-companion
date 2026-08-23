@@ -15,20 +15,22 @@
 // supposed to notice — that is what makes it an anchor rather than a mock.
 //
 // The rest is the arithmetic the header states, pinned as identities: every need appears exactly
-// once, the weights still choose the zone that feeds the most of the set, and the alphabetical
+// once, the weights still choose the zone that feeds the most of the list, and the alphabetical
 // tiebreak survives inside whichever candidate set the era rule leaves standing.
+//
+// WHAT JOS-326 CHANGED HERE, AND WHAT IT DELIBERATELY DID NOT. The rollup used to be fed by
+// `collectNeeds(plan, …)`, which walked an exaltation set's cells; the plan board is gone and the
+// wish list feeds it now (`features/wishlist/wishFarm.ts`, pinned by tests/wishFarm.test.mts). So
+// this file builds its needs DIRECTLY — which is what it should always have done, because the
+// thing under test is the GROUPING and a collector standing between it and the assertion was only
+// ever a way for a change in one to look like a failure in the other. Not one zone claim, weight
+// or tiebreak below moved.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  collectNeeds,
-  farmZone,
-  groupNeeds,
-  type FarmNeed
-} from '../src/renderer/src/features/planner/plannerFarm'
-import type { DonorRow } from '../src/renderer/src/features/planner/plannerData'
+import { farmZone, groupNeeds, type FarmNeed } from '../src/renderer/src/features/planner/plannerFarm'
+import { sourcesFor } from '../src/renderer/src/features/planner/sourceIndex'
 import type { DonorProgress } from '../src/renderer/src/features/planner/plannerProgress'
-import type { EquipSlot, ExaltPlan, SocketType } from '../src/shared/planner/types'
 
 const HEADBAND = 'batfang headband'
 
@@ -46,34 +48,39 @@ const PLANNED: DonorProgress = {
   looted: 0
 }
 
-interface Placed {
-  slot: EquipSlot
-  socket: SocketType
-  effect: string
-  donorKey: string
-}
-
-/** A plan of planned sockets, pointed at donor keys by name — all `collectNeeds` needs. */
-function planOf(picks: readonly Placed[]): ExaltPlan {
-  const slots: ExaltPlan['slots'] = {}
-  for (const p of picks) {
-    const slot = slots[p.slot] ?? { sockets: {} }
-    slot.sockets[p.socket] = { effect: p.effect, donorKey: p.donorKey }
-    slots[p.slot] = slot
+/**
+ * One need, resolved against the MOB CATALOG alone.
+ *
+ * No corpus row on purpose, which is also the harder case: a wanted item the item DB no longer
+ * carries must still be routed from `sourcesFor` — the renderer's own inversion of the committed
+ * `|known_loot` — and that is precisely the evidence every zone claim below rests on.
+ */
+function needOf(itemKey: string, effect: string): FarmNeed {
+  const sources = sourcesFor(itemKey)
+  return {
+    id: `${itemKey}:${effect}`,
+    itemKey,
+    name: itemKey,
+    effect,
+    socket: 'proc',
+    tierRequired: 4,
+    subject: { key: itemKey },
+    classes: [],
+    slots: [],
+    quest: false,
+    playerCrafted: false,
+    sources,
+    zones: [...new Set(sources.flatMap((s) => s.zones))],
+    progress: PLANNED
   }
-  return { id: 'test', name: 'test', classes: [], slots, createdAt: 0, updatedAt: 0 }
 }
 
-/** The corpus is deliberately EMPTY: a plan may name a (key, effect) the DB no longer carries,
- *  and the zone rollup must answer from the mob catalog alone — which is the case under test. */
-const EMPTY_INDEX = new Map<string, DonorRow[]>()
-
-function needsOf(picks: readonly Placed[]): FarmNeed[] {
-  return collectNeeds(planOf(picks), EMPTY_INDEX, () => PLANNED)
+function needsOf(picks: readonly { effect: string; donorKey: string }[]): FarmNeed[] {
+  return picks.map((p) => needOf(p.donorKey, p.effect))
 }
 
 test('ANCHOR — the committed catalog puts Batfang Headband in three zones, two of them out of era', () => {
-  const [need] = needsOf([{ slot: 'HEAD', socket: 'proc', effect: 'Bat Fang', donorKey: HEADBAND }])
+  const [need] = needsOf([{ effect: 'Bat Fang', donorKey: HEADBAND }])
   assert.ok(need, 'the plan produced no need')
   assert.deepEqual([...need.zones].sort(), [DN, TD, WPK].sort())
   assert.equal(farmZone(DN).era, 'velious')
@@ -85,7 +92,7 @@ test('ANCHOR — the committed catalog puts Batfang Headband in three zones, two
 })
 
 test('THE TRUST BUG — with the era filter on, the headband is filed under the zone you can reach', () => {
-  const needs = needsOf([{ slot: 'HEAD', socket: 'proc', effect: 'Bat Fang', donorKey: HEADBAND }])
+  const needs = needsOf([{ effect: 'Bat Fang', donorKey: HEADBAND }])
   const groups = groupNeeds(needs, { eraOnly: true })
 
   assert.equal(groups.length, 1)
@@ -107,7 +114,7 @@ test('THE TRUST BUG — with the era filter on, the headband is filed under the 
 })
 
 test('with the era filter OFF the rollup keeps its old answer — the filter is what makes the rule apply', () => {
-  const needs = needsOf([{ slot: 'HEAD', socket: 'proc', effect: 'Bat Fang', donorKey: HEADBAND }])
+  const needs = needsOf([{ effect: 'Bat Fang', donorKey: HEADBAND }])
   const groups = groupNeeds(needs, { eraOnly: false })
   // Ties are alphabetical and every zone is a candidate again, so the old (honest, era-blind)
   // answer comes back: this is a browse of everything, not a route.
@@ -119,8 +126,8 @@ test('the era rule never beats the weights INSIDE the reachable set — most-nee
   // second donor is a Western Plains of Karana drop only. WPK therefore feeds both and must win
   // on weight, exactly as it does on era.
   const needs = needsOf([
-    { slot: 'HEAD', socket: 'proc', effect: 'Bat Fang', donorKey: HEADBAND },
-    { slot: 'NECK', socket: 'proc', effect: 'Bone', donorKey: 'glowing bone collar' }
+    { effect: 'Bat Fang', donorKey: HEADBAND },
+    { effect: 'Bone', donorKey: 'glowing bone collar' }
   ])
   const groups = groupNeeds(needs, { eraOnly: true })
   const wpk = groups.find((g) => g.title === WPK)
@@ -131,21 +138,21 @@ test('the era rule never beats the weights INSIDE the reachable set — most-nee
 
 test('every need appears EXACTLY once, whatever the era rule chose', () => {
   const needs = needsOf([
-    { slot: 'HEAD', socket: 'proc', effect: 'Bat Fang', donorKey: HEADBAND },
-    { slot: 'NECK', socket: 'proc', effect: 'Bone', donorKey: 'glowing bone collar' },
-    { slot: 'BACK', socket: 'proc', effect: 'Nothing', donorKey: 'an item nobody drops' }
+    { effect: 'Bat Fang', donorKey: HEADBAND },
+    { effect: 'Bone', donorKey: 'glowing bone collar' },
+    { effect: 'Nothing', donorKey: 'an item nobody drops' }
   ])
   for (const eraOnly of [true, false]) {
     const groups = groupNeeds(needs, { eraOnly })
     const rows = groups.flatMap((g) => g.rows)
     assert.equal(rows.length, needs.length, `${String(rows.length)} rows for ${String(needs.length)} needs`)
-    const ids = new Set(rows.map((r) => `${r.slot}:${r.socket}:${r.donorKey}`))
+    const ids = new Set(rows.map((r) => r.id))
     assert.equal(ids.size, needs.length)
   }
 })
 
 test('a donor nothing places keeps the honest non-zone heading', () => {
-  const groups = groupNeeds(needsOf([{ slot: 'BACK', socket: 'proc', effect: 'X', donorKey: 'an item nobody drops' }]), {
+  const groups = groupNeeds(needsOf([{ effect: 'X', donorKey: 'an item nobody drops' }]), {
     eraOnly: true
   })
   assert.equal(groups.length, 1)

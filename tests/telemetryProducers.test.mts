@@ -21,17 +21,23 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { classifyFailure, failureTextOf } from '../src/main/telemetry/failureClass'
+// THE FIFTH PRODUCER — the five health counters (JOS-96) — is tested in
+// `tests/releaseHealth.test.mts`, beside the readout it exists to feed, because the producer's
+// "report even a clean session" decision and the panel's "not reporting" state are one argument.
+// This file was also at the 400-code-line ceiling: a split, not a widened threshold.
 import {
   allFunnelStepMarks,
   bucketOf,
   funnelStepMark,
   normalizeTelemetryPrefs,
-  startupReplayStats,
   LOG_SIZE_BYTES_EDGES,
   MAX_COUNT,
   TELEMETRY_FUNNEL_STEPS,
   type TelemetryEvent
 } from '../src/shared/telemetry'
+// The producer moved out of the contract file when JOS-57's scope addition pushed it past the
+// 400-line ceiling; the reading it builds is unchanged, and so is every assertion below.
+import { startupReplayStats } from '../src/shared/telemetryStartup'
 import { validateTelemetryEvent } from '../src/shared/telemetryValidate'
 import {
   blockMsBucketLabel,
@@ -330,7 +336,7 @@ test('the fleet rollup keys the reading BY BUILD, and the launch count is its de
 
   // The version comes from the ENVELOPE — no event carries one — and `batchOf` sends 0.6.0.
   assert.equal(rowOf(USAGE_METRICS.startupReplays, '0.6.0'), 2)
-  // 6 s: past the 5 s edge, below 10 s ⇒ the 5–10 s bucket. 60 ms ⇒ the 50–100 ms one.
+  // 6 s: past the 5 s edge, below 10 s ⇒ the 5-10 s bucket. 60 ms ⇒ the 50-100 ms one.
   assert.equal(rowOf(USAGE_METRICS.startupReplayMs, `0.6.0:${String(bucketOf(6_000, REPLAY_MS_EDGES))}`), 2)
   assert.equal(rowOf(USAGE_METRICS.startupBlockMs, `0.6.0:${String(bucketOf(60, BLOCK_MS_EDGES))}`), 2)
   // The sums, whose divisor is `startupReplays` at read time.
@@ -371,13 +377,13 @@ test('a percentile over a histogram is a BUCKET, and the median is the same func
   assert.equal(percentileBucket([], 95), -1)
   assert.equal(percentileBucket([0, 0], 50), -1)
   // The labels are ranges, never numbers the storage never had.
-  // Bucket `i` covers `[edges[i-1], edges[i])`, so bucket 4 is the 5–10 s band a slow launch on a
+  // Bucket `i` covers `[edges[i-1], edges[i])`, so bucket 4 is the 5-10 s band a slow launch on a
   // big log lands in — and the one the chunked-replay work was about.
   assert.equal(replayMsBucketLabel(0), '<250 ms')
-  assert.equal(replayMsBucketLabel(4), '5 s–10 s')
-  assert.equal(replayMsBucketLabel(5), '10 s–30 s')
+  assert.equal(replayMsBucketLabel(4), '5 s-10 s')
+  assert.equal(replayMsBucketLabel(5), '10 s-30 s')
   assert.equal(replayMsBucketLabel(REPLAY_MS_EDGES.length), '60 s+')
-  assert.equal(blockMsBucketLabel(3), '50 ms–100 ms')
+  assert.equal(blockMsBucketLabel(3), '50 ms-100 ms')
   assert.equal(blockMsBucketLabel(BLOCK_MS_EDGES.length), '1 s+')
 })
 
@@ -393,3 +399,4 @@ test('a batch with no line counts at all produces NO linesParsed row, rather tha
     )
   )
 })
+

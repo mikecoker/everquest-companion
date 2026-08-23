@@ -18,7 +18,9 @@
 //   WL45  kill credit (Thu Jul 30 16:28→16:56) — all three shapes in one zone.
 //
 // Plus a FULL-LOG tripwire asserting IDENTITIES and floors only (the log is live and grows;
-// frozen counts rot), skipped when the real log is absent (CI).
+// frozen counts rot — AND SO DO RATIOS whose denominator is the owner's play, which is what
+// JOS-241 re-derived identity 5 below out of; tests/progressionJoin.mts carries the conditioning),
+// skipped when the real log is absent (CI).
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -29,6 +31,7 @@ import { EXP_CAP, ProgressionModule } from '../src/main/modules/progression'
 import { rangeStats, type RangeStats } from '../src/shared/progressionStats'
 import type { ProgressionSnap } from '../src/shared/progressionTypes'
 import { readFixture } from './harness.mts'
+import { expPairing, recentPairingRatio } from './progressionJoin.mts'
 
 const LOG =
   'C:/Users/Public/Daybreak Game Company/Installed Games/EverQuest Legends/Logs/eqlog_Primitive_freeport.txt'
@@ -243,6 +246,61 @@ test('WL41 multi-zone: kills and time attribute to the zone they happened in', (
   assert.equal(r.idleMs, 0)
   assert.equal(r.activeMs, r.durationMs)
   assertIdentities(r, 'WL41')
+})
+
+/**
+ * WL41, AGAIN — THIS TIER vs EVERY TIER OF THE ZONE (JOS-291), over the real tiered names.
+ *
+ * This window is the shape the ticket is about, printed by the actual game: ONE camp the log spells
+ * two ways (`The Plane of Hate - Solo 1 (Awakened)` and `- Solo 2 (Adaptive)`) with a different zone
+ * in between, and the counts in each hand-read above. So the two memberships have measurably
+ * different answers here and neither of them is a synthetic construction.
+ *
+ * THE DEFAULT IS PINNED FIRST AND BYTE FOR BYTE: absent `zoneExactKey` is `null` is the read this
+ * app has given since JOS-130, over the same golden window whose every number is hand-counted a few
+ * lines up. Then the exact-tier reads, and then the property that makes the option honest rather
+ * than merely narrower — the tiers PARTITION the camp, so nothing is lost or double-counted by
+ * asking the question the other way.
+ */
+test('WL41 tiers: all-tiers is the unchanged read, and exact-tier admits one spelling', () => {
+  const snap = replay(readFixture('wl41-multizone.log'))
+  const range = { t0: snap.zoneStart[0], t1: snap.lastTs + 1000 }
+  const solo1 = 'the plane of hate - solo 1 (awakened)'
+  const solo2 = 'the plane of hate - solo 2 (adaptive)'
+
+  // 1. THE DEFAULT, BYTE-IDENTICAL — with the argument, without it, filtered and unfiltered.
+  assert.deepEqual(rangeStats({ snap, range, zoneExactKey: null }), rangeStats({ snap, range }))
+  assert.deepEqual(
+    rangeStats({ snap, range, zoneKey: 'plane of hate', zoneExactKey: null }),
+    rangeStats({ snap, range, zoneKey: 'plane of hate' })
+  )
+
+  // 2. ALL TIERS is the place: both spellings in, the Oasis hop out.
+  const every = rangeStats({ snap, range, zoneKey: 'plane of hate' })
+  assert.equal(every.kills, 15, '10 in the first tier + 5 in the second, and none of the 2 in Marr')
+  assert.equal(every.durationMs, 1_077_000 + 832_000, 'and the time is Σ of the two visits')
+  assert.equal(every.zones.length, 2, 'two spellings, two ROWS — the join fold is untouched by this')
+
+  // 3. EXACT TIER is the spelling. Each one alone, and the neighbour tier is as far out as Marr is.
+  const first = rangeStats({ snap, range, zoneKey: 'plane of hate', zoneExactKey: solo1 })
+  assert.equal(first.kills, 10)
+  assert.equal(first.durationMs, 1_077_000)
+  assert.deepEqual(first.zones.map((z) => z.zone), ['The Plane of Hate - Solo 1 (Awakened)'])
+  const second = rangeStats({ snap, range, zoneKey: 'plane of hate', zoneExactKey: solo2 })
+  assert.equal(second.kills, 5)
+  assert.equal(second.durationMs, 832_000)
+  assert.deepEqual(second.zones.map((z) => z.zone), ['The Plane of Hate - Solo 2 (Adaptive)'])
+
+  // 4. THE TIERS PARTITION THE CAMP. Nothing is lost between the two questions and nothing is
+  //    counted twice — the same claim tests/timeslice.test.mts makes for the zones of a range.
+  assert.equal(first.kills + second.kills, every.kills)
+  assert.equal(first.durationMs + second.durationMs, every.durationMs)
+  assert.equal(first.expSamples + second.expSamples, every.expSamples)
+  assert.equal(first.activeMs + second.activeMs, every.activeMs)
+
+  // 5. …and the tiers really do read differently, which is the whole reason the option exists: the
+  //    first tier of this camp paid a different rate from the second.
+  assert.notEqual(first.killsPerHourActive, second.killsPerHourActive)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,10 +520,55 @@ test('full-log replay: progression identities hold and the epoch floor is respec
   //    progress" a measurement rather than a guess.
   assert.ok(dingIntervalsAreOneLevel(snap) > 20, 'enough ding-bounded intervals to be meaningful')
 
-  // 5. CREDIT vs EXP — a strong correlation, never an identity (group-mates' killing blows pay
-  //    party exp without a credited kill; grey kills pay nothing). A FLOOR, so it survives play.
-  const ratio = r.kills / r.expSamples
-  assert.ok(ratio > 0.85 && ratio < 1.15, `credited/exp ratio ${ratio}`)
+  // 5. CREDIT vs EXP — THE CORRESPONDENCE, CONDITIONED ON EXPERIENCE ACTUALLY BEING PAID
+  //    (JOS-241; the ratio clause of the frozen-numbers law, and JOS-234's playbook applied to
+  //    this file). This used to read `kills / expSamples ∈ (0.85, 1.15)`, and it went
+  //    deterministically red at 1.153 with no diff behind it: the character reached the cap and
+  //    farms greys, which print no experience line at all, so the numerator grew and the
+  //    denominator did not. Measured share of credited kills that HAD a line to claim: 87-100%
+  //    per day through 2026-08-10, then 6.1% and 2.0%. The ratio was measuring the owner's con
+  //    colour. Widening the bound would only have bought a few more evenings of it.
+  //
+  //    So the sentence is restated over the two CONDITIONED populations (tests/progressionJoin.mts
+  //    derives both from the columns): the credited kills that had an experience line to claim,
+  //    and the experience lines that had a credited kill to pay. Those are the two directions of
+  //    one relation, so their sizes agree exactly to the degree the join is one-to-one — and a
+  //    grey kill, a quest turn-in, and a group-mate's party experience are each in NEITHER term,
+  //    which is what stops the number tracking how the owner spent his evening.
+  //    MEASURED 2026-08-12 over 1.61M lines: 5443 payable / 5433 paid = 1.0018, with 14 contended
+  //    (0.26%); every 500-kill window in the whole log reads between 0.9940 and 1.0060.
+  //
+  //    AND IT WAS MUTATION-TESTED, because a tripwire that never trips is decoration. Four breaks
+  //    were introduced into src/main/modules/progression.ts, run against the real log, reverted:
+  //      • every third-party kill credited  → contended 64/5705 (1.12%)   — the contention clause
+  //      • every self kill counted twice    → payable/paid 9628/5433       — the ratio
+  //      • the at-cap experience line pushed to the column twice → 5443/6334 — the ratio, downward
+  //      • self kills counted twice ONLY after 2026-08-11 → recent 500/476 — the RECENT clause
+  //        alone; the aggregate read 1.0070 and contention 0.77%, both comfortably inside their
+  //        bounds. That is the whole argument for the recency restatement, measured.
+  assert.equal(r.kills, snap.killTs.length, 'the range query reports the whole credited column')
+  assert.equal(r.expSamples, snap.expTs.length, 'and the whole experience column')
+  const pairing = expPairing(snap)
+  assert.ok(pairing.payable.length > 0 && pairing.paid.length > 0, 'experience was paid for kills')
+  const ratio = pairing.payable.length / pairing.paid.length
+  assert.ok(ratio > 0.98 && ratio < 1.02, `payable/paid ${pairing.payable.length}/${pairing.paid.length}`)
+  //    …and the ONE measured reason the two sizes may differ at all: a mob and its pet dying in
+  //    the same second contend for one line. Anything else that inflates the credited column —
+  //    a witnessed kill credited, a self kill counted twice through its third-person twin —
+  //    arrives here as contention it cannot explain.
+  assert.ok(
+    pairing.contended / pairing.payable.length < 0.01,
+    `contended ${pairing.contended}/${pairing.payable.length}`
+  )
+  //    Again over the most recent payable kills alone: a regression that only breaks NEW lines is
+  //    otherwise diluted by thousands of correctly paired old ones. (Recent in PAYABLE kills, not
+  //    in wall clock — at the cap the log can go days without paying one, and a stretch that pays
+  //    nothing is exactly the stretch this identity has nothing to say about.)
+  const recent = recentPairingRatio(pairing, 500)
+  assert.ok(
+    recent.ratio > 0.97 && recent.ratio < 1.03,
+    `recent payable/paid ${recent.kills}/${recent.lines}`
+  )
   assert.ok(r.killsWitnessed > 0, 'other people kill things in this world')
   assert.ok(r.killsWitnessed < r.kills, 'and most kills in the series are still yours')
 

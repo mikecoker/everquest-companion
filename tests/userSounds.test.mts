@@ -268,10 +268,14 @@ test('a soundpacks dir claiming the reserved id never displaces the real one', (
   const listed = listPacksIn(roots).filter((p) => p.id === USER_SOUNDS_PACK_ID)
   assert.equal(listed.length, 1, 'one entry, not two')
   assert.deepEqual(Object.keys(listed[0].sounds), ['fanfare'], 'the imported sound, not the impostor')
-  // Serving agrees with the listing: the imported sound answers, and the impostor's own
-  // soundId reaches nothing at all (there is no shipped pack in this tree to fall back to).
-  assert.equal(getSoundDataIn(roots, USER_SOUNDS_PACK_ID, 'fanfare')?.mime, 'audio/mpeg')
-  assert.equal(getSoundDataIn(roots, USER_SOUNDS_PACK_ID, 'impostor'), null)
+  // Serving agrees with the listing: the imported sound answers as itself…
+  const own = getSoundDataIn(roots, USER_SOUNDS_PACK_ID, 'fanfare')
+  assert.equal(own?.mime, 'audio/mpeg')
+  // …and the impostor's own soundId NEVER serves the impostor's bytes. Since JOS-273 an
+  // unresolvable ref is not silence — it resolves to the closest thing installed — so what this
+  // pins is WHOSE bytes come back: the user's imported audio, from the reserved root, and not the
+  // planted directory that claimed the id.
+  assert.deepEqual(getSoundDataIn(roots, USER_SOUNDS_PACK_ID, 'impostor'), own)
 })
 
 test('a removed custom sound falls back to the shipped default line instead of going mute', () => {
@@ -290,7 +294,19 @@ test('a removed custom sound falls back to the shipped default line instead of g
   assert.ok(fallback, 'a removed custom sound still answers with audio')
   assert.deepEqual(fallback, shipped, 'and it is the shipped default line')
 
-  // The fallback belongs to the reserved pack alone: an uninstalled registry pack is a pack
-  // the user removed on purpose, and it still answers null.
-  assert.equal(getSoundDataIn(roots, 'portal-turret', 'anything'), null)
+  // THE FALLBACK IS NO LONGER THE RESERVED PACK'S ALONE (JOS-273). It used to be — "an
+  // uninstalled registry pack is a pack the user removed on purpose" — and that stopped being
+  // true the moment the owner ruled that a user may delete the shipped pack and name their own
+  // default: from then on a ref into a pack that is gone is the ordinary state of every seeded
+  // and suggested alert, and answering null makes each of them a silently mute alert. So the
+  // uninstalled pack resolves through the default too.
+  assert.deepEqual(
+    getSoundDataIn(roots, 'portal-turret', 'anything'),
+    shipped,
+    'an uninstalled pack resolves through the default rather than going mute'
+  )
+
+  // What is STILL null is the honestly unanswerable case: nothing installed at all.
+  const bare = rootsIn(tempTree())
+  assert.equal(getSoundDataIn(bare, 'portal-turret', 'anything'), null)
 })

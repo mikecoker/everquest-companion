@@ -1,3 +1,5 @@
+{{Velious Era}}
+
 {{Spellpage|
 
 | spellname = Aura of Green Petals

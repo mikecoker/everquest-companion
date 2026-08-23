@@ -12,7 +12,15 @@
 
 import { useEffect, useState } from 'react'
 import type { SpeechEngine, SpeechVoice } from '@shared/types'
-import { currentVoicePrefs, listVoices, speechSetupGap, type SpeechSetupGap } from './speech'
+import {
+  currentVoicePrefs,
+  listVoices,
+  onSpeechEngineFault,
+  speechEngineFault,
+  speechSetupGap,
+  type SpeechEngineFault,
+  type SpeechSetupGap
+} from './speech'
 
 /** A tier's voices plus the one fact `[]` alone cannot state: has the answer ARRIVED yet. */
 interface VoiceInventory {
@@ -56,6 +64,20 @@ export function useVoiceOptions(engine: SpeechEngine, refreshKey = 0): SpeechVoi
 }
 
 /**
+ * The fault `speak()` latched, live. A subscription rather than a read because the fault is
+ * learned by an UTTERANCE, which happens on the alert firing path — so a panel that was already
+ * open when the first alert spoke has to be told, not asked at mount.
+ */
+export function useSpeechEngineFault(): SpeechEngineFault | null {
+  const [fault, setFault] = useState<SpeechEngineFault | null>(speechEngineFault)
+  useEffect(() => {
+    setFault(speechEngineFault())
+    return onSpeechEngineFault(setFault)
+  }, [])
+  return fault
+}
+
+/**
  * The SETUP gap for the tier the app is currently configured to speak with, or null while the
  * inventory is still loading and null when there is nothing to say.
  *
@@ -64,8 +86,16 @@ export function useVoiceOptions(engine: SpeechEngine, refreshKey = 0): SpeechVoi
  * way it says it will is that the chosen tier has nothing to speak with. The engine comes from
  * `lib/speech`'s hydrated prefs cache (the same copy every firing reads), so the annotation and
  * the utterance can never disagree about which tier is selected.
+ *
+ * THE FAULT OUTRANKS THE INVENTORY (JOS-247), and only for the tier that can have one. A tier
+ * that failed to speak is a stronger and more recent fact than anything the inventory can say —
+ * and for the case this fixes, the inventory says nothing at all: 54 downloaded voices, all
+ * listed, none of them audible. The system tier never latches a fault (it never crosses IPC), so
+ * this cannot annotate a Windows voice with a Kokoro failure.
  */
 export function useSpeechSetup(engine: SpeechEngine = currentVoicePrefs().engine): SpeechSetupGap | null {
   const { voices, loaded } = useVoiceInventory(engine, 0)
+  const fault = useSpeechEngineFault()
+  if (engine === 'kokoro' && fault) return fault
   return loaded ? speechSetupGap(engine, voices) : null
 }

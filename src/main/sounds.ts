@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import { logError } from './errorLog'
 import { DEFAULT_ALERT_PACK_ID, DEFAULT_ALERT_SOUNDS } from './data/defaultPacks'
 import { USER_SOUNDS_PACK_ID, USER_SOUNDS_PACK_NAME } from '../shared/userSounds'
+import { resolveSoundRef } from '../shared/soundPacks'
 import type { PackSound, SoundData, SoundPack, SoundPackManifest } from '../shared/types'
 
 const AUDIO_MIME: Record<string, string> = {
@@ -294,30 +295,47 @@ export function listPacks(): SoundPack[] {
 /**
  * Read a sound's bytes → { mime, dataBase64 }.
  *
- * A MISSING CUSTOM SOUND IS NOT SILENCE. When the reserved pack cannot answer — the user
- * removed that sound, or the copied file went missing — the shipped default's "A moment of
- * your time, if you'd be so kind." line answers instead, which is the same choice
- * `migrateAlertSoundRef` makes for an unrecognizable retired-pack id: an alert the user
- * asked for fires audibly rather than failing quietly. Every other pack still answers null
- * (an uninstalled registry pack is a pack the user removed on purpose, and the pickers
- * already re-point those rows at the fallback pack on sight).
+ * A REF THAT CANNOT BE SERVED IS NOT SILENCE (JOS-273). This used to answer null for every pack
+ * but the reserved one — "an uninstalled registry pack is a pack the user removed on purpose" —
+ * which was true right up until the owner ruled that a user may DELETE the shipped pack and name
+ * their own default. From that moment a `{packId, soundId}` pointing at a pack that is gone is
+ * the NORMAL state of every seeded and suggested alert, and answering null makes each of them a
+ * silently mute alert nobody asked to lose.
+ *
+ * So the ref resolves THROUGH the default-pack preference instead (shared/soundPacks.ts
+ * `resolveSoundRef`), keeping the sound's CESP category so a completion sting stays a completion
+ * line — the live form of the argument `migrateAlertSoundRef` makes for a retired pack. The
+ * reserved pack's old fallback is now one case of that rule rather than a special one: a removed
+ * custom sound still lands on "A moment of your time, if you'd be so kind."
+ *
+ * `defaultPackId` is passed IN rather than read here on purpose: this module is loaded by
+ * node:test (tests/userSounds.test.mts drives the real enumeration over temp dirs) and the store
+ * is not loadable there. The IPC handler supplies the user's preference; the shipped id is the
+ * honest default for every other caller.
  */
 export function getSoundDataIn(
   roots: SoundRoots,
   packId: string,
-  soundId: string
+  soundId: string,
+  defaultPackId: string = DEFAULT_ALERT_PACK_ID
 ): SoundData | null {
   const direct = readPackSound(roots, packId, soundId)
   if (direct) return direct
-  if (packId === USER_SOUNDS_PACK_ID) {
-    return readPackSound(roots, DEFAULT_ALERT_PACK_ID, DEFAULT_ALERT_SOUNDS.buffWearsOff)
-  }
-  return null
+  const resolved = resolveSoundRef({ packId, soundId }, listPacksIn(roots), {
+    defaultPackId,
+    fallbackSoundId: DEFAULT_ALERT_SOUNDS.buffWearsOff
+  })
+  if (resolved.status === 'missing') return null
+  return readPackSound(roots, resolved.packId, resolved.soundId)
 }
 
 /** One sound's bytes from the real roots — what `sounds:getData` answers with. */
-export function getSoundData(packId: string, soundId: string): SoundData | null {
-  return getSoundDataIn(realRoots(), packId, soundId)
+export function getSoundData(
+  packId: string,
+  soundId: string,
+  defaultPackId?: string
+): SoundData | null {
+  return getSoundDataIn(realRoots(), packId, soundId, defaultPackId)
 }
 
 /** One pack's one sound, straight off disk. Null if the pack/sound/file is missing. */

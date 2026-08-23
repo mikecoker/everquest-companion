@@ -7,7 +7,7 @@
 | classes = * [[Enchanter]] - Level 42
 | slots = 
 
-{{SpellSlotRow | 2 | Increase Mana by 7 per tick (L52) to 9 per tick (L64) }}
+{{SpellSlotRow | 2 | Increase Mana by 6 per tick (L42) to 9 per tick (L64) }}
 
 | skill = [[Skill Alteration | Alteration]]
 

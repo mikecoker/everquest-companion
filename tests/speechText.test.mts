@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import type { AlertDef, SpeechMode } from '../src/shared/alertTypes'
 import {
   ALERT_AUDIO_ACTIONS,
+  ALERT_AUDIO_CHOICES,
   DEFAULT_VOICE_PREFS,
   MAX_SPEECH_CHARS,
   MAX_SPEECH_RATE,
@@ -19,6 +20,7 @@ import {
   SPEECH_ENGINES,
   SPEECH_MODES,
   normalizeVoicePrefs,
+  resolveAlertAudio,
   speechTextFor,
   type SpeechFiring
 } from '../src/shared/speechText'
@@ -67,6 +69,46 @@ test('SPEECH_MODES covers exactly the four documented modes', () => {
   assert.deepEqual([...SPEECH_MODES].sort(), ['alertName', 'custom', 'spellFirstWord', 'spellName'])
   assert.deepEqual([...ALERT_AUDIO_ACTIONS], ['sound', 'speech', 'both'])
   assert.deepEqual([...SPEECH_ENGINES], ['system', 'kokoro'])
+})
+
+test('JOS-362: the OFFERED channels are two, and the tolerated list still carries the third', () => {
+  // The split is the whole shape of the removal: a picker may only offer what a user can choose,
+  // and the store/share validators must keep ACCEPTING what old defs already say. Collapsing these
+  // two lists into one would either put "Sound + voice" back on screen or make a stored 'both'
+  // fail validation and lose the def.
+  assert.deepEqual([...ALERT_AUDIO_CHOICES], ['sound', 'speech'])
+  assert.ok(ALERT_AUDIO_ACTIONS.includes('both'), 'still readable, just not offerable')
+})
+
+test('JOS-362: resolveAlertAudio — a phrase makes a stored "both" spoken, everything else plays', () => {
+  // The owner's constraint, as a function: "don't screw up anyone's settings except for the insane
+  // people who use that one option in the process". Only 'both' moves, and it moves toward the
+  // most specific thing the def says about itself.
+  const base: AlertDef = {
+    id: 'a',
+    name: 'Charm break',
+    enabled: true,
+    trigger: { type: 'event', kind: 'uncharm' },
+    sound: { packId: 'alan-rickman', soundId: 'attention' }
+  }
+  assert.equal(resolveAlertAudio(base), 'sound', 'an absent channel is the pre-voice default')
+  assert.equal(resolveAlertAudio({ ...base, audio: 'sound' }), 'sound')
+  assert.equal(resolveAlertAudio({ ...base, audio: 'speech' }), 'speech')
+  assert.equal(resolveAlertAudio({ ...base, audio: 'both' }), 'sound', 'no phrase ⇒ the sound')
+  assert.equal(
+    resolveAlertAudio({ ...base, audio: 'both', speech: { mode: 'alertName' } }),
+    'sound',
+    'a mode is not a phrase — nobody wrote words for this alert'
+  )
+  assert.equal(
+    resolveAlertAudio({ ...base, audio: 'both', speech: { mode: 'custom', phrase: '  ' } }),
+    'sound',
+    'and blank words are not words'
+  )
+  assert.equal(
+    resolveAlertAudio({ ...base, audio: 'both', speech: { mode: 'custom', phrase: 'Charm broke' } }),
+    'speech'
+  )
 })
 
 // --------------------------------------------------------------------------- rank stripping

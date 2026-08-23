@@ -36,11 +36,12 @@
 // for anything node:test loads (AGENTS.md toolchain gotchas, the mobSearch.ts precedent).
 
 import type {
-  AlertAudio,
+  AlertAudioChoice,
   AlertDef,
   FiredAlert,
   SpeechEngine,
   SpeechSayResult,
+  SpeechUnavailableReason,
   SpeechVoice,
   VoicePrefs
 } from '@shared/types'
@@ -48,6 +49,7 @@ import {
   DEFAULT_VOICE_PREFS,
   MAX_SPEECH_RATE,
   MIN_SPEECH_RATE,
+  resolveAlertAudio,
   speechTextFor
 } from '../../../shared/speechText'
 
@@ -59,17 +61,19 @@ import {
  *
  *  - `sound`  play the def's pack sound.
  *  - `speak`  the utterance, or null for "say nothing".
- *  - `after`  the 'both' contract (D5): the sound plays FIRST and the speech is queued behind
- *             it, so the two never talk over each other. Only ever true when both are set.
+ *
+ * EXACTLY ONE OF THEM IS EVER SET (JOS-362). There used to be a third field, `after`: the 'both'
+ * contract (D5) played the sound FIRST and queued the utterance behind it. That channel is retired
+ * — "also remove sound + spoken - too much garbage" (owner, 2026-08-14) — so a plan is now one
+ * channel or none, and `resolveAlertAudio` is where a def still storing 'both' picks its side.
  */
 export interface SpeechPlan {
   sound: boolean
   speak: string | null
-  after: boolean
 }
 
-const SILENT: SpeechPlan = { sound: false, speak: null, after: false }
-const SOUND_ONLY: SpeechPlan = { sound: true, speak: null, after: false }
+const SILENT: SpeechPlan = { sound: false, speak: null }
+const SOUND_ONLY: SpeechPlan = { sound: true, speak: null }
 
 /**
  * Resolve a def + firing into what to play.
@@ -88,6 +92,11 @@ const SOUND_ONLY: SpeechPlan = { sound: true, speak: null, after: false }
  * There is still exactly one way a speaking alert falls back to its sound: nothing truthful to
  * say (`speechTextFor` resolved to null — a nameless def with an empty phrase). Silence is never
  * the answer for an alert the user can see is enabled.
+ *
+ * THE RETIRED 'both' RESOLVES HERE TOO, through the same `resolveAlertAudio` the two pickers read
+ * (JOS-362). That shared call is the point: a def whose row says "Voice (spoken)" must not play a
+ * sound, and one shown on a pack must not talk — the split-brain that a second interpretation of
+ * `audio` in the firing path would create is exactly the bug class the global voice switch was.
  */
 export function speechPlan(
   def: Pick<AlertDef, 'name' | 'audio' | 'speech'>,
@@ -95,11 +104,11 @@ export function speechPlan(
   muted: boolean
 ): SpeechPlan {
   if (muted) return SILENT
-  const action: AlertAudio = def.audio ?? 'sound'
+  const action: AlertAudioChoice = resolveAlertAudio(def)
   if (action === 'sound') return SOUND_ONLY
   const text = speechTextFor(def, firing)
   if (!text) return SOUND_ONLY
-  return action === 'both' ? { sound: true, speak: text, after: true } : { sound: false, speak: text, after: false }
+  return { sound: false, speak: text }
 }
 
 /** The minimum a voice has to state for `pickVoice` to match it (a `SpeechSynthesisVoice` does). */
@@ -250,7 +259,7 @@ export async function listVoices(engine: SpeechEngine): Promise<SpeechVoice[]> {
 
 /**
  * The ONE thing that can still stand between "this alert says it speaks" and "you hear words",
- * now that the master switch is gone. Both members are SETUP states, not errors:
+ * now that the master switch is gone. The first two are SETUP states, not errors:
  *
  *  - 'engine-not-installed' → the natural (Kokoro) tier is selected but its ~115 MB pack is not
  *    downloaded. Speech still happens — `speak()` falls back to the system voice and warns once —
@@ -258,9 +267,25 @@ export async function listVoices(engine: SpeechEngine): Promise<SpeechVoice[]> {
  *  - 'no-voices' → the system tier has no voices at all (a stripped Windows image, a platform
  *    with no `speechSynthesis`). This one IS silence, and it is the only one that is.
  *
+ * …and the last two are JOS-247: the pack IS downloaded and it still is not the voice you hear.
+ *
+ *  - 'engine-failed' → main tried and produced no audio.
+ *  - 'engine-unloadable' → main cannot even load the engine on this PC (ERR_DLOPEN_FAILED).
+ *
+ * THE DIFFERENCE BETWEEN THE FIRST TWO AND THE LAST TWO IS WHERE THE FACT COMES FROM, and it is
+ * why they cannot all be derived by `speechSetupGap`. A setup gap is a property of the INVENTORY
+ * and is knowable by asking; an engine fault is only ever knowable by having TRIED, because a
+ * downloaded pack whose worker dies enumerates its 54 voices perfectly (`speech:voices` reads
+ * the file, not the engine). That is exactly the reporter's screen: a full picker, a natural
+ * voice selected, and every alert in the default Microsoft voice. So the fault is LATCHED from
+ * the first failed utterance (below) and merged in by `useSpeechSetup`.
+ *
  * Null means there is nothing to say about setup.
  */
-export type SpeechSetupGap = 'engine-not-installed' | 'no-voices'
+export type SpeechSetupGap = 'engine-not-installed' | 'no-voices' | 'engine-failed' | 'engine-unloadable'
+
+/** The subset of the above that only a failed utterance can reveal. */
+export type SpeechEngineFault = 'engine-failed' | 'engine-unloadable'
 
 /**
  * Resolve a tier + its actual voice inventory into the gap, if any. Pure, so the annotation the
@@ -275,10 +300,101 @@ export function speechSetupGap(engine: SpeechEngine, voices: readonly unknown[])
   return engine === 'kokoro' ? 'engine-not-installed' : 'no-voices'
 }
 
-/** What each gap MEANS, in the user's terms. The link that follows it is the fix. */
+/**
+ * What each gap MEANS, in the user's terms. The link that follows it is the fix.
+ *
+ * The 'engine-unloadable' line NAMES A REMEDY, which no other note here does, and it is allowed
+ * to because the remedy was measured rather than guessed: the shipped `onnxruntime_binding.node`
+ * and `onnxruntime.dll` import VCRUNTIME140/VCRUNTIME140_1/MSVCP140 (PE import tables, 2026-08-12)
+ * and Electron ships none of them, so a PC without the Microsoft Visual C++ x64 runtime fails to
+ * load the engine in exactly this way. It says "usually" because a dlopen can fail for other
+ * reasons (an antivirus quarantine of the same files is the other realistic one) and this app
+ * cannot see which happened.
+ */
 export const SPEECH_SETUP_NOTES: Record<SpeechSetupGap, string> = {
-  'engine-not-installed': 'The natural voice isn’t downloaded — a Windows voice speaks until it is.',
-  'no-voices': 'This machine has no speech voices installed.'
+  'engine-not-installed': 'The natural voice isn’t downloaded - a Windows voice speaks until it is.',
+  'no-voices': 'This machine has no speech voices installed.',
+  'engine-failed':
+    'The natural voice is downloaded but could not speak - a Windows voice is speaking instead.',
+  'engine-unloadable':
+    'The natural voice is downloaded but will not start on this PC - a Windows voice is speaking ' +
+    'instead. Installing the Microsoft Visual C++ x64 runtime usually fixes it.'
+}
+
+// ------------------------------------------------------- the engine fault, once it has spoken
+
+/**
+ * THE LATCH. `speak()` is the only thing in this app that ever learns the downloaded tier does
+ * not work, and before JOS-247 the only thing it did with that knowledge was `console.warn`
+ * once — so a user whose natural voice had never once worked saw a perfectly healthy picker and
+ * had no way to find out. This holds the fault so the UI can state it.
+ *
+ * IT IS STICKY FOR THE SESSION, on purpose. The engine's own failure is latched in main (a
+ * thread that could not load its native module cannot load it later), and a phrase said BEFORE
+ * the failure is served from the wav cache and still succeeds — so clearing this on the next
+ * success would blink the note off for a cached word and back on for a new one. "The natural
+ * voice failed this session" stays true either way.
+ *
+ * Deliberately module state and not React state: `speak()` is called from the alert firing path,
+ * the row's ▶ and the preferences preview, none of which are inside a component.
+ */
+let engineFault: SpeechEngineFault | null = null
+const faultListeners = new Set<(fault: SpeechEngineFault | null) => void>()
+
+/** The fault this session has seen, or null while the tier has never failed. */
+export function speechEngineFault(): SpeechEngineFault | null {
+  return engineFault
+}
+
+/**
+ * Subscribe to changes of the session's fault. Returns the unsubscribe.
+ *
+ * It carries `null` as well as a fault since JOS-274 — because there is now exactly one thing
+ * that can UNDO one. See `clearSpeechEngineFault`.
+ */
+export function onSpeechEngineFault(
+  listener: (fault: SpeechEngineFault | null) => void
+): () => void {
+  faultListeners.add(listener)
+  return () => faultListeners.delete(listener)
+}
+
+/**
+ * Record what a failed `speech:say` said about itself. Only the two ENGINE faults latch:
+ * 'engine-not-installed' is already visible everywhere as a setup gap (the picker says "not
+ * installed", the row links to Preferences), and latching it would double every one of those.
+ */
+export function noteSpeechEngineFault(reason: SpeechUnavailableReason): void {
+  if (reason !== 'engine-failed' && reason !== 'engine-unloadable') return
+  if (engineFault === reason) return
+  engineFault = reason
+  for (const listener of faultListeners) listener(reason)
+}
+
+/**
+ * Forget the session's fault, and TELL the subscribers — the sticky-for-the-session rule, and
+ * its one exception (JOS-274).
+ *
+ * The rule's premise is that nothing between one alert and the next changes whether a native
+ * module can be loaded. Finishing a voice install now can: the same run provisions the Microsoft
+ * Visual C++ runtime beside the engine, main unlatches its own fault, and the next utterance
+ * really does go to Kokoro. Leaving "will not start on this PC" on screen after that would be
+ * the mirror image of the bug JOS-247 fixed — a true sentence about a machine that has since
+ * been repaired.
+ *
+ * Called from the Voice panel on a completed install, and nowhere else. If the repair did not
+ * take, the very next failed utterance re-latches within seconds, so the honest worst case is a
+ * note that blinks rather than one that lies.
+ */
+export function clearSpeechEngineFault(): void {
+  if (engineFault === null) return
+  engineFault = null
+  for (const listener of faultListeners) listener(null)
+}
+
+/** Tests only: forget the session's fault so cases do not leak into each other. */
+export function resetSpeechEngineFault(): void {
+  clearSpeechEngineFault()
 }
 
 // ------------------------------------------------------------------ the e2e / test hook
@@ -324,10 +440,17 @@ function isE2E(): boolean {
 
 // ------------------------------------------------------------------ speaking
 
-/** Extra knobs on one utterance. `gain` is the alerts module's own effective volume (§2). */
+/**
+ * Extra knobs on one utterance. `gain` is the alerts module's own effective volume (§2).
+ *
+ * WHICH VOICE IS NOT ONE OF THEM (JOS-362). There used to be a `voiceId` here — the per-alert
+ * override (`AlertSpeech.voiceId`), passed by the firing path and by the editor's preview. The
+ * owner retired the whole idea: "our settings shouldn't store which voice per alert, only the
+ * preferences should (within Voice (spoken))". Every utterance now takes its voice from the prefs
+ * blob it is handed, so changing the voice in Preferences changes every spoken alert at once —
+ * structurally, not by convention: there is no argument left with which to say otherwise.
+ */
 export interface SpeakOptions {
-  /** per-alert voice override (`AlertSpeech.voiceId`); absent ⇒ the global default. */
-  voiceId?: string
   /** 0..1 multiplier applied on top of `VoicePrefs.volume` — the alerts master × per-alert volume. */
   gain?: number
 }
@@ -343,7 +466,7 @@ function warnKokoroFallback(reason: string): void {
   // `console.warn` is the tree's own convention for exactly that (main/errorLog.ts logWarn).
   // eslint-disable-next-line no-console
   console.warn(
-    `[everquest-companion] voice: the downloaded speech engine is unavailable (${reason}) — ` +
+    `[everquest-companion] voice: the downloaded speech engine is unavailable (${reason}) - ` +
       'speaking with the system voice instead.'
   )
 }
@@ -357,7 +480,7 @@ function warnKokoroFallback(reason: string): void {
 export async function speak(text: string, voicePrefs: VoicePrefs, opts: SpeakOptions = {}): Promise<void> {
   const said = text.trim()
   if (!said) return
-  const voiceId = opts.voiceId ?? voicePrefs.voiceId
+  const voiceId = voicePrefs.voiceId
   const uttered = !isE2E()
   record({ text: said, engine: voicePrefs.engine, voiceId, uttered, ts: Date.now() })
   if (!uttered) return
@@ -378,13 +501,18 @@ async function sayThroughEngine(
 ): Promise<boolean> {
   let result: SpeechSayResult
   try {
-    const voiceId = opts.voiceId ?? voicePrefs.voiceId
+    const voiceId = voicePrefs.voiceId
     result = await window.eq.speechSay({ text, ...(voiceId ? { voiceId } : {}) })
   } catch {
     warnKokoroFallback('the speech channel is unavailable')
     return false
   }
   if (!result.ok) {
+    // The console warning stays a once-per-session DIAGNOSTIC; the LATCH is what the UI reads.
+    // Both, because they answer different questions: the warning tells a developer reading a dev
+    // console what happened at 21:04, the latch tells the user why their voice is not the one
+    // they picked, at whatever later moment they go looking.
+    noteSpeechEngineFault(result.reason)
     warnKokoroFallback(result.reason)
     return false
   }
@@ -407,7 +535,7 @@ function speakSystem(text: string, voicePrefs: VoicePrefs, opts: SpeakOptions): 
   // The voice list may still be loading on the very first alert of a session; in that case the
   // utterance goes out in the engine's default voice rather than waiting (an alert is late or
   // it is not an alert), and every later one gets the chosen voice.
-  const voice = pickVoice(s.getVoices(), opts.voiceId ?? voicePrefs.voiceId)
+  const voice = pickVoice(s.getVoices(), voicePrefs.voiceId)
   if (voice) {
     utterance.voice = voice
     if (voice.lang) utterance.lang = voice.lang

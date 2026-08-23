@@ -140,7 +140,9 @@ function capColumns(cap: number, cols: unknown[][]): number {
   return drop
 }
 
-export class ProgressionModule implements EqModule<ProgressionSnap, ProgressionDelta> {
+export class ProgressionModule
+  implements EqModule<ProgressionSnap, ProgressionDelta>
+{
   readonly id = 'progression'
   private s: ProgressionSnap = blankSnap()
   private p: ProgressionDelta = blankDelta()
@@ -192,6 +194,11 @@ export class ProgressionModule implements EqModule<ProgressionSnap, ProgressionD
         this.pushOffline(ev.fromTs, ev.toTs, ev.camped)
         return
       case 'loot':
+        // A DESTROY COUNTS HERE, and the column's own name is the argument (JOS-401, the census):
+        // `lootTs` is timestamps ONLY, an ACTIVITY signal for the idle heuristic and the zone
+        // bands — never a drop count, and nothing downstream reads it as one. Emptying your bags
+        // is you at the keyboard, so excluding it would manufacture idle time out of real play.
+        // The surfaces that do count drops read the loot rows themselves (shared/lootRates.ts).
         push1(this.s.lootTs, this.p.lootTs, ev.ts)
         this.trim()
         return

@@ -243,10 +243,18 @@ function panelRects(page: Page): Promise<PanelRect[]> {
   )
 }
 
-/** How far the app's scrolling content area overflows its viewport box (0 = no page scroll). */
+/**
+ * How far the app's scrolling content area overflows its viewport box (0 = no page scroll).
+ *
+ * IT ASKS FOR `app-content` BY NAME, not for `main`'s first child. Those were the same node until
+ * JOS-324 put the gear area's tab bar above the scroll box; from that moment "main's first child"
+ * would have resolved to a bar that never scrolls, and every caller — Combat, Leveling, Gear,
+ * Exaltations — would have gone quietly, permanently green while measuring nothing. The testid has
+ * been on the scroll box since it was written; this just stops guessing at it by position.
+ */
 export function pageOverflow(page: Page): Promise<{ doc: number; content: number }> {
   return page.evaluate(() => {
-    const content = document.querySelector('main')?.firstElementChild as HTMLElement | null
+    const content = document.querySelector('[data-testid="app-content"]') as HTMLElement | null
     return {
       doc: Math.max(0, document.documentElement.scrollHeight - document.documentElement.clientHeight),
       // -1 = the content area wasn't found; that's a FAIL, not a silent pass.

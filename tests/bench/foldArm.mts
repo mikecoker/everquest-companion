@@ -51,9 +51,10 @@ import { unchunkedSlicer } from '../../src/main/log/replaySlicer'
 import baselineJson from '../../src/main/data/messageOverlay.baseline.json'
 import type { MessageOverlay } from '../../src/shared/types'
 
-/** The committed baseline overlay, imported directly — `data/overlayPersistence.ts` reaches for
- *  Electron's `app` to find the user's copy and cannot be imported outside it. */
-const BASELINE = baselineJson as unknown as MessageOverlay
+/** The committed baseline overlay as a seed, imported directly — `data/overlayPersistence.ts`
+ *  reaches for Electron's `app` to find the user's copy and cannot be imported outside it. The
+ *  key is what the miner files its counts under (JOS-231); the bench seeds the baseline alone. */
+const BASELINE = { key: 'baseline', counts: baselineJson as unknown as MessageOverlay }
 
 // ------------------------------------------------------------------------------ the accumulator
 

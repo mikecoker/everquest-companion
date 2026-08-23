@@ -21,17 +21,38 @@
 
 import { type JSX, useCallback, useEffect, useState } from 'react'
 import { FormControlLabel, Stack, Switch, Typography } from '@mui/material'
+import { recordPref, usePrefsSeed, type ToastSeed } from './prefsHydration'
 
 /** The two facts this panel shows. The toast's `durationMs` is not exposed — it is a timing
  *  constant with a good default, and the card pins under the pointer anyway. */
-interface ToastState {
-  open: boolean
-  locked: boolean
-}
+type ToastState = ToastSeed
 
-/** Hydrate the toast window's open-state + lock from main. */
+/**
+ * The toast window's open-state + lock: SEEDED from the pane's hydration snapshot, then kept
+ * current by the two channels that can change it behind this card's back.
+ *
+ * THE SEED IS THE JOS-340 HALF. It used to mount on `{ open: false, locked: true }` and correct
+ * itself, and BOTH of those defaults are wrong for a user who has changed them — `locked: true`
+ * in particular meant the "Move it" switch painted OFF and then rose for anyone with the strip
+ * unlocked. The gate's snapshot reads exactly these two facts (./prefsHydration.tsx) and hands
+ * them over before the first render.
+ *
+ * THE LISTENERS STAY, and they are not a second hydration path — they are the two ways this value
+ * genuinely changes while the card is on screen. The focus re-read is the alert player's
+ * precedent: the toast's own frame carries a Done button, so the lock can change in the OTHER
+ * window. And an overlay can close itself (the app quitting, its own window controls), so the
+ * switch listens rather than trusting the value it started with. Both write back to the snapshot,
+ * so the next mount of this card starts from what they learned.
+ */
 function useToastState(): [ToastState, (patch: Partial<ToastState>) => void] {
-  const [state, setState] = useState<ToastState>({ open: false, locked: true })
+  const [state, setState] = useState<ToastState>(usePrefsSeed().toast)
+
+  // ONE place writes the snapshot back, and it is an EFFECT rather than a line inside each
+  // setter: a `useState` updater has to be pure (React may run it twice), and there are three
+  // ways this value moves — the switches, the focus re-read, and the overlay's own push.
+  useEffect(() => {
+    recordPref('toast', state)
+  }, [state])
 
   useEffect(() => {
     let alive = true
@@ -40,13 +61,7 @@ function useToastState(): [ToastState, (patch: Partial<ToastState>) => void] {
         if (alive) setState({ open: open.toast, locked: cfg.locked })
       })
     }
-    hydrate()
-    // Re-read on focus (the alert player's precedent): the toast's own frame carries a Done
-    // button, so the lock can change in the OTHER window while this panel is on screen. Coming
-    // back to the app is exactly when a stale switch would be seen.
     window.addEventListener('focus', hydrate)
-    // An overlay can also close itself (the app quitting, its own window controls), so the
-    // switch listens rather than trusting the value it hydrated with.
     const off = window.eq.onOverlayState((s) => {
       if (s.kind === 'toast') setState((cur) => ({ ...cur, open: s.open }))
     })
@@ -88,7 +103,12 @@ export function ToastSetting(): JSX.Element {
         <Typography variant="caption" color="text.secondary">
           {state.open
             ? 'A card slides in at the top of the screen when you drop a raid target or finish a Plane of Sky quest, then fades. Point at it to keep it up; a quest’s reward card opens the Plane of Sky tab.'
-            : 'Off. Boss kills and quest completions still show up in the app and in your alerts — nothing appears over the game.'}
+            : 'Off. Boss kills and quest completions still show up in the app and in your alerts - nothing appears over the game.'}
+        </Typography>
+        {/* JOS-405: the strip's own A− / A+ is in a drag frame you have to unlock to see, so this
+            says where else the size lives. One sentence, state not process. */}
+        <Typography variant="caption" color="text.secondary" data-testid="pref-toast-text-size-note">
+          Its text size and transparency are Appearance → Overlays.
         </Typography>
       </Stack>
 
@@ -108,7 +128,7 @@ export function ToastSetting(): JSX.Element {
         <Typography variant="caption" color="text.secondary">
           {state.locked
             ? 'The strip sits where you left it and clicks pass straight through to the game.'
-            : 'The strip is showing its outline — drag it anywhere, and size its text with A− / A+ on the frame. Turn this off (or press Done) when it sits where you want it.'}
+            : 'The strip is showing its outline - drag it anywhere, and size its text with A− / A+ on the frame. Turn this off (or press Done) when it sits where you want it.'}
         </Typography>
       </Stack>
     </Stack>

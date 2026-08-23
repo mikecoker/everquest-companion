@@ -12,6 +12,7 @@
 import { ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { PerfHudPrefs, PerfSample, StartupProfile } from '../shared/perf'
+import type { ProcessPriorityPrefs } from '../shared/processPriority'
 
 export const perfBridge = {
   /**
@@ -30,6 +31,14 @@ export const perfBridge = {
    *  immediately rather than at the next tick. Resolves to what was actually stored. */
   setPerfHudEnabled: (enabled: boolean): Promise<PerfHudPrefs> =>
     ipcRenderer.invoke(IPC.perfSetEnabled, enabled),
+  /** The persisted "yield CPU to the game" switch (JOS-366). ON by default. */
+  getProcessPriority: (): Promise<ProcessPriorityPrefs> =>
+    ipcRenderer.invoke(IPC.processPriorityGet),
+  /** Flip it; main + every renderer are re-prioritised in the same call, so the switch describes
+   *  what the app is doing rather than what it will do after a relaunch. Resolves to what was
+   *  actually stored. */
+  setYieldToGame: (enabled: boolean): Promise<ProcessPriorityPrefs> =>
+    ipcRenderer.invoke(IPC.processPrioritySet, enabled),
   /** The startup profile for the launch you are in (also written to disk for the next one). */
   getStartupProfile: (): Promise<StartupProfile> => ipcRenderer.invoke(IPC.perfGetStartup),
   /** Report the `rendererHydrated` startup phase — the one mark only the renderer can make.

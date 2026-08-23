@@ -13,6 +13,7 @@ import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import type { UpdateStatus } from '@shared/types'
 import { type UpdateChipState, updateChipState } from '@shared/update'
 import { formatDateTime } from '../../lib/formatDate'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 
 interface ChipLook {
   label: string
@@ -28,20 +29,22 @@ const STATE_CHIP: Record<UpdateStatus['state'], ChipLook> = {
   error: { label: 'check failed', color: 'warning' }
 }
 
-/** Shared status state: pull the last one (pushes predate this mount), then follow pushes. */
+/**
+ * Shared status state: SEEDED with the last one (pushes predate this mount), then following
+ * pushes.
+ *
+ * The pull used to be an effect that started from `{ state: 'idle' }` (JOS-340), so a user with a
+ * downloaded update waiting read "up to date" for a frame before the Relaunch button appeared —
+ * the one state in this card where the wrong frame is also the wrong ADVICE. The seed is the same
+ * pull, taken by the pane's gate before anything paints (./prefsHydration.tsx); the subscription
+ * is untouched, because a push is news rather than hydration.
+ */
 export function useUpdateStatus(): UpdateStatus {
-  const [status, setStatus] = useState<UpdateStatus>({ state: 'idle' })
+  const [status, setStatus] = useState<UpdateStatus>(usePrefsSeed().updateStatus)
   useEffect(() => {
-    let alive = true
-    void window.eq.getUpdateStatus().then((s) => {
-      if (alive) setStatus(s)
-    })
-    const off = window.eq.onUpdateStatus(setStatus)
-    return () => {
-      alive = false
-      off()
-    }
-  }, [])
+    recordPref('updateStatus', status)
+  }, [status])
+  useEffect(() => window.eq.onUpdateStatus(setStatus), [])
   return status
 }
 
@@ -65,7 +68,7 @@ export function VersionSetting({
   return (
     <Stack direction="row" alignItems="baseline" spacing={1.5}>
       <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-        {version ? `v${version}` : '—'}
+        {version ? `v${version}` : '-'}
       </Typography>
       <Link component="button" type="button" variant="caption" data-testid="pref-version-whats-new" onClick={onWhatsNew}>
         What&rsquo;s new
@@ -82,7 +85,7 @@ export function VersionSetting({
  */
 function chipLook(status: UpdateStatus, ui: UpdateChipState): ChipLook {
   // Dev build: the updater is off, so "up to date" would be a claim no check ever made.
-  if (status.disabled) return { label: 'dev build — updates off', color: 'default' }
+  if (status.disabled) return { label: 'dev build - updates off', color: 'default' }
   if (ui.kind === 'quiet' && status.state === 'ready') return STATE_CHIP.idle
   return STATE_CHIP[status.state]
 }
@@ -129,14 +132,23 @@ function UpdateProgress({
         sx={{ borderRadius: 1 }}
       />
       <Typography variant="caption" color="text.secondary">
-        {status.version ? `v${status.version} — ` : ''}
+        {status.version ? `v${status.version} - ` : ''}
         {status.percent ?? 0}%
       </Typography>
     </Box>
   )
 }
 
-/** The failure message the quiet nav chip deliberately swallows — this is where it survives. */
+/**
+ * The failure DETAIL. Since JOS-307 the nav chip no longer swallows the fact of a failure — it
+ * says "update check failed" in its own line — but it still carries only the fact; this is where
+ * the sentence lives, at full width and without a hover.
+ *
+ * `status.message` has exactly one producer (`describeUpdateFailure`), which is what guarantees the
+ * two surfaces read the same words. For the JSON-parse family (GitHub issue 29, in-app report
+ * 01KZYN843T99R2JHYDTF9TS8AK) that sentence is deliberately not the parser's: `Unexpected end of
+ * JSON input` is what a user was left staring at on 0.20, and it is neither true nor actionable.
+ */
 function UpdateError({ status }: { status: UpdateStatus }): JSX.Element | null {
   if (status.state !== 'error' || !status.message) return null
   return (
@@ -172,7 +184,7 @@ function UpdateActions({
           startIcon={<RestartAltIcon />}
           onClick={() => void window.eq.installUpdate()}
         >
-          Restart to update{ui.kind === 'ready' && ui.version ? ` — v${ui.version}` : ''}
+          Restart to update{ui.kind === 'ready' && ui.version ? ` - v${ui.version}` : ''}
         </Button>
       ) : (
         <Button

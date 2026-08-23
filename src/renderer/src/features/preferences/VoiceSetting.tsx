@@ -48,9 +48,16 @@ import {
   SPEECH_ENGINES,
   normalizeVoicePrefs
 } from '@shared/speechText'
-import { applyVoicePrefs, currentVoicePrefs, forgetSystemVoices, speak } from '../../lib/speech'
-import { useVoiceOptions } from '../../lib/useVoices'
+import {
+  applyVoicePrefs,
+  clearSpeechEngineFault,
+  forgetSystemVoices,
+  speak,
+  SPEECH_SETUP_NOTES
+} from '../../lib/speech'
+import { useSpeechEngineFault, useVoiceOptions } from '../../lib/useVoices'
 import { trackFeature } from '../../lib/telemetry'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 
 /** What each tier is, in one line. The size lives on the download button, where it is actionable. */
 const ENGINE_LABELS: Record<SpeechEngine, string> = {
@@ -71,19 +78,21 @@ const PREVIEW_TEXT = 'Charm break'
  * no reload, no focus round-trip.
  */
 function useVoicePrefs(): [VoicePrefs, (next: VoicePrefs) => void] {
-  const [prefs, setPrefs] = useState<VoicePrefs>(currentVoicePrefs)
+  // SEEDED from the pane's hydration snapshot (JOS-340), not from `currentVoicePrefs()`. That
+  // module cache is USUALLY warm by the time anyone reaches this section — AlertPlayer is mounted
+  // for the app's whole life and calls `loadVoicePrefs()` at its own mount — but "usually" is a
+  // race, and it loses exactly when the app opens straight onto Preferences. The snapshot is the
+  // same value with the race taken out: four controls (an engine picker, a voice picker and two
+  // sliders) that can no longer paint the shipped defaults for a frame.
+  const seed = usePrefsSeed().voice
+  const [prefs, setPrefs] = useState<VoicePrefs>(seed)
 
+  // The speech engine reads its settings from that module cache on every firing, so the seed is
+  // pushed into it too. This is a side effect on a shared module, not a second hydration: the
+  // paint above already used the same value.
   useEffect(() => {
-    let alive = true
-    void window.eq.getVoicePrefs().then((stored) => {
-      if (!alive) return
-      applyVoicePrefs(stored)
-      setPrefs(stored)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
+    applyVoicePrefs(seed)
+  }, [seed])
 
   const update = useCallback((next: VoicePrefs) => {
     // Optimistic locally (a slider must not lag an IPC round trip), authoritative from main.
@@ -93,6 +102,7 @@ function useVoicePrefs(): [VoicePrefs, (next: VoicePrefs) => void] {
     void window.eq.setVoicePrefs(normalized).then((stored) => {
       applyVoicePrefs(stored)
       setPrefs(stored)
+      recordPref('voice', stored)
     })
   }, [])
 
@@ -142,7 +152,12 @@ function useKokoroInstall(): KokoroInstallState {
     const off = window.eq.onSpeechInstallProgress((p) => {
       if (p.engine !== 'kokoro') return
       setProgress(p)
-      if (p.phase === 'done') setInstalls((n) => n + 1)
+      if (p.phase !== 'done') return
+      setInstalls((n) => n + 1)
+      // JOS-274: the same run may have laid the Visual C++ runtime down beside the engine, in
+      // which case a fault this session latched is about a machine that no longer exists. Main
+      // has already unlatched its own; this is the renderer's half of the same fact.
+      clearSpeechEngineFault()
     })
     return () => {
       alive = false
@@ -184,7 +199,7 @@ function useKokoroInstall(): KokoroInstallState {
 function VoiceIntro(): JSX.Element {
   return (
     <Typography variant="caption" color="text.secondary" data-testid="pref-voice-intro">
-      Alerts speak when you set their output to Voice, in the Alerts tab — there is no switch here.
+      Alerts speak when you set their output to Voice, in the Alerts tab - there is no switch here.
       This is the voice they use. Muting alerts silences speech too.
     </Typography>
   )
@@ -199,6 +214,10 @@ function phaseLabel(prog: SpeechInstallProgress, percent: number | null): string
       return `Downloading ${mb(prog.received)} of ${mb(prog.total)}${percent === null ? '' : ` (${percent}%)`}`
     case 'verifying':
       return 'Verifying the download…'
+    // A rate-limited wait (JOS-420). It carries its own sentence because the length matters:
+    // "retrying in 120s" is a wait, an unexplained frozen bar is a bug report.
+    case 'waiting':
+      return `Waiting - ${prog.message ?? 'retrying shortly'}`
     case 'done':
       return 'Installed.'
     default:
@@ -219,7 +238,7 @@ function InstallProgress({ prog }: { prog: SpeechInstallProgress }): JSX.Element
         sx={{ mt: 0.5 }}
         data-testid="pref-voice-install-error"
       >
-        Download failed — {prog.message ?? 'no detail given'}. Nothing was installed.
+        Download failed - {prog.message ?? 'no detail given'}. Nothing was installed.
       </Typography>
     )
   }
@@ -249,7 +268,7 @@ function KokoroInstall({ install }: { install: KokoroInstallState }): JSX.Elemen
   return (
     <Box sx={{ mt: 0.5 }}>
       <Typography variant="caption" color="warning.main" display="block" data-testid="pref-voice-not-installed">
-        Not installed yet — alerts speak with a Windows voice until it is.
+        Not installed yet - alerts speak with a Windows voice until it is.
       </Typography>
       {progress && <InstallProgress prog={progress} />}
       {!running && (
@@ -295,12 +314,43 @@ function EngineRow({
         {SPEECH_ENGINES.map((engine) => (
           <MenuItem key={engine} value={engine}>
             {ENGINE_LABELS[engine]}
-            {engine === 'kokoro' && !installed ? ' — not installed' : ''}
+            {engine === 'kokoro' && !installed ? ' - not installed' : ''}
           </MenuItem>
         ))}
       </Select>
       {prefs.engine === 'kokoro' && !installed && <KokoroInstall install={install} />}
     </Box>
+  )
+}
+
+/**
+ * THE DEGRADATION, SAID OUT LOUD (JOS-247) — the note that was missing when a 0.22.0 user
+ * downloaded a natural voice and heard the default Microsoft one for every selection.
+ *
+ * Nothing on this screen could have told them. The download had finished, so the "not installed"
+ * line was correctly absent; `speech:voices` reads the downloaded FILE, so the picker listed
+ * every natural voice and let them choose one; and the only trace of the fallback was a
+ * `console.warn` in a window with no console. The engine fault is the one fact that reveals it,
+ * and it can only be learned by having tried — so it renders here, right under the picker whose
+ * selection is not being honoured, and after any utterance this session (an alert, or the ▶
+ * beside it, which is the deliberate way to find out on demand).
+ *
+ * It is `warning.main` rather than the secondary grey the "not downloaded" note wears: that one
+ * is a setup step the user has not taken yet, this one is a thing that is broken on their PC.
+ */
+function EngineFaultNote(): JSX.Element | null {
+  const fault = useSpeechEngineFault()
+  if (!fault) return null
+  return (
+    <Typography
+      variant="caption"
+      color="warning.main"
+      display="block"
+      sx={{ mt: 0.5, maxWidth: 520, lineHeight: 1.4 }}
+      data-testid="pref-voice-engine-fault"
+    >
+      {SPEECH_SETUP_NOTES[fault]}
+    </Typography>
   )
 }
 
@@ -351,6 +401,14 @@ function VoicePickerRow({
       >
         Preview
       </Button>
+      {/* Under the picker and the ▶ that reveals it, full width so a two-clause sentence reads.
+          Only the downloaded tier can fault; a user who has since switched back to Windows voices
+          is hearing exactly what they chose and needs no warning about the other one. */}
+      {prefs.engine === 'kokoro' && (
+        <Box sx={{ width: '100%' }}>
+          <EngineFaultNote />
+        </Box>
+      )}
     </Stack>
   )
 }

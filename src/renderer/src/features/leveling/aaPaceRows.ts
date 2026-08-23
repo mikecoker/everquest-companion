@@ -12,7 +12,14 @@
 import type { AaEta, AaEtaBlocked, AaPace, AaPotionState } from '@shared/aaPace'
 import type { RangeStats } from '@shared/progressionStats'
 import { AA_POTION_CHARGES } from '../../../../shared/aaPace'
-import { NONE, aaRateText, activeSpanText } from './rangeStatsRows'
+import {
+  RATE_BASIS_DEFAULT,
+  basisRead,
+  pickRate,
+  type BasisRead,
+  type RateBasis
+} from '../../../../shared/rateBasis'
+import { NONE, aaRateText, basisSpanText } from './rangeStatsRows'
 import { fmtDuration } from './levelChartGeometry'
 import { formatAaRate, formatPointRate } from '../../lib/formatRate'
 
@@ -41,12 +48,20 @@ function rate(n: number | null, fmt: (v: number) => string): string {
   return n == null ? NONE : fmt(n)
 }
 
-const RATE_TITLE = 'AA completions per hour of active time.'
+// THE TILE HOVERS STAY ONE CLAUSE, and JOS-249's definition rides the PANEL's caption instead
+// (AaPacePanel). This file's own diet rule — a tile tooltip names what the tile measures and
+// nothing more, because the `inferred` chip is the disclosure — is pinned at 16 words by
+// tests/aaPace.test.mts, and appending a definition here would restate on four tiles what the
+// caption directly above them says once.
+// …and since JOS-288 the WORD in each one follows the hour actually in force. Still one clause,
+// still no caveat: the panel's caption states the span and the definition once, below the tiles.
+const RATE_TITLE = (word: RateBasis): string => `AA completions per hour of ${word} time.`
 
-const POINTS_TITLE = 'Ability points per hour of active time.'
+const POINTS_TITLE = (word: RateBasis): string => `Ability points per hour of ${word} time.`
 
-/** The reason there is no estimate — one clause per `AaEtaBlocked`. */
-const ETA_BLOCKED_TITLE: Record<AaEtaBlocked, string> = {
+/** The reason there is no estimate — one clause per `AaEtaBlocked`. Exported since JOS-195: the
+ *  XP overlay refuses the same estimate for the same two reasons and must say the same words. */
+export const AA_ETA_BLOCKED_TITLE: Record<AaEtaBlocked, string> = {
   'no-pace': 'Fewer than two AA completions here, so there is no gap to project forward.',
   stale: 'The last completion is far older than this window’s rhythm between them.'
 }
@@ -57,6 +72,19 @@ function etaTitle(meanIntervalMs: number, samples: number, sinceLastMs: number, 
   return overdue ? `${base} Already past that gap.` : base
 }
 
+/**
+ * The WAIT, as a bare value: 'due', or '~12m'. Null when the estimate is blocked.
+ *
+ * Exported since JOS-195, because the XP overlay prints the same wait in a two-column row and a
+ * second spelling of `'~' + fmtDuration(ms)` is exactly how two surfaces come to round the same
+ * estimate differently. The REASON for a refusal stays with the surfaces that have room for it
+ * (`etaTile` below, and `aaNextText`'s deliberate silence); this is only the number.
+ */
+export function aaEtaValue(eta: AaEta): string | null {
+  if (eta.blocked !== null) return null
+  return eta.overdue ? 'due' : `~${fmtDuration(eta.ms)}`
+}
+
 function etaTile(eta: AaPace['eta']): AaPaceTile {
   if (eta.blocked !== null) {
     return {
@@ -65,12 +93,12 @@ function etaTile(eta: AaPace['eta']): AaPaceTile {
       unit: '',
       label: 'to next AA',
       inferred: true,
-      title: ETA_BLOCKED_TITLE[eta.blocked]
+      title: AA_ETA_BLOCKED_TITLE[eta.blocked]
     }
   }
   return {
     id: 'eta',
-    value: eta.overdue ? 'due' : `~${fmtDuration(eta.ms)}`,
+    value: aaEtaValue(eta) ?? NONE,
     unit: '',
     label: 'to next AA',
     inferred: true,
@@ -104,18 +132,26 @@ function potionTile(potion: AaPotionState): AaPaceTile[] {
  * rates and the estimate always have an answer, even if it is an em-dash with a reason) and
  * four the cap, which is exactly what one row holds at every width this panel is given.
  */
-export function aaPaceTiles(pace: AaPace): AaPaceTile[] {
-  const r = split(rate(pace.perHourActive, formatAaRate))
-  const p = split(rate(pace.pointsPerHourActive, formatPointRate))
+export function aaPaceTiles(pace: AaPace, basis: RateBasis = RATE_BASIS_DEFAULT): AaPaceTile[] {
+  const read = paceRead(pace, basis)
+  const r = split(rate(pickRate(read, pace.perHourActive, pace.perHourWall), formatAaRate))
+  const p = split(rate(pickRate(read, pace.pointsPerHourActive, pace.pointsPerHourWall), formatPointRate))
   return [
-    { id: 'rate', value: r.value, unit: r.unit || 'AA/hr', label: 'this window', inferred: false, title: RATE_TITLE },
+    {
+      id: 'rate',
+      value: r.value,
+      unit: r.unit || 'AA/hr',
+      label: 'this window',
+      inferred: false,
+      title: RATE_TITLE(read.word)
+    },
     {
       id: 'points',
       value: p.value,
       unit: p.unit || 'pts/hr',
       label: 'points earned',
       inferred: false,
-      title: POINTS_TITLE
+      title: POINTS_TITLE(read.word)
     },
     etaTile(pace.eta),
     ...potionTile(pace.potion)
@@ -128,8 +164,17 @@ export function aaPaceTiles(pace: AaPace): AaPaceTile[] {
  * barely played states its own sample size. Counts and a span, never rates: the tiles above own
  * those, and `activeSpanText` is the range panel's own wording rather than a second one (JOS-75).
  */
-export function aaPaceCaption(pace: AaPace): string {
-  const span = activeSpanText(pace.activeMs)
+/**
+ * The hour in force over THIS window. `AaPace` carries its two spans and nothing else about time,
+ * which is exactly what `basisRead` needs — `durationMs` is reconstructed as the elapsed span it
+ * already is, never re-derived from a snapshot this file cannot see.
+ */
+function paceRead(pace: AaPace, basis: RateBasis): BasisRead {
+  return basisRead(basis, { durationMs: pace.wallMs, activeMs: pace.activeMs, offlineMs: 0 })
+}
+
+export function aaPaceCaption(pace: AaPace, basis: RateBasis = RATE_BASIS_DEFAULT): string {
+  const span = basisSpanText(paceRead(pace, basis))
   const n = pace.events
   if (n === 0) return `no AA completions ${span}`
   return `${n} completion${n === 1 ? '' : 's'} · ${pace.points} point${pace.points === 1 ? '' : 's'} · ${span}`
@@ -174,8 +219,8 @@ export function aaNextText(eta: AaEta): string | null {
  * one is, and that divergence is the entire reading; an estimate wedged between them would
  * break the comparison the pair exists to offer.
  */
-export function aaPaceLine(stats: RangeStats, eta: AaEta): string | null {
-  const rates = aaRateText(stats)
+export function aaPaceLine(stats: RangeStats, eta: AaEta, basis: RateBasis = RATE_BASIS_DEFAULT): string | null {
+  const rates = aaRateText(stats, basis)
   if (rates === null) return null
   const next = aaNextText(eta)
   return next === null ? rates : `${rates} · ${next}`

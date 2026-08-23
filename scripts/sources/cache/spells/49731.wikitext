@@ -2,7 +2,8 @@
 
 | spellname = Identify
 | spellicon = U
-| description = Provides magical information about the item that your target is holding.<br><br><br>To use the spell on yourself, pick the item you want to identify from your inventory by left clicking it, so that it's held on your cursor (as if you were moving the item).  Then, with the item held on your cursor, target yourself and cast the spell.<br><br>To use the spell on others, have them hold their item to be identified on their cursor while you cast the spell on them.
+| description = Provides magical information about the item that your target is holding.<br><br><br>To use the spell on yourself, pick the item you want to identify from your inventory by left clicking it, so that it's held on your cursor (as if you were moving the item).  Then, with the item held on your cursor, target yourself and cast the spell.<br><br>To use the spell on others, have them hold their item to be identified on their cursor while you cast the spell on them.<br><br>
+This spell doesn't exist in EQL for classes to scribe.
 
 | Table = {{{Table|0}}}
 | TableLevel = {{{TableLevel|}}}

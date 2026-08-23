@@ -99,11 +99,19 @@ const build = (
 
 test('column mapping is TOTAL: a missing or wrong-typed column becomes a default, never a throw', () => {
   assert.deepEqual(toUsageRows([{ day: '2026-08-01', metric: 'sessions', dim: null, n: '12' }]), [
-    // `n` arrives as a number (store.ts sets the int8 parser); a string is not trusted into one.
+    // `n` normally arrives as a number (store.ts sets the int8 parser on OID 20). A NUMERIC
+    // STRING is now read as the number it is, and that reversal is measured rather than
+    // preferred (JOS-394): an uncast `SUM(bigint)` in a view comes back NUMERIC — OID 1700,
+    // which no parser covers — so postgres hands `'12'` over, and the old rule turned a real
+    // counter into 0. A readout full of honest-looking zeros is the worst answer a panel can
+    // give, and it is indistinguishable from a quiet fleet. `usage_daily_all` casts its sum
+    // back to bigint so this cannot happen from our own schema; this is the second line.
     // An ABSENT `cohort` (a cluster mid-migration, or the nullable install column) is 'user' —
     // the fail-safe direction: an install nobody marked is a user.
-    { day: '2026-08-01', cohort: 'user', metric: 'sessions', dim: '-', n: 0 }
+    { day: '2026-08-01', cohort: 'user', metric: 'sessions', dim: '-', n: 12 }
   ])
+  // The other direction — a string that is NOT a number, an empty one, a NaN — is pinned beside
+  // the change that caused it, in tests/telemetryShards.test.mts (this file is at the ceiling).
   assert.deepEqual(toFunnelRows([{}]), [
     { day: '', cohort: 'user', funnel: '', step: '', outcome: '-', appVersion: '?', n: 0 }
   ])
@@ -180,7 +188,7 @@ test('session length is a mean AND a bucket median, and neither is invented from
     u(TODAY, USAGE_METRICS.sessionLenBucket, '5', 1)
   ]).pulse
   assert.equal(d.meanSessionMs, 10 * 60_000)
-  assert.equal(d.medianSessionLabel, '15 min–30 min')
+  assert.equal(d.medianSessionLabel, '15 min-30 min')
 })
 
 test('sessions per day divides by days WITH DATA, not by the window the caller asked for', () => {
@@ -216,6 +224,33 @@ test('the mixes are sorted by count and deterministic on ties', () => {
     u(TODAY, USAGE_METRICS.overlayOpen, 'overall', 9)
   ]).adoption
   assert.deepEqual(d.overlays.map((o) => o.id), ['overall', 'events', 'fight'])
+})
+
+test('THE MACHINE CLASS arrives LABELLED — a bucket index is meaningless to a reader (JOS-364)', () => {
+  const M = USAGE_METRICS
+  const d = build([
+    u(TODAY, M.setupCpu, '4', 12), u(TODAY, M.setupCpu, '7', 3), u(TODAY, M.setupMem, '4', 9),
+    u(TODAY, M.setupGpuVendor, 'nvidia', 11), u(TODAY, M.setupCompositing, 'software', 2),
+    u(TODAY, M.setupSafeMode, 'on', 1), u(TODAY, M.setupDisplays, '2', 6),
+    u(TODAY, M.setupScale, '0', 1), u(TODAY, M.setupScale, '2', 4),
+    u(TODAY, M.setupEqWindowMode, 'fullscreen', 8)
+  ]).adoption
+  // A COUNT ladder prints the INCLUSIVE integer span it covers — bucket 4 of [2,4,6,8,12,16,24]
+  // holds 8 through 11, and "8 - 12" would be a lie a reader would act on — while the measured
+  // ladders print the half-open range they really are.
+  //
+  // AND THE LADDERS ARE IN LADDER ORDER, not sorted by count: they are a DISTRIBUTION, and the
+  // `scale` pair is the pin — 125-150% has four installs and < 100% has one, and the low bucket
+  // still comes first. The enum mixes beside them keep `mixRows`' biggest-first order, where the
+  // biggest slice really is the reading.
+  assert.deepEqual(d.machine.map((r) => `${r.id} = ${String(r.n)}`), [
+    'cpus 8 - 11 = 12', 'cpus ≥ 24 = 3', 'RAM 16 GB - 24 GB = 9', 'gpu nvidia = 11',
+    'compositing software = 2', 'safe mode on = 1', 'displays 2 = 6', 'scale < 100% = 1',
+    'scale 125% - 150% = 4', 'EQ fullscreen = 8'
+  ])
+  // A fleet that has not reported one yet renders NOTHING, never a row of zeros: this ships in a
+  // build most installs do not have, and a zeroed section would read as "nobody has a GPU".
+  assert.deepEqual(build([u(TODAY, USAGE_METRICS.sessions, '-', 5)]).adoption.machine, [])
 })
 
 // ---- funnels -------------------------------------------------------------------------------------
@@ -297,6 +332,30 @@ test('an update step with no reports has an UNKNOWN rate, not a zero one', () =>
   assert.equal(d.reports, 40)
 })
 
+test('the fleet Health mix strips the VERSION back off, so it stays a question about the code', () => {
+  // JOS-96 dimmed `health` by `<version>:<field>`. THIS section asks "what goes wrong in this
+  // app", which wants every build's evidence added together; the release-health section (its own
+  // suite, tests/releaseHealth.test.mts) asks "which build" and keeps them apart. Two questions,
+  // two sections, one set of rows.
+  const d = build([
+    u(TODAY, USAGE_METRICS.health, '0.11.0:rendererCrashes', 2),
+    u(TODAY, USAGE_METRICS.health, '0.10.0:rendererCrashes', 3),
+    u(TODAY, USAGE_METRICS.health, '0.11.0:speechFailures', 1),
+    // A row folded by an ingest Lambda older than the change: no colon, bare field name. It is
+    // counted under that name, which is exactly right HERE — a fleet total does not care which
+    // build a crash came from.
+    u(TODAY, USAGE_METRICS.health, 'speechFailures', 4),
+    u(TODAY, USAGE_METRICS.healthReports, '0.11.0', 10)
+  ]).health
+  // Both classes total 5, so the tie breaks on the id ascending — `mixRows`'s determinism rule.
+  assert.deepEqual(d.errors, [
+    { id: 'rendererCrashes', n: 5 },
+    { id: 'speechFailures', n: 5 }
+  ])
+  // The denominator sums across version dims too — it is a fleet count in this section.
+  assert.equal(d.reports, 10)
+})
+
 // ---- versions -------------------------------------------------------------------------------------
 
 test('days-to-adopt is first-seen -> first MAJORITY day, and is null until there is one', () => {
@@ -373,7 +432,7 @@ test('`empty` is about the TABLES; the panel’s own note is about the WINDOW', 
 // ---- the panel's pure helpers --------------------------------------------------------------------------
 
 test('THE DASH IS LOAD-BEARING: unknown renders as —, measured zero renders as 0%', () => {
-  assert.equal(rateLabel(null), '—')
+  assert.equal(rateLabel(null), '-')
   assert.equal(rateLabel(0), '0%')
   assert.equal(rateLabel(1), '100%')
   assert.equal(pctLabel(0.055), '5.5%', 'small shares keep a decimal so they are not all "6%"')
@@ -383,15 +442,15 @@ test('THE DASH IS LOAD-BEARING: unknown renders as —, measured zero renders as
 })
 
 test('durations read as minutes, then hours, and an unknown one is a dash', () => {
-  assert.equal(durationLabel(null), '—')
-  assert.equal(durationLabel(0), '—')
+  assert.equal(durationLabel(null), '-')
+  assert.equal(durationLabel(0), '-')
   assert.equal(durationLabel(90_000), '2 min')
   assert.equal(durationLabel(30_000), '1 min', 'never "0 min" for a session that happened')
   assert.equal(durationLabel(5_400_000), '1.5 h')
 })
 
 test('a cohort cell shows the count AND its share, or a dash when the horizon is unreached', () => {
-  assert.equal(cohortCell(null, 10), '—')
+  assert.equal(cohortCell(null, 10), '-')
   assert.equal(cohortCell(4, 10), '4 (40%)')
   assert.equal(cohortCell(0, 10), '0 (0%)')
   assert.equal(cohortCell(3, 0), '3 (0%)')
@@ -417,7 +476,7 @@ test('the pulse tiles say what they are counting, and never claim "right now"', 
   // the CloudWatch one — which is a different function and a different source.
   assert.match(tiles[4].note, /UTC day/)
   assert.match(tiles[8].note, /window/)
-  assert.equal(tiles[7].value, '—', 'no session ended: the tile does not invent a length')
+  assert.equal(tiles[7].value, '-', 'no session ended: the tile does not invent a length')
 })
 
 
@@ -439,7 +498,7 @@ test('funnel bars are relative to STEP ONE, so the curve reads as a shape', () =
 
 test('the digest prints the SAME numbers, and says so when the tables are empty', () => {
   const text = renderAnalyticsDigest(build())
-  assert.match(text, /usage analytics — last 30 days/)
+  assert.match(text, /usage analytics - last 30 days/)
   assert.match(text, /NO DATA YET/)
   assert.match(
     text,

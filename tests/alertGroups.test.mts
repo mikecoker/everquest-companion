@@ -178,9 +178,16 @@ test('G5 group def ids are unique and every group sound is provisioned', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The rank-pinned suggestion templates (spell levelling intelligence). These are the ONLY
-// alert shapes that can go stale on a level-up, because they are the only two event families
-// whose log line keeps the roman-numeral rank.
+// The rank-pinned suggestion templates (spell levelling intelligence). `castBegin` and `resist`
+// are the two event families whose log line keeps the roman-numeral rank, so these are the only
+// chips whose trigger can be written with one in it.
+//
+// THEY NO LONGER GO STALE ON A LEVEL-UP (JOS-259, owner ruling 2026-08-12: rank-blind matching,
+// full stop). A literal `where.spell` matcher folds both sides through `spellLineKey`, so a def
+// pinned to Mesmerization III fires on III — and on IV, and on the bare name the wear-off line
+// prints. This test used to assert the opposite ("a rank-pinned alert goes silent on the next
+// rank"), which was true, load-bearing for the upgrade offers, and the defect a wizard reported
+// after unlocking rank II of Elemental Maelstrom.
 
 test('G6 rank-pinned triggers fire on the rank-suffixed lines they were built from', () => {
   const castRank: AlertDef = {
@@ -208,12 +215,14 @@ test('G6 rank-pinned triggers fire on the rank-suffixed lines they were built fr
   assert.ok(
     fire(defs, [TS + 'A froglok ton knight resisted your Mesmerization III!']).has('r-resist')
   )
-  // A DIFFERENT rank must not fire them — that is exactly what makes an upgrade offer real.
+  // A DIFFERENT rank fires them too: the alert is on the SPELL, and the rank is the log's
+  // business. The upgrade offer is now a convenience, never the thing between a user and a sound.
   const other = fire(defs, [
     TS + 'You begin casting Mesmerization IV.',
     TS + 'A froglok ton knight resisted your Mesmerization IV!'
   ])
-  assert.equal(other.size, 0, 'a rank-pinned alert goes silent on the next rank')
+  assert.deepEqual([...other].sort(), ['r-cast', 'r-resist'], 'a rank-pinned alert survives the level-up')
+  // The full argument, the reporter's own lines and the limits of the fold: rankBlindSpellAlerts.
 })
 
 test('G7 the alerts module records rank-preserving cast recency, replay included', () => {

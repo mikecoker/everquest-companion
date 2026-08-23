@@ -32,6 +32,10 @@ import {
   type LevelAt
 } from './levelChartGeometry'
 import type { LevelSegment } from './levelSeries'
+// The fractional curve the level chart now draws (JOS-292). Read here so the readout and the
+// pixels answer from ONE object: a tooltip that named a bar position the curve refused to draw
+// would be the "picture contradicts the readout" defect the swap arm below already exists for.
+import { curveAt, CURVE_REFUSAL_NOTE, type LevelCurve } from './levelCurve'
 import { zoneAt, zoneColor, type ZoneBand } from './zoneBands'
 
 /** Cursor slack, in CSS px, for "you are on that gain line". */
@@ -82,6 +86,8 @@ export interface LevelHoverLayerProps {
   bands: readonly ZoneBand[]
   /** Present on the LEVEL chart only — its presence selects the level readout. */
   segments?: readonly LevelSegment[]
+  /** The fractional curve that chart draws (JOS-292) — the bar-position row reads it. */
+  curve?: LevelCurve
   /** Drag-select seam (plan §7.2): true while a range drag owns the pointer. */
   suppressed?: boolean
 }
@@ -92,7 +98,30 @@ export interface LevelHoverLayerProps {
  * one the level is genuinely unknown (levelSeries.ts's world model — the same reason the
  * progress feed suppresses the elapsed time across a swap).
  */
-function levelContent(segments: readonly LevelSegment[], aaPoints: readonly AaPoint[], ts: number): Content | null {
+/**
+ * WHERE IN THE BAR, or the reason there is no answer (JOS-292).
+ *
+ * ONE row, and it is the same evidence the curve was drawn from — `curveAt` reads the very
+ * array the polyline's vertices came out of. A refused span prints its reason INSTEAD of a
+ * percentage: `unknown` is not `0%`, and the band under the cursor already says as much in
+ * pixels. Where the curve draws nothing at all (before the first ding) there is no row, which
+ * is the same silence the chart keeps there.
+ */
+function barRow(curve: LevelCurve | undefined, ts: number): { row: TooltipRow; note?: string } | null {
+  const at = curve ? curveAt(curve, ts) : null
+  if (!at) return null
+  if (at.kind === 'refused') {
+    return { row: { label: 'into the bar', value: 'unstated' }, note: CURVE_REFUSAL_NOTE[at.refusal] }
+  }
+  return { row: { label: 'into the bar', value: `${((at.y - at.level) * 100).toFixed(1)}%` } }
+}
+
+function levelContent(
+  segments: readonly LevelSegment[],
+  aaPoints: readonly AaPoint[],
+  ts: number,
+  curve?: LevelCurve
+): Content | null {
   const at = levelAt(segments, ts)
   if (at.kind === 'before-first') return null
   if (at.kind === 'swap-gap') {
@@ -104,21 +133,29 @@ function levelContent(segments: readonly LevelSegment[], aaPoints: readonly AaPo
         { label: 'next reported', value: String(at.afterLevel) },
         { label: 'unlogged gap', value: fmtDelta(at.gapMs) }
       ],
-      note: 'the class swap is not logged — the level here is unknown'
+      note: 'the class swap is not logged - the level here is unknown'
     }
   }
   const rows: TooltipRow[] = [{ label: 'since', value: formatDateTime(at.sinceTs) }]
+  const bar = barRow(curve, ts)
+  if (bar) rows.push(bar.row)
   rows.push(at.nextTs == null ? { value: 'current level' } : { label: 'held', value: fmtDelta(at.nextTs - at.sinceTs) })
   const cum = cumulativeAt(aaPoints, ts)
   if (cum != null) rows.push({ label: 'AA gained by then', value: cum.toLocaleString() })
-  return { title: `Level ${at.level}`, subtitle: formatDateTime(ts), rows }
+  return { title: `Level ${at.level}`, subtitle: formatDateTime(ts), rows, note: bar?.note }
 }
 
 /**
  * AA gained over time. The note is mandatory and repeats the panel's caption: this curve is
- * Σ of the gain LINES, so a respec's re-gained points are counted again and it runs ahead of
- * the earned headline (world-model law 5). A hover readout is read in isolation — calling
- * this "earned" here would contradict `computeAAAccounting`.
+ * Σ of the gain LINES, and a hover readout is read in isolation — calling this "earned" here
+ * would contradict `computeAAAccounting` (world-model law 5).
+ *
+ * IT NAMES THE CURVE, IT NO LONGER EXPLAINS THE GAP (owner, 2026-08-13). The note used to carry
+ * the respec clause verbatim from the caption; the owner ruled the clause obvious in the caption
+ * and it was doubly so in a tooltip, which has one line to spend and had spent it on accounting
+ * trivia. "cumulative gain lines" is the whole claim: these are gains, not the earned balance.
+ * The reason a respec makes the two disagree lives in `AaOverTimePanel`'s header and in
+ * `shared/aa.ts` — the places someone chasing the discrepancy actually reads.
  */
 function aaContent(points: readonly AaPoint[], ts: number, gainIdx: number): Content | null {
   const i = stepIndexAt(points, ts)
@@ -139,7 +176,7 @@ function aaContent(points: readonly AaPoint[], ts: number, gainIdx: number): Con
     title: `${points[i].y.toLocaleString()} AA gained`,
     subtitle: formatDateTime(ts),
     rows,
-    note: 'cumulative gain lines — includes points re-gained after a respec'
+    note: 'cumulative gain lines'
   }
 }
 
@@ -186,6 +223,7 @@ export function LevelHoverLayer({
   aaPoints,
   bands,
   segments,
+  curve,
   suppressed = false
 }: LevelHoverLayerProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -238,9 +276,11 @@ export function LevelHoverLayer({
 
   const content = useMemo(() => {
     if (!hov) return null
-    const base = segments ? levelContent(segments, aaPoints, hov.ts) : aaContent(aaPoints, hov.ts, hov.gainIdx)
+    const base = segments
+      ? levelContent(segments, aaPoints, hov.ts, curve)
+      : aaContent(aaPoints, hov.ts, hov.gainIdx)
     return base && withZone(base, bands, hov.ts)
-  }, [hov, segments, aaPoints, bands])
+  }, [hov, segments, aaPoints, bands, curve])
 
   return (
     <div ref={rootRef} style={ROOT} onPointerMove={handleMove} onPointerLeave={handleLeave}>

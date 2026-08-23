@@ -1,13 +1,17 @@
-// IPC: the CHARACTER SHEET's door (JOS-45) — the armory grid and the gear sum.
+// IPC: the CHARACTER SHEET's door (JOS-45) — the armory grid, the gear sum, and the carry-all.
 //
-// GATED. This whole handler is registered only when `UNRELEASED` says so (src/main/unreleased.ts):
-// dev builds, or an explicit `EQ_UNRELEASED=1`. In a packaged build the channel simply does not
-// exist and `window.eq.characterSheet()` rejects with Electron's own "No handler registered" —
-// the same designed outcome the triage bridge has, and the renderer surface is stripped anyway.
+// IT WAS GATED, AND SINCE JOS-327 IT IS NOT. This handler used to be registered only when
+// `UNRELEASED` said so (src/main/unreleased.ts) — dev builds, or an explicit `EQ_UNRELEASED=1` —
+// because the surface had not passed the owner's review gate; in a packaged build the channel did
+// not exist and `window.eq.characterSheet()` rejected with Electron's own "No handler registered".
+// The owner released the tab (2026-08-13) as the gear area's last face, so the registration is
+// unconditional now and the promise the gate protected is simply no longer being made. What did
+// NOT change is the file boundary below, or the shape of the answer.
 //
 // It lives in its own file rather than in `character.ts` because that domain is the ACTIVE
-// CHARACTER (log tail, EQ dir, progress) and is registered unconditionally. A gate wants its own
-// registration site, so "is this feature reachable" is one `if` in one place.
+// CHARACTER (log tail, EQ dir, progress). It stayed its own file after the gate came off because
+// the reason had always been two reasons: a gate wants its own registration site, and a handler
+// that inlines an 8.6 MB item corpus wants to be readable on its own.
 //
 // WHY MAIN DOES THE JOIN. `items.json` is 8.6 MB and already inlined in this bundle (itemLookup.ts
 // owns the import; ipc/planner.ts imports the same module so it is inlined exactly once). Shipping
@@ -21,15 +25,16 @@
 
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
+import { carryAll } from '../../shared/carryAll'
 import {
   sheetCells,
   sumGear,
   type CharacterSheet,
   type SheetCell,
   type SheetCellView,
-  type SheetItemView
+  type SheetItemView,
+  type WornItemBlock
 } from '../../shared/characterSheet'
-import type { ItemStatBlock } from '../../shared/itemStats'
 import { loadInventoryDump } from '../outputs'
 import { getActiveCharacter } from '../session'
 import { buildItemDbIndex, itemKey, type ItemDbEntry, type ItemDbFile } from '../itemsDb'
@@ -54,10 +59,16 @@ function joinCell(cell: SheetCell): SheetCellView {
   return { ...cell, item }
 }
 
-/** The stat block behind a joined cell: `undefined` for an empty cell or an unknown item. */
-function blockOf(cell: SheetCellView): ItemStatBlock | undefined {
-  if (!cell.item) return undefined
-  return itemIndex().get(itemKey(cell.item.baseName))?.stats
+/**
+ * A joined cell, as the gear sum reads it: the DB's block and the ` +N` the dump's name stated.
+ *
+ * BOTH HALVES, ALWAYS (JOS-416). The tier travels with the block because `sumGear` scales by it —
+ * this handler states what is worn and at what level, and the shared fold owns the arithmetic. An
+ * empty cell or an item the corpus does not know contributes no block; the sum counts it.
+ */
+function wornOf(cell: SheetCellView): WornItemBlock {
+  if (!cell.item) return {}
+  return { tier: cell.item.tier, block: itemIndex().get(itemKey(cell.item.baseName))?.stats }
 }
 
 export function registerCharacterSheetIpc(): void {
@@ -77,7 +88,10 @@ export function registerCharacterSheetIpc(): void {
       loadedAt: loaded.loadedAt,
       cells: joined,
       unplaced: joinedUnplaced,
-      totals: sumGear(worn.map(blockOf))
+      totals: sumGear(worn.map(wornOf)),
+      // …and the SAME parse, flattened (JOS-327). No DB join and no second read of the file: the
+      // ledger the carry-all table draws is by construction the same bytes the grid above it drew.
+      carry: carryAll(loaded.dump)
     }
   })
 }

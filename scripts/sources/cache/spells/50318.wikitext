@@ -11,18 +11,18 @@
 
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Frenzied_Spirit_Summon|Frenzied Spirit]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 36 [[Frenzied_Spirit_Summon|Spirit Wolf]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 500
 | range =  
 | casting_time = 16.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 32.00
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | msg_cast_on_you = You summon a frenzied spirit.

@@ -56,7 +56,7 @@ import EditNoteIcon from '@mui/icons-material/EditNote'
 import type { AlertDef, PoisonSlowRecency, SpellCatalog } from '@shared/types'
 import { VERIFIED_ALERT_GROUPS, type AlertGroup } from '@shared/alertGroups'
 import { tokenizeSpellQuery, type SpellSearchToken } from '@shared/spellSearch'
-import { illusionSuggestion, type Suggestion } from './suggestions'
+import { illusionSuggestion, suggestionCoverageId, type Suggestion } from './suggestions'
 import type { RowContext } from './SpellSuggestionRow'
 import SuggestResults, { type ResultsHandlers, type SectionState } from './SuggestResults'
 import { buildSuggestResults, filterAlertGroups } from './resultSections'
@@ -81,7 +81,13 @@ function SuggestHeader({
           </Typography>
         )}
         <Box sx={{ flexGrow: 1 }} />
-        <Button size="small" variant="outlined" startIcon={<EditNoteIcon />} onClick={onCreateManually}>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<EditNoteIcon />}
+          data-testid="suggest-create-manually"
+          onClick={onCreateManually}
+        >
           Create manually
         </Button>
       </Stack>
@@ -104,7 +110,8 @@ function SearchBox({
       inputRef={inputRef}
       size="small"
       fullWidth
-      placeholder="Search name, spell text, level:25, class:shm, type:debuff…"
+      data-testid="suggest-search"
+      placeholder="Search name, spell text, level:25, class:shaman, type:debuff…"
       value={query}
       onChange={(e) => onQuery(e.target.value)}
       slotProps={{
@@ -136,7 +143,7 @@ function CreatedSnackbar({
       autoHideDuration={6000}
       onClose={onClose}
       anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      message={snack ? `Alert created — ${snack.name}` : ''}
+      message={snack ? `Alert created - ${snack.name}` : ''}
       action={
         <Button color="secondary" size="small" onClick={onUndo}>
           Undo
@@ -203,9 +210,23 @@ function useSectionState(searching: boolean): SectionState {
   return { collapsed, toggle, searching }
 }
 
+/**
+ * THE IDS A CHIP READS AS ALREADY CREATED — each stored alert's own id AND its rank-folded
+ * coverage id (JOS-276, suggestions.ts `suggestionCoverageId`).
+ *
+ * Both, rather than only the fold, because the fold is the identity function for every suggestion
+ * that is not a rank chip and a user's own alert id is not ours to reinterpret. What it buys: a
+ * rank chip reads as created when ANY rank of its line already has that alert — which is the
+ * truth since JOS-259, where one such def fires on the whole line.
+ */
+function createdIds(alerts: readonly AlertDef[]): Set<string> {
+  return new Set(alerts.flatMap((a) => [a.id, suggestionCoverageId(a.id)]))
+}
+
 export default function SuggestAlertsDialog({
   open,
   alerts,
+  defaultPackId,
   poisonSlowSeen,
   onClose,
   onCreate,
@@ -216,6 +237,12 @@ export default function SuggestAlertsDialog({
   open: boolean
   /** every stored alert: the created/checked state AND the poison-slow offer's coverage test. */
   alerts: readonly AlertDef[]
+  /**
+   * The user's default sound pack (JOS-273). EVERY alert this dialog authors — a template chip,
+   * a ready-made set, the illusion chip, the observed slow offer — points at it, which is the
+   * "suggestion builder" half of the owner's ruling.
+   */
+  defaultPackId?: string
   /** the alerts module's rogue-slow observation, or null — drives the offer in "From your fights". */
   poisonSlowSeen: PoisonSlowRecency | null
   onClose: () => void
@@ -236,7 +263,7 @@ export default function SuggestAlertsDialog({
   const state = useSectionState(tokens.length > 0)
   const poisonSlow = usePoisonSlowOffers(alerts, poisonSlowSeen)
 
-  const existingIds = useMemo(() => new Set(alerts.map((a) => a.id)), [alerts])
+  const existingIds = useMemo(() => createdIds(alerts), [alerts])
 
   const create = useCallback(
     async (s: Suggestion) => {
@@ -275,10 +302,13 @@ export default function SuggestAlertsDialog({
     [create, createGroup, onCreate, poisonSlow.dismiss]
   )
 
-  const illusion = catalog?.hasIllusions ? illusionSuggestion() : null
+  const illusion = catalog?.hasIllusions ? illusionSuggestion(defaultPackId) : null
   const lines = useSpellLines(catalog, spellLastCast)
   const resolved = useResolvedClasses()
-  const ctx = useMemo<RowContext>(() => ({ lines, resolved }), [lines, resolved])
+  const ctx = useMemo<RowContext>(
+    () => ({ lines, resolved, defaultPackId }),
+    [lines, resolved, defaultPackId]
+  )
 
   // A COLLAPSED section mounts no rows and spends none of the shared MAX_ROWS budget, so the
   // fold state is an input to the result build, not just to the render.
@@ -294,6 +324,7 @@ export default function SuggestAlertsDialog({
       onClose={onClose}
       maxWidth="md"
       fullWidth
+      data-testid="suggest-dialog"
       // FIXED paper height. The result list swings between MAX_ROWS rows and none as the user
       // types; a content-sized, vertically centred paper re-sizes and re-centres on every
       // keystroke. Height here + a scrolling result list = geometry that never moves.

@@ -6,9 +6,11 @@
 // inventory` in game with this tab open and the sheet fills itself, no click anywhere.
 //
 // `ready` is a data-availability flag, not an error. A REJECT resolves to the same "no sheet"
-// state as a null answer: in a build without the gated handler (see src/main/unreleased.ts) the
-// invoke fails, and this tab has no business turning that into a red box — though in practice
-// no such build has this tab at all, because the whole surface is stripped from it.
+// state as a null answer, and that branch OUTLIVED THE REASON IT WAS WRITTEN. It existed because
+// the handler behind `character:sheet` was gated (src/main/unreleased.ts) and simply absent from a
+// packaged build; JOS-327 released the tab and the handler is registered everywhere now. The catch
+// stays anyway: an invoke can fail for reasons nobody planned, and a transport whose designed
+// answer for "no dump" is already `null` has no business turning any of them into a red box.
 
 import { useCallback, useEffect, useState } from 'react'
 import type { CharacterSheet } from '@shared/characterSheet'

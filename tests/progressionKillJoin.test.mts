@@ -19,7 +19,8 @@
 //   WL43  at the cap: the line joins and states no size — a different unknown from "no line".
 //   WL44  party experience, joined and labeled.
 // Plus synthesized edge cases for the rule itself, the drop-oldest ring, the renderer's delta
-// merge, and a full-log tripwire that is a FLOOR (the live log grows; frozen counts rot).
+// merge, and a full-log tripwire built from IDENTITIES over the experience column (the live log
+// grows, and its CONTENT changes character as the owner plays — see JOS-234 at the bottom).
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -37,6 +38,7 @@ import {
 } from '../src/renderer/src/features/leveling/progressionDelta'
 import type { ProgressionKill, ProgressionSnap } from '../src/shared/progressionTypes'
 import { readFixture } from './harness.mts'
+import { payableExpLine } from './progressionJoin.mts'
 
 const LOG =
   'C:/Users/Public/Daybreak Game Company/Installed Games/EverQuest Legends/Logs/eqlog_Primitive_freeport.txt'
@@ -365,21 +367,99 @@ test('applyProgressionDelta: offline intervals arrive whole, in order, across fl
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FULL-LOG TRIPWIRE — FLOORS AND IDENTITIES ONLY (the log is live and grows). Skipped in CI.
-test('full-log: the join holds at scale and the ring never disagrees with the kill column', {
+// FULL-LOG TRIPWIRE — IDENTITIES AND CONDITIONAL FLOORS ONLY (the log is live and grows).
+// Skipped in CI.
+//
+// THE FLOOR THIS REPLACES WAS MEASURING THE OWNER'S CON COLOUR, NOT THE JOIN (JOS-234). It read
+// `joined / credited kills > 0.9`, frozen against a 4017/4195 (95.8%) sweep; by 2026-08-12 the
+// same expression read 5428/6325 = 85.8% and fell every evening the owner played — a
+// DETERMINISTIC red that no diff had caused. It was the log that moved, not the code: the
+// character reached level 50 on 2026-08-04, and a grey kill prints no experience line for
+// anything to join. Measured per day on ONE pass of the code below: 97-99% joined every day
+// through 2026-08-09, then 3.7% (2026-08-10) and 4.0% (2026-08-11). The raw census says the same
+// thing without any of this machinery — 2026-08-11 carries 550 slain lines against 91 lines
+// containing the word "experience" at all, and most of those 91 are quest turn-in rewards with
+// no corpse anywhere near them. The join was never the variable; the DENOMINATOR was.
+//
+// So the tripwire now states what the sentence always meant — WHEN EXPERIENCE IS PAID, THE JOIN
+// FINDS IT — over the kills that could have been paid. The oracle is the experience COLUMN,
+// which is independent of the join in the only way that matters here: `pushExp` writes it before
+// it ever offers the line to `pendingExp`, and no code on the claiming path reads it back.
+// MEASURED 2026-08-12 over 1.6M lines: 6325 credited kills, 5442 of them payable, 5428 joined —
+// 99.74%, with all 14 misses the documented one-line-one-kill contention (a mob and its pet
+// dying in the same second share one experience line, and the mob claims it).
+
+// `payableExpLine` — the whole definition of a payable kill — now lives in tests/progressionJoin.mts
+// beside its mirror, because JOS-241 needed the same conditioning for the column-level
+// correspondence in progressionWindows.test.mts. Read that file's header for the argument; nothing
+// about the rule changed when it moved.
+
+/**
+ * Does this joined row carry a line the log really printed in its window? EQ stamps to the
+ * SECOND, so two experience lines can share a timestamp and only file order separates them
+ * (measured: it happens — 22:37:23 on 2026-07-28 prints 1.496% and 0.947% in one second with the
+ * kill line between them). A timestamp oracle cannot order inside a second, so any line stamped
+ * at that newest second satisfies this; everything coarser than one second is still pinned.
+ */
+function rowMatchesExpLine(snap: ProgressionSnap, i: number, row: ProgressionKill): boolean {
+  for (let k = i; k >= 0 && snap.expTs[k] === snap.expTs[i]; k--) {
+    if (row.expFlag === snap.expFlag[k] && (row.expPct ?? -1) === snap.expPct[k]) return true
+  }
+  return false
+}
+
+/** Kill LINES — credited or witnessed — stamped in `[a, b]`. Both consume (see takeExp). */
+function killLinesIn(snap: ProgressionSnap, a: number, b: number): number {
+  const inside = (t: number): boolean => t >= a && t <= b
+  return snap.killTs.filter(inside).length + snap.witnessTs.filter(inside).length
+}
+
+test('full-log: when experience is paid the join finds it, and never invents one', {
   skip: !existsSync(LOG)
 }, () => {
   const lines = readFileSync(LOG, 'utf8').split(/\r?\n/)
-  const snap = replayModule(lines, true).snapshot().state
+  // ONE replay, read twice: `snapshot()` hands back the live state and `flushDelta()` the whole
+  // uncapped append log beside it (nothing flushed during the silent replay).
+  const mod = replayModule(lines, true)
+  const snap = mod.snapshot().state
   assertRingWellFormed(snap)
-
-  // MEASURED at 4017 of 4195 credited kills (95.8%). A FLOOR, so it survives play: the shortfall
-  // is real (grey kills pay nothing), and a regression that flipped the join's DIRECTION would
-  // collapse this number to roughly zero rather than nudge it.
-  const rows = allKillRows(lines, true)
+  const rows = mod.flushDelta()?.delta.recentKills ?? []
   assert.equal(rows.length, snap.killTs.length, 'one ring row was appended per credited kill')
-  const joined = rows.filter((k) => k.expFlag !== undefined).length
-  assert.ok(joined / rows.length > 0.9, `join rate ${joined}/${rows.length}`)
+
+  const payable: ProgressionKill[] = []
+  const unbacked: string[] = []
+  const unexplained: string[] = []
+  for (const r of rows) {
+    const i = payableExpLine(snap, r.ts)
+    if (i >= 0) payable.push(r)
+    if (r.expFlag !== undefined) {
+      // IDENTITY, and the direction tripwire: a join that reached FORWARD, or widened its
+      // window, or fabricated a percentage, lands here on its very first row.
+      if (i < 0 || !rowMatchesExpLine(snap, i, r)) unbacked.push(rowKey(r))
+    } else if (i >= 0 && killLinesIn(snap, snap.expTs[i], r.ts) < 2) {
+      // IDENTITY, and the tripwire this ticket exists for: a paid kill that joined nothing may
+      // only be a kill whose line another kill line had already consumed. If experience stops
+      // reaching recent kills for any other reason, these rows are it.
+      unexplained.push(rowKey(r))
+    }
+  }
+  assert.deepEqual(unbacked, [], 'every joined row carries a line the log printed in its window')
+  assert.deepEqual(unexplained, [], 'a paid kill misses only when an earlier kill line took the line')
+
+  // FLOORS, now over the kills that could have been paid — 99.74% when written, and the shortfall
+  // is bounded by contention rather than by what the owner happens to be killing.
+  const joined = payable.filter((k) => k.expFlag !== undefined).length
+  assert.ok(joined / payable.length > 0.97, `payable join rate ${joined}/${payable.length}`)
+  // …and again over the most recent payable kills alone. Two things could hide from the
+  // identities above and not from this: a regression that only breaks NEW lines, diluted by
+  // thousands of correctly joined old ones; and one whose misses all happen to land in a BUSY
+  // zone, where the witnessed-kill traffic satisfies "an earlier kill line took it" by accident.
+  // (JOS-234's alarming reading was exactly the first shape: 62 kills arrived between two runs
+  // and joined nothing. They were grey — but had they not been, this is the line that says so.)
+  const tail = payable.slice(-500)
+  const tailJoined = tail.filter((k) => k.expFlag !== undefined).length
+  assert.ok(tailJoined / tail.length > 0.95, `recent payable join rate ${tailJoined}/${tail.length}`)
+
   assert.ok(rows.some((k) => k.expFlag === undefined), 'and some kills genuinely paid nothing')
   assert.ok(rows.some((k) => ((k.expFlag ?? 0) & 2) !== 0), 'party experience is joined and labeled')
   assert.ok(rows.some((k) => k.credit === 1), 'bound-pet kills reach the ring too')

@@ -17,16 +17,22 @@ import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { equippedHosts, type PlannerInventory } from '../../shared/planner/inventorySlots'
 import { buildPlannerIndex, searchPlannerItems, type PlannerIndex } from '../planner/effectIndex'
-import { sanitizeExaltPlans } from '../planner/validate'
-import { loadInventoryDump } from '../outputs'
+import { buildGearIndex } from '../planner/gearIndex'
+import type { GearIndexPayload } from '../../shared/planner/gear'
+import { NO_OWNERSHIP, ownershipPayload, type OwnershipPayload } from '../../shared/planner/ownership'
+import { sanitizeExaltPlans, sanitizeGearSets, sanitizeWishlist } from '../planner/validate'
+import { loadInventoryDump, outputStatus } from '../outputs'
 import { activeCharId, getActiveCharacter } from '../session'
-import { getExaltPlans, setExaltPlans } from '../store'
+// The two planner documents' store accessors live in their own module since JOS-286 — store.ts
+// was at its 400-code-line ceiling, and this repo splits rather than ratchets.
+import { getExaltPlans, getGearSets, getWishlist, setExaltPlans, setGearSets, setWishlist } from '../storePlans'
 import { itemKey, type ItemDbFile } from '../itemsDb'
 // The COMMITTED wiki item database — the same module itemLookup.ts imports, so the JSON is
 // inlined into the main bundle exactly once.
 import itemsJson from '../data/items.json'
 
 let index: PlannerIndex | null = null
+let gear: GearIndexPayload | null = null
 
 /** The donor + item indices, built on first use. */
 function plannerIndex(): PlannerIndex {
@@ -34,10 +40,65 @@ function plannerIndex(): PlannerIndex {
   return index
 }
 
+/**
+ * The GEAR candidate index (JOS-283), memoized the same way and for the same reason. It lives in
+ * THIS file rather than a gear-only handler module because the memoization is per-import of a
+ * committed corpus: two handler modules would each hold their own walk of the same 8.6 MB.
+ */
+function gearIndex(): GearIndexPayload {
+  gear ??= buildGearIndex(itemsJson as unknown as ItemDbFile)
+  return gear
+}
+
+/**
+ * THE OWNERSHIP INDEX (JOS-285, phase 4), MEMOIZED ON THE DUMP'S OWN IDENTITY.
+ *
+ * The two caches above are memoized for the life of the process because their input is committed
+ * bytes. This one's input is a file the player rewrites mid-session on purpose, so "memoized" has
+ * to mean something narrower — and the narrow thing is exactly what `plannerInventory` above
+ * declines to cache at all, because IT is one parse per ask and this is a parse plus a fold that
+ * every keystroke in the Gear tab would otherwise re-run.
+ *
+ * SO THE CACHE KEY IS THE FILE, NOT A FLAG. `outputStatus` is one readdir + one stat (the
+ * registry caches nothing, deliberately — see its header), and path + mtime identify the dump
+ * completely: a rewrite moves the mtime, a character switch moves the path, and a deleted dump
+ * moves both to null. Nothing has to remember to invalidate this, which is the failure mode an
+ * explicit `invalidateOwnership()` called from the auto-load path would have been one refactor
+ * away from at all times. The renderer re-asks on `inventory:autoReloaded`; that push is what
+ * makes the answer TIMELY, and this key is what makes it CORRECT.
+ */
+let owned: { path: string; loadedAt: string; payload: OwnershipPayload } | null = null
+
+function gearOwnership(): OwnershipPayload {
+  const character = getActiveCharacter()
+  const status = outputStatus('inventory', { name: character?.name, server: character?.server })
+  if (status.path === null || status.updatedAt === null) {
+    owned = null
+    return NO_OWNERSHIP
+  }
+  if (owned !== null && owned.path === status.path && owned.loadedAt === status.updatedAt) {
+    return owned.payload
+  }
+  // `loadInventoryDump` re-resolves the same status, so the two can never disagree about WHICH
+  // file was folded — and a dump that vanished between the stat and the read is simply no dump.
+  const payload = ownershipPayload(loadInventoryDump(character?.name, character?.server))
+  owned = payload.path === null ? null : { path: payload.path, loadedAt: payload.loadedAt ?? '', payload }
+  return payload
+}
+
 export function registerPlannerIpc(): void {
   // Every effect the corpus states, one row per (item, effect). The renderer fetches this once
   // and keeps it — it is derived from committed bytes and cannot change while the app runs.
   ipcMain.handle(IPC.plannerDonors, () => plannerIndex().donors)
+
+  // Every equippable item, described in numbers (JOS-283). One versioned payload, fetched once —
+  // the renderer scales it to any plus-state itself (shared/planner/gearScale.ts), so no upgrade
+  // slider ever comes back here.
+  ipcMain.handle(IPC.gearIndex, (): GearIndexPayload => gearIndex())
+
+  // What the active character OWNS, keyed the way the gear index is (JOS-285). Re-asked by the
+  // renderer on every `inventory:autoReloaded`; re-folded here only when the file itself moved.
+  ipcMain.handle(IPC.gearOwnership, (): OwnershipPayload => gearOwnership())
 
   // Host picking: substring over item names, capped. A non-string query is not an error the UI
   // should have to render — it is simply no hits.
@@ -61,6 +122,23 @@ export function registerPlannerIpc(): void {
       // (itemsDb.ts, law 2) and shared/planner/inventorySlots.ts must stay dependency-free.
       hosts: equippedHosts(loaded.dump).map((h) => ({ ...h, key: itemKey(h.name) }))
     }
+  })
+
+  // The active character's GEAR SETS (JOS-286). Same shape of promise as the exaltation sets
+  // below, over a different document and its own additive store key: validated at the handler and
+  // again in the store, which is also the read path's normalizer.
+  ipcMain.handle(IPC.gearGetSets, () => getGearSets(activeCharId()))
+  ipcMain.handle(IPC.gearSetSets, (_e, sets: unknown) => {
+    setGearSets(activeCharId(), sanitizeGearSets(sets))
+  })
+
+  // The active character's FLAT WISH LIST (JOS-326). Same shape of promise again, over the third
+  // planner document and its own additive store key. Whole-document both ways: the entries and the
+  // two facts that hang off them (the done strip's dismissals, the one-time seed flag) are one
+  // thing, and a partial write would leave them disagreeing.
+  ipcMain.handle(IPC.wishlistGet, () => getWishlist(activeCharId()))
+  ipcMain.handle(IPC.wishlistSet, (_e, list: unknown) => {
+    setWishlist(activeCharId(), sanitizeWishlist(list))
   })
 
   // The active character's sets. Both directions run through the same validator (see store.ts).

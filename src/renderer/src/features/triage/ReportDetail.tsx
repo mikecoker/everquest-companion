@@ -36,6 +36,7 @@ import {
   Typography
 } from '@mui/material'
 import DescriptionIcon from '@mui/icons-material/Description'
+import { formatPerfBlock, type FeedbackPerf } from '@shared/feedbackPerf'
 import type { TriageDetail, TriageSlice } from '@shared/triage'
 import { formatDateTime } from '../../lib/formatDate'
 import { LogChip, SeverityChip, SpamChip, StatusChip } from './triageChips'
@@ -75,6 +76,32 @@ function EnvBlock({ env }: { env: Record<string, string> }): JSX.Element {
   )
 }
 
+/**
+ * The reporter's last ten minutes (JOS-369), printed in the SAME words the triage CLI uses and
+ * the reporter saw in the dialog — one renderer (`shared/feedbackPerf.ts`), three surfaces, so a
+ * conversation about a hitch cannot become a conversation about two different tables.
+ *
+ * Absent on every report that predates the field and on every report composed before the probe
+ * started, and it renders as nothing at all: there is no timeline to explain the absence of.
+ */
+function PerfBlock({ perf }: { perf: FeedbackPerf | undefined }): JSX.Element | null {
+  if (perf === undefined) return null
+  return (
+    <Box
+      data-testid="triage-perf"
+      sx={{
+        fontFamily: 'ui-monospace, monospace',
+        fontSize: 11,
+        whiteSpace: 'pre',
+        overflowX: 'auto',
+        color: 'text.secondary'
+      }}
+    >
+      {formatPerfBlock(perf)}
+    </Box>
+  )
+}
+
 /** The "not asked yet" call: a module-level identity, so the effect does not refire every
  *  render while the button is still un-clicked. */
 const NEVER = (): Promise<{ ok: true; value: null }> => Promise.resolve({ ok: true, value: null })
@@ -97,7 +124,7 @@ function SliceSection({ detail }: { detail: TriageDetail }): JSX.Element | null 
       <Alert severity="warning" data-testid="triage-slice-missing">
         This report declared a log slice
         {detail.logLines === undefined ? '' : ` (${detail.logLines.toLocaleString()} lines)`} but the
-        object is not in the bucket — the upload failed or the presigned POST expired.
+        object is not in the bucket - the upload failed or the presigned POST expired.
       </Alert>
     )
   }
@@ -111,7 +138,7 @@ function SliceSection({ detail }: { detail: TriageDetail }): JSX.Element | null 
         data-testid="triage-load-slice"
       >
         Load log slice
-        {detail.logLines === undefined ? '' : ` — ${detail.logLines.toLocaleString()} lines`}
+        {detail.logLines === undefined ? '' : ` - ${detail.logLines.toLocaleString()} lines`}
       </Button>
     )
   }
@@ -169,6 +196,7 @@ export default function ReportDetail({
 
       <Divider />
       <EnvBlock env={detail.env} />
+      <PerfBlock perf={detail.perf} />
 
       <Divider />
       <TriageActions detail={detail} onChanged={onChanged} />

@@ -16,6 +16,7 @@ import type { TimelineMarker } from '@shared/combat'
 import { ChartTooltip, type TooltipRow } from '../../lib/ChartTooltip'
 import { formatRate } from '../../lib/formatRate'
 import { rafThrottle } from '../../lib/rafThrottle'
+import type { ChartLineKey } from './combatPrefs'
 import { KIND_COLOR } from './combatShared'
 import type { DpsSeries } from './dashboardData'
 import { dpsAt, rollingNote } from './dpsAt'
@@ -59,6 +60,10 @@ export interface DpsCurveHoverProps {
   markers: readonly PlacedMarker[]
   /** epoch ms of t=0, for the tooltip's wall clock (display only — TimelineView.startTs). */
   startTs: number
+  /** the legend's hidden lines (JOS-264). A readout is a description of the DRAWING: a rate for a
+   *  line that is not on the plot is exactly the clutter the toggles were asked for, and a dot
+   *  riding an invisible curve is a dot with nothing under it. */
+  hidden: readonly ChartLineKey[]
 }
 
 /** What the cursor resolved to. The marker is held by REFERENCE, not by index: the change gate
@@ -80,22 +85,26 @@ function sameHit(a: Hit, b: Hit): boolean {
 
 /** The rolling-DPS block — sampled from THIS chart's own series (dpsAt), never recomputed, and
  *  `~`-prefixed when that series is inexact. Rates go through formatRate: '12.4k dps', no '/s'. */
-function dpsRows(series: DpsSeries, t: number): TooltipRow[] {
+function dpsRows(series: DpsSeries, t: number, hidden: readonly ChartLineKey[]): TooltipRow[] {
   const p = dpsAt(series, t)
   const a = series.estimated ? '~' : ''
   const outLabel = series.hasGroup ? 'you + pet + group' : 'you + pet'
-  const rows: TooltipRow[] = [{ label: outLabel, value: `${a}${formatRate(p.out)}`, color: KIND_COLOR.you }]
-  if (series.hasPet) rows.push({ label: 'pet', value: `${a}${formatRate(p.pet)}`, color: KIND_COLOR.pet })
-  if (series.hasGroup) rows.push({ label: 'group', value: `${a}${formatRate(p.group)}`, color: KIND_COLOR.member })
-  if (series.hasInc) rows.push({ label: 'incoming', value: `${a}${formatRate(p.inc)}`, color: KIND_COLOR.enemy })
+  const shown = (k: ChartLineKey, has: boolean): boolean => has && !hidden.includes(k)
+  const rows: TooltipRow[] = []
+  if (shown('out', true)) rows.push({ label: outLabel, value: `${a}${formatRate(p.out)}`, color: KIND_COLOR.you })
+  if (shown('pet', series.hasPet)) rows.push({ label: 'pet', value: `${a}${formatRate(p.pet)}`, color: KIND_COLOR.pet })
+  if (shown('group', series.hasGroup))
+    rows.push({ label: 'group', value: `${a}${formatRate(p.group)}`, color: KIND_COLOR.member })
+  if (shown('inc', series.hasInc))
+    rows.push({ label: 'incoming', value: `${a}${formatRate(p.inc)}`, color: KIND_COLOR.enemy })
   return rows
 }
 
 /** A marker under the cursor becomes the tooltip's SUBJECT and the rates drop to secondary rows;
  *  otherwise the cursor's own instant is the subject and the rates are the whole point. */
-function buildTip(hit: Hit, series: DpsSeries, startTs: number): TipContent {
+function buildTip(hit: Hit, series: DpsSeries, startTs: number, hidden: readonly ChartLineKey[]): TipContent {
   const base = hit.mk ? markerTooltip(hit.mk) : timeTooltip(hit.t, startTs, series.durationMs)
-  return { ...base, rows: [...base.rows, ...dpsRows(series, hit.t)], note: rollingNote(series) }
+  return { ...base, rows: [...base.rows, ...dpsRows(series, hit.t, hidden)], note: rollingNote(series) }
 }
 
 /** Drawn in a 1:1 CSS-px overlay rather than in the chart's stretched user space — a circle in
@@ -124,20 +133,32 @@ function Cursor({ hit, chart, series }: { hit: Hit; chart: DpsChart; series: Dps
         stroke="rgba(255,255,255,0.18)"
         strokeWidth={1}
       />
-      {/* Y is 1:1 on this chart, so the curve's user Y is already a CSS px offset. */}
-      <circle
-        cx={userToPx(ux, hit.w)}
-        cy={curveYAtUserX(chart, series, ux)}
-        r={3}
-        fill={KIND_COLOR.you}
-        stroke="rgba(0,0,0,0.55)"
-        strokeWidth={1}
-      />
+      {/* Y is 1:1 on this chart, so the curve's user Y is already a CSS px offset. The dot rides
+          the OUTGOING line, so it goes with it: with that line hidden it would sit at a height
+          nothing on the plot explains. The crosshair and the readout stay — the cursor still has
+          an instant, and the visible lines still have rates at it. */}
+      {chart.outLine !== null && (
+        <circle
+          cx={userToPx(ux, hit.w)}
+          cy={curveYAtUserX(chart, series, ux)}
+          r={3}
+          fill={KIND_COLOR.you}
+          stroke="rgba(0,0,0,0.55)"
+          strokeWidth={1}
+        />
+      )}
     </svg>
   )
 }
 
-export function DpsCurveHoverLayer({ api, chart, series, markers, startTs }: DpsCurveHoverProps): React.JSX.Element {
+export function DpsCurveHoverLayer({
+  api,
+  chart,
+  series,
+  markers,
+  startTs,
+  hidden
+}: DpsCurveHoverProps): React.JSX.Element {
   const [hit, setHit] = useState<Hit | null>(null)
   // Mirrors the state so the change gate reads the CURRENT pick without re-creating the throttled
   // callback (and its pending animation frame) on every hover.
@@ -176,7 +197,10 @@ export function DpsCurveHoverLayer({ api, chart, series, markers, startTs }: Dps
   useEffect(() => () => move.cancel(), [move])
   useImperativeHandle(api, () => ({ move, clear }), [move, clear])
 
-  const tip = useMemo(() => (hit ? buildTip(hit, series, startTs) : null), [hit, series, startTs])
+  const tip = useMemo(
+    () => (hit ? buildTip(hit, series, startTs, hidden) : null),
+    [hit, series, startTs, hidden]
+  )
 
   return (
     <div style={{ position: 'absolute', left: 0, top: 0, right: 0, height: CHART_H, pointerEvents: 'none', zIndex: 4 }}>

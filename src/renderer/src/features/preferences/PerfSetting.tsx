@@ -17,19 +17,20 @@
 // ONE BORDER: PreferencesView already wraps each item in an outlined Paper, so this renders bare
 // Stacks.
 
-import { type JSX, useCallback, useEffect, useState } from 'react'
+import { type JSX, useCallback, useState } from 'react'
 import { Box, Button, Chip, FormControlLabel, Stack, Switch, Typography } from '@mui/material'
 import SpeedIcon from '@mui/icons-material/Speed'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import { DEV_TOOLS } from '../../devFlags'
 import {
-  DEFAULT_PERF_HUD_PREFS,
   formatMs,
   type PerfHudPrefs,
   type StartupPhase,
   type StartupProfile
 } from '@shared/perf'
+import type { ProcessPriorityPrefs } from '@shared/processPriority'
 import { formatDateTime } from '../../lib/formatDate'
+import { recordPref, usePrefsSeed } from './prefsHydration'
 import type { PrefSection } from './PreferencesView'
 
 /** What each phase is called in front of a person. The enum names are the code's vocabulary;
@@ -45,28 +46,79 @@ const PHASE_LABEL: Record<StartupPhase, string> = {
   rendererHydrated: 'Interface drawn'
 }
 
-/** The switch, hydrated from main and written back on change — the VoiceSetting pattern. The
- *  reply is authoritative (it is what was actually stored), the local set is optimistic so the
- *  toggle never lags an IPC round trip. */
+/** The switch, SEEDED from the pane's hydration snapshot and written back on change. The reply is
+ *  authoritative (it is what was actually stored), the local set is optimistic so the toggle never
+ *  lags an IPC round trip.
+ *
+ *  It used to mount on `DEFAULT_PERF_HUD_PREFS` — off — and correct itself (JOS-340), so anyone
+ *  running with the HUD on watched this switch rise every time they opened the section. */
 function usePerfHudPrefs(): [PerfHudPrefs, (enabled: boolean) => void] {
-  const [prefs, setPrefs] = useState<PerfHudPrefs>(DEFAULT_PERF_HUD_PREFS)
-
-  useEffect(() => {
-    let alive = true
-    void window.eq.getPerfPrefs().then((stored) => {
-      if (alive) setPrefs(stored)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
+  const [prefs, setPrefs] = useState<PerfHudPrefs>(usePrefsSeed().perfHud)
 
   const setEnabled = useCallback((enabled: boolean) => {
     setPrefs({ enabled })
-    void window.eq.setPerfHudEnabled(enabled).then(setPrefs)
+    void window.eq.setPerfHudEnabled(enabled).then((stored) => {
+      setPrefs(stored)
+      recordPref('perfHud', stored)
+    })
   }, [])
 
   return [prefs, setEnabled]
+}
+
+/** The yield switch, seeded and written back exactly like the one above it — main's reply is
+ *  authoritative (it is what was actually stored AND what the running processes were just set to),
+ *  the local set is optimistic so the toggle never lags an IPC round trip. */
+function useProcessPriority(): [ProcessPriorityPrefs, (enabled: boolean) => void] {
+  const [prefs, setPrefs] = useState<ProcessPriorityPrefs>(usePrefsSeed().processPriority)
+
+  const setYield = useCallback((enabled: boolean) => {
+    setPrefs({ yieldToGame: enabled })
+    void window.eq.setYieldToGame(enabled).then((stored) => {
+      setPrefs(stored)
+      recordPref('processPriority', stored)
+    })
+  }, [])
+
+  return [prefs, setYield]
+}
+
+/**
+ * "Yield CPU to the game" (JOS-366) — the one control in this section that changes how the app
+ * BEHAVES rather than what it shows, which is why it sits above the HUD.
+ *
+ * STATE, NEVER PROCESS: the caption says what the machine does, not how it is done. It does not
+ * mention priority classes, which processes are touched, or which are deliberately not — all of
+ * that is in src/main/processPriority.ts, where it belongs. The one piece of jargon that survives
+ * is in the switch's own label, in brackets, because "below-normal priority" is the exact phrase
+ * a player will read in Task Manager if they go looking, and matching it is what makes the
+ * setting checkable.
+ */
+function YieldCpuSetting(): JSX.Element {
+  const [prefs, setYield] = useProcessPriority()
+
+  return (
+    <Stack spacing={0.5} data-testid="pref-yield">
+      <FormControlLabel
+        control={
+          <Switch
+            size="small"
+            data-testid="pref-yield-enabled"
+            checked={prefs.yieldToGame}
+            onChange={(e) => setYield(e.target.checked)}
+          />
+        }
+        label={
+          <Typography variant="body2">Yield CPU to the game (below-normal priority)</Typography>
+        }
+      />
+      <Typography variant="caption" color="text.secondary">
+        {prefs.yieldToGame
+          ? 'EverQuest gets the processor first whenever this app and the game want it at the same moment.'
+          : 'Off. This app and EverQuest compete for the processor on equal terms.'}
+      </Typography>
+    </Stack>
+  )
 }
 
 /** One phase's row: its name, a bar proportional to its share of the launch, and its duration. */
@@ -208,10 +260,10 @@ function DevRestartRow(): JSX.Element {
       </Stack>
       {phase !== 'idle' && (
         <Typography variant="caption" color="text.secondary" data-testid="pref-dev-restart-note">
-          {phase === 'waiting' && 'Rebuilding — the dev watcher relaunches the app.'}
+          {phase === 'waiting' && 'Rebuilding - the dev watcher relaunches the app.'}
           {phase === 'stalled' &&
             'Nothing restarted. This dev server is running without --watch, so restart it from the terminal.'}
-          {phase === 'refused' && `Restart refused${detail === undefined ? '' : ` — ${detail}`}.`}
+          {phase === 'refused' && `Restart refused${detail === undefined ? '' : ` - ${detail}`}.`}
         </Typography>
       )}
     </Stack>
@@ -237,6 +289,13 @@ export function perfSection(): PrefSection {
     icon: <SpeedIcon fontSize="small" />,
     items: [
       {
+        id: 'yield-cpu',
+        label: 'Game priority',
+        keywords:
+          'priority cpu processor yield game foreground below normal lag stutter freeze hitch fps performance smooth background scheduling',
+        content: <YieldCpuSetting />
+      },
+      {
         id: 'perf-hud',
         label: 'Performance HUD',
         keywords:
@@ -249,17 +308,11 @@ export function perfSection(): PrefSection {
 
 export function PerfSetting(): JSX.Element {
   const [prefs, setEnabled] = usePerfHudPrefs()
-  const [profile, setProfile] = useState<StartupProfile | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    void window.eq.getStartupProfile().then((p) => {
-      if (alive) setProfile(p)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
+  // The breakdown comes out of the same snapshot (JOS-340). It carries no control, but its empty
+  // state is a SENTENCE — "No startup breakdown recorded yet." — and that sentence was false for a
+  // frame on every launch that had one. A caption that is wrong for a frame is the same defect as
+  // a switch that is.
+  const profile: StartupProfile = usePrefsSeed().startup
 
   return (
     <Stack spacing={2} data-testid="pref-perf">
@@ -277,12 +330,12 @@ export function PerfSetting(): JSX.Element {
         />
         <Typography variant="caption" color="text.secondary">
           {prefs.enabled
-            ? 'A live reading sits in the title bar. Click it for a breakdown by process, how far behind the app is running, and the last two minutes. It turns amber or red only when the app is actually being held up — not merely when it is busy.'
-            : 'Off. Nothing is measured and nothing is shown. Turn it on if the app ever feels like it is stuttering — a low reading here while the app feels slow says the machine is loaded, not this app.'}
+            ? 'A live reading sits in the title bar. Click it for a breakdown by process, how far behind the app is running, and the last two minutes. It turns amber or red only when the app is actually being held up - not merely when it is busy.'
+            : 'Off. Nothing is measured and nothing is shown. Turn it on if the app ever feels like it is stuttering - a low reading here while the app feels slow says the machine is loaded, not this app.'}
         </Typography>
       </Stack>
 
-      {profile && profile.phases.length > 0 ? (
+      {profile.phases.length > 0 ? (
         <StartupBreakdown profile={profile} />
       ) : (
         <Typography variant="caption" color="text.secondary">

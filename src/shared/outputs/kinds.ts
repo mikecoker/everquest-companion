@@ -28,11 +28,16 @@
 // half-parsed object, and it never falls back to "well, it's tab-separated, so…".
 //
 // `fileKindVerified` is a SECOND, separate honesty flag on the same idea: the filename suffix
-// itself is knowledge. `Inventory` is MEASURED (the real dump on the dev machine is
-// `Primitive_freeport-Inventory.txt`). Every other suffix below is the community/client spelling
-// as best we know it and has NOT been observed on disk — an unverified suffix simply never
-// matches a real file, which is a quiet miss rather than a wrong parse, and it gets corrected the
-// moment someone runs the command and looks.
+// itself is knowledge. `Inventory` and `Achievements` are MEASURED (the real dumps on the dev
+// machine are `Primitive_freeport-Inventory.txt` and `Primitive_freeport-Achievements.txt`). Every
+// other suffix below is the community/client spelling as best we know it and has NOT been observed
+// on disk — an unverified suffix simply never matches a real file, which is a quiet miss rather
+// than a wrong parse, and it gets corrected the moment someone runs the command and looks.
+//
+// TWO KINDS HAVE GRADUATED, and the second one shows the law working exactly as written: JOS-429's
+// brief was investigation-first, the owner exported the real file, its format was characterized and
+// written down (shared/outputs/achievements.ts's header) and the fixture committed BEFORE a line of
+// parser existed. The five kinds still `awaiting-sample` below are waiting for the same thing.
 
 /** Every `/outputfile` kind this app knows the name of. */
 export type OutputKindId =
@@ -65,17 +70,42 @@ export interface OutputKindDef {
   status: 'supported' | 'awaiting-sample'
   /** Human-readable note carried into the unsupported result. */
   note: string
+  /**
+   * HOW TO TYPE THE COMMAND SO IT CAPTURES EVERYTHING (JOS-185). One short imperative per line,
+   * in the order the player does them; `[]` when a kind has no preconditions worth stating.
+   *
+   * These are GAME FACTS, not caveats about this app, which is why they live in the registry
+   * beside the command instead of in a surface's prose. `/outputfile inventory` is conditional in
+   * ways the file never admits to: it exports "Inventory items, items from all keyrings, Dragon's
+   * Hoard items if the Dragon's Hoard window is open, and Personal Tradeskill Depot items if the
+   * depot is loaded" (eqlwiki.com/Commands, verbatim), and both third-party EQ Legends trackers
+   * additionally instruct their users to stand at a banker with the Bank window up. A dump taken
+   * without those windows open is not an error and does not look like one — it is a complete,
+   * well-formed file that quietly omits whole storages, and this app's numbers then omit them too.
+   * That is the failure a reporter hit with his Plane of Sky weapons sitting in the hoard.
+   *
+   * The last step is the one that cannot be fixed by typing anything: currency-tab items (Wind
+   * Runes, Motes) are never in the dump at all, so it is stated rather than worked around.
+   */
+  steps: readonly string[]
 }
 
 export const OUTPUT_KINDS: readonly OutputKindDef[] = [
   {
     id: 'inventory',
     command: '/outputfile inventory',
-    why: 'Re-type it in game whenever your gear or bags change — everything here reads that dump.',
+    why: 'Re-type it in game whenever your gear or bags change - everything here reads that dump.',
     fileKind: 'Inventory',
     fileKindVerified: true,
     status: 'supported',
-    note: 'Equipment, bag contents, bank, depot and the keyring, plus each item’s slots.'
+    note: 'Equipment, bag contents, bank, depot and the keyring, plus each item’s slots.',
+    steps: [
+      'Stand at a banker and open your Bank.',
+      'Open Dragon’s Hoard too - it only dumps while its window is open.',
+      'Open your Tradeskill Depot once if you keep anything in it.',
+      'Type /outputfile inventory.',
+      'Wind Runes and other currency-tab items are never in the dump - the game leaves them out.'
+    ]
   },
   {
     id: 'guild',
@@ -84,7 +114,8 @@ export const OUTPUT_KINDS: readonly OutputKindDef[] = [
     fileKind: 'Guild',
     fileKindVerified: false,
     status: 'awaiting-sample',
-    note: 'Guild roster dump — no verified sample; run /outputfile guild and commit a fixture.'
+    note: 'Guild roster dump - no verified sample; run /outputfile guild and commit a fixture.',
+    steps: []
   },
   {
     id: 'raid',
@@ -93,7 +124,8 @@ export const OUTPUT_KINDS: readonly OutputKindDef[] = [
     fileKind: 'Raid',
     fileKindVerified: false,
     status: 'awaiting-sample',
-    note: 'Raid roster dump — no verified sample; run /outputfile raid and commit a fixture.'
+    note: 'Raid roster dump - no verified sample; run /outputfile raid and commit a fixture.',
+    steps: []
   },
   {
     id: 'spellbook',
@@ -102,7 +134,8 @@ export const OUTPUT_KINDS: readonly OutputKindDef[] = [
     fileKind: 'Spellbook',
     fileKindVerified: false,
     status: 'awaiting-sample',
-    note: 'Spellbook dump — no verified sample; run /outputfile spellbook and commit a fixture.'
+    note: 'Spellbook dump - no verified sample; run /outputfile spellbook and commit a fixture.',
+    steps: []
   },
   {
     id: 'factions',
@@ -111,16 +144,23 @@ export const OUTPUT_KINDS: readonly OutputKindDef[] = [
     fileKind: 'Factions',
     fileKindVerified: false,
     status: 'awaiting-sample',
-    note: 'Faction standings dump — no verified sample; run /outputfile factions and commit a fixture.'
+    note: 'Faction standings dump - no verified sample; run /outputfile factions and commit a fixture.',
+    steps: []
   },
   {
     id: 'achievements',
     command: '/outputfile achievements',
-    why: 'Dumps your achievement progress as the game currently sees it.',
+    why: 'Type it in game to import Sky quests you finished before this app ever saw your log.',
     fileKind: 'Achievements',
-    fileKindVerified: false,
-    status: 'awaiting-sample',
-    note: 'Achievements dump — no verified sample; run /outputfile achievements and commit a fixture.'
+    fileKindVerified: true,
+    status: 'supported',
+    note: 'Achievement progress, including the class-unlock rows that name each Sky quest reward.',
+    // NO PRECONDITIONS, and the empty list is a measured claim rather than a gap. The inventory
+    // dump's steps exist because that command is conditional in ways the file never admits to
+    // (bank/hoard/depot windows). This one is not: the server already knows which achievements you
+    // have, no window has to be open, and it can be typed anywhere. Saying nothing is the honest
+    // answer; inventing a ritual would be a caveat with no fact under it.
+    steps: []
   },
   {
     id: 'alternateadv',
@@ -129,7 +169,8 @@ export const OUTPUT_KINDS: readonly OutputKindDef[] = [
     fileKind: 'AlternateAdv',
     fileKindVerified: false,
     status: 'awaiting-sample',
-    note: 'Alternate-advancement dump — no verified sample; run /outputfile alternateadv and commit a fixture.'
+    note: 'Alternate-advancement dump - no verified sample; run /outputfile alternateadv and commit a fixture.',
+    steps: []
   }
 ]
 
@@ -156,6 +197,8 @@ export interface OutputFileStatus {
   why: string
   /** the `-<fileKind>.txt` suffix this kind's file carries */
   fileKind: string
+  /** how to type the command so it captures everything — see `OutputKindDef.steps` */
+  steps: readonly string[]
   /** true when this kind has a verified sample and can actually be parsed today */
   supported: boolean
   /** the dump found on disk, or null when the player has never run the command */
@@ -182,6 +225,7 @@ export function outputFileStatus(
     command: def.command,
     why: def.why,
     fileKind: def.fileKind,
+    steps: def.steps,
     supported: def.status === 'supported',
     path: found?.path ?? null,
     updatedAt: found?.updatedAt ?? null

@@ -43,6 +43,12 @@
 // Imported from the transport module directly (types.ts re-exports the same names) — a shared
 // file importing the barrel it is part of would be a needless cycle.
 import type { ProgressionSnap } from './progressionTypes'
+import type { RangeStats, RangeStatsArgs, ZoneRangeRow } from './progressionStatsTypes'
+// THE MEMBERSHIP TEST for the optional zone filter (JOS-130), and since JOS-291 the CHOICE of
+// which of this app's two zone folds it runs on. `zoneAdmits` is the one predicate every surface
+// asks; `zoneIdKey` is the row fold, which lives beside it now and is re-exported below so every
+// existing importer of `progressionStats.zoneIdKey` is untouched.
+import { zoneAdmits, zoneIdKey } from './zoneScope'
 
 /**
  * No exp / credited-kill / loot event for LONGER than this ⇒ idle.
@@ -62,173 +68,42 @@ const UNKNOWN_ZONE = 'unknown'
 
 const MS_PER_HOUR = 3_600_000
 
-export interface ZoneRangeRow {
-  /** RAW display name, first-seen casing (law 2: canonicalize at boundaries, display raw). */
-  zone: string
-  /** ms of the selection spent in this zone (Σ over every visit inside the range). */
-  spanMs: number
-  /** spanMs minus idleMs minus offlineMs. */
-  activeMs: number
-  /** present-but-unproductive silence. EXCLUDES `offlineMs` — a logout is not medding. */
-  idleMs: number
-  /**
-   * ms of this zone's span the log says you were LOGGED OUT.
-   *
-   * A logout lands INSIDE the zone interval you logged out in — the login writes a fresh zone
-   * line, so the old interval stays open until then — which is why this is the zone row's own
-   * column rather than a share of its idle. The overnight belongs to the camp you left, and
-   * the camp's `activeMs` / rates must not be judged by it.
-   */
-  offlineMs: number
-  visits: number
-  kills: number
-  killsSelf: number
-  killsPet: number
-  /** Σ stated level-bar percent, /100. Excludes unstated samples. */
-  levelEquiv: number
-  /** exp lines whose percentage the log did not state (at cap). */
-  expUnstated: number
-  expSamples: number
-  /** null when activeMs is 0, or when every exp sample here was unstated. */
-  levelsPerHourActive: number | null
-  /** per hour of ONLINE wall (`spanMs - offlineMs`) — see `RangeStats.levelsPerHourWall`. */
-  levelsPerHourWall: number | null
-  killsPerHourActive: number | null
+/**
+ * THE WALL DENOMINATOR, IN ONE PLACE: `durationMs - offlineMs`, floored at 0.
+ *
+ * It is not a new quantity — `levelsPerHourWall` has divided by exactly this since offline landed,
+ * and `lootRates.windowLootRates` (JOS-261) by exactly this again. It is a FUNCTION now because
+ * JOS-288 puts the same denominator under the AA rates and under the XP overlay's whole window, and
+ * a fourth hand-typed subtraction is how world-model law 12's drift gets a clock in it. Every
+ * surface that says "elapsed" divides by this and nothing else.
+ *
+ * What stays IN is the point of it: medding, banking, looting and travelling are hours you spent,
+ * and only a logout the log CLOSED with a login line comes out.
+ */
+export function wallMs(spans: { durationMs: number; offlineMs: number }): number {
+  return Math.max(0, spans.durationMs - spans.offlineMs)
 }
 
-export interface ComboInterval {
-  startTs: number
-  endTs: number
-  /** e.g. ['PAL','MNK','ENC'] — display order as stated. */
-  classes: string[]
-  /** the combo agent's own confidence flag; chipped `inferred` when true. */
-  inferred: boolean
-}
+// THE SHAPES THIS FILE ANSWERS WITH LIVE NEXT DOOR (JOS-288) — `progressionStatsTypes.ts`, split
+// out under the SPLIT-NEVER-RATCHET law when the elapsed halves of three rates pushed this file
+// past the measured 400-line ceiling. They are RE-EXPORTED here, so every `@shared/progressionStats`
+// importer in the repo is untouched and there is still one name for each shape.
+export type {
+  ComboInterval,
+  ComboSource,
+  RangeStats,
+  RangeStatsArgs,
+  ZoneRangeRow
+} from './progressionStatsTypes'
 
 /**
- * Implemented by the class-combo module (a separate plan). STRUCTURAL — this file declares
- * the shape it needs and never imports the combo implementation, so this feature compiles and
- * ships before that work lands. `rangeStats` calls `intervalsIn` EXACTLY ONCE and stores the
- * result verbatim: zero inference, zero merging, zero gap-filling. Absent ⇒ `combos: []`,
- * which is a first-class state, not an error (the self `/who` row is the only line that ever
- * states a loadout and there are 11 in 1.1M lines, so "unknown" is the COMMON case).
+ * The zone restriction, as the segment walk reads it: the PLACE key every admitted visit must fold
+ * to, and — under `exactTier` (JOS-291) — the ROW key it must ALSO match. One object because the
+ * two travel together or they drift apart, and because `max-params` is 4.
  */
-export interface ComboSource {
-  /** the loadout active at `ts`, or null when nothing is known at that instant. */
-  comboAt(ts: number): ComboInterval | null
-  /** every combo interval overlapping [t0,t1), clipped to it, ascending. */
-  intervalsIn(t0: number, t1: number): ComboInterval[]
-}
-
-export interface RangeStats {
-  t0: number
-  t1: number
-  durationMs: number
-  /**
-   * THE Σ IDENTITY, pinned by the tests: `activeMs + idleMs + offlineMs === durationMs`.
-   * Every instant of the selection is exactly one of playing, present-but-silent, and gone.
-   */
-  activeMs: number
-  /**
-   * Present-but-unproductive silence, with any derived offline interval CARVED OUT of it. So
-   * an overnight logout adds to `offlineMs`, not here — while the four minutes you spent
-   * finding your corpse after logging back in are still idle, because they are.
-   */
-  idleMs: number
-  /**
-   * Number of idle spans in the range. Counted AFTER offline is carved out, so one overnight
-   * silence can leave a short present-but-idle remainder at either end of it and those
-   * remainders are counted (they are real time you were logged in and quiet). With no offline
-   * interval in range this is exactly what it always was: the gaps over IDLE_GAP_MS.
-   */
-  idleGaps: number
-  idleThresholdMs: number
-
-  /**
-   * ms of the range the log says you were LOGGED OUT — Σ of the derived `offlineGap` intervals
-   * clipped to the selection. 0 when the log stated no logout, which is not the same fact as
-   * "you were online" (see the file header's live-edge limit) and must never be worded as one.
-   */
-  offlineMs: number
-  /** how many derived offline intervals intersect the range. 0 ⇒ say nothing about offline. */
-  offlineGaps: number
-
-  kills: number
-  killsSelf: number
-  killsPet: number
-  killsWitnessed: number
-
-  expSamples: number
-  expParty: number
-  expUnstated: number
-  /** Σ stated percent / 100 — "levels of progress", NOT experience points. */
-  levelEquiv: number
-  levelsPerHourActive: number | null
-  /**
-   * Levels of progress per hour of ONLINE WALL time — `durationMs - offlineMs`, NOT the
-   * selection's raw wall clock.
-   *
-   * The name is kept for its callers; the honest reading is "per online hour". A rate whose
-   * denominator counted a logout would be arithmetic about an empty chair: an overnight in the
-   * window drove this toward zero and made every ETA built on it meaningless, which is the
-   * whole reason offline exists. WALL still means "including the idle time you actually spent
-   * in the game" — medding and looting stay in the denominator, deliberately, because you will
-   * experience the projection in that same wall time. Null when the online wall is 0 (a range
-   * that is entirely offline), or when every exp sample in range was unstated.
-   *
-   * With no offline interval in range this is EXACTLY the old wall rate — same denominator,
-   * same number, byte for byte.
-   */
-  levelsPerHourWall: number | null
-  killsPerHourActive: number | null
-
-  /** dings inside the range, in order. */
-  levelUps: { ts: number; level: number }[]
-  /**
-   * Disjoint level runs — a loadout swap opens a NEW run, never a negative span. EQ Legends
-   * gives a character ONE level shared by a three-class loadout, and swapping a class in
-   * drops that level with NO log line of any kind; the same rule as `buildLevelSegments`
-   * (renderer levelSeries.ts): a value below the previous one starts a new run.
-   */
-  levelRuns: { fromLevel: number; toLevel: number; startTs: number; endTs: number }[]
-
-  /** Σ of the gain LINES in range. NOT the AA identity — a respec re-logs purchases and
-   *  refunds nothing, so this over-reports re-earned points. Label it at every surface,
-   *  exactly like the existing "AA gained over time" caption. (law 5) */
-  aaGained: number
-  aaGainEvents: number
-  /**
-   * AA COMPLETIONS per hour of ACTIVE time — the sibling of `levelsPerHourActive`, over the
-   * same denominator, and the number that still measures something once the level bar stops
-   * moving. It counts gain LINES, so it is the rate at which the AA bar filled, and it is
-   * unaffected by the item-shop potion (which multiplies POINTS, never experience).
-   *
-   * Null when the range has no active time. Never 0.0 for "unknown": unlike the levels rate
-   * this one has no unstated-sample failure mode — a gain line always states its amount — so a
-   * measured 0 over real active time is a fact and prints as one.
-   */
-  aaPerHourActive: number | null
-  /**
-   * ABILITY POINTS per hour of ACTIVE time. Σ of the amounts the gain lines STATED, so the AA
-   * potion's doubling is already inside this number — measured, not modelled: the doubled line
-   * reads `You have gained 2 ability point(s)!` and this adds the 2 the log printed.
-   *
-   * It carries the same respec reservation as `aaGained` (see that field).
-   */
-  aaPointsPerHourActive: number | null
-
-  zones: ZoneRangeRow[]
-  combos: ComboInterval[]
-
-  /** true when t0 < snapshot.windowStart — the panel must say the range is clipped. */
-  clipped: boolean
-}
-
-export interface RangeStatsArgs {
-  snap: ProgressionSnap
-  range: { t0: number; t1: number }
-  /** OPTIONAL seam. Absent ⇒ `combos: []`. */
-  combo?: ComboSource
+interface ZoneFilter {
+  key: string | null
+  exact: string | null
 }
 
 /** One clipped zone visit inside the range. Contiguous and gapless by construction. */
@@ -245,20 +120,15 @@ interface Span {
 }
 
 /**
- * Case-insensitive zone key. Mirrors main/log/parseCommon.ts `idKey` for zone names (trim +
- * lowercase); src/shared cannot import from src/main, and idKey's extra 'you'/'yourself'
- * folding is about entity names and can never apply to a zone.
+ * The ROW fold — case-insensitive, instance noise KEPT. `ZoneRangeRow` rows are grouped by it and
+ * `lootRates.ts` joins drops onto them by it.
  *
- * EXPORTED because `ZoneRangeRow` rows are grouped by it and a second reader has to JOIN onto
- * them: `lootRates.ts` matches this character's loot events to the zone row whose ACTIVE TIME is
- * their rate's denominator, and a second "same zone?" answer there would silently orphan every
- * drop whose spelling the two folds disagreed about (world-model law 12's drift, in miniature).
- * Deliberately NOT the renderer's `mobZone.zoneKey`, which additionally strips instance noise:
- * these rows are keyed with THIS fold, so the join must use THIS fold.
+ * It MOVED to `shared/zoneScope.ts` (JOS-291), which is where the full argument for this app's two
+ * zone folds now lives: the day membership became a choice BETWEEN them, one file had to own both.
+ * Re-exported here rather than relocated in every caller, so `@shared/progressionStats`'s importers
+ * are untouched and there is still exactly one name for the fold.
  */
-export function zoneIdKey(name: string): string {
-  return name.trim().toLowerCase()
-}
+export { zoneIdKey } from './zoneScope'
 
 /** First index i with arr[i] >= v (arr ascending). */
 function lowerBound(arr: readonly number[], v: number): number {
@@ -302,24 +172,37 @@ function nextFrom(arr: readonly number[], t: number): number | null {
  * (you never left it) — together those two rules are what make `Σ zones[].spanMs ==
  * durationMs` an identity rather than an approximation.
  */
-function zoneSegments(snap: ProgressionSnap, t0: number, t1: number): ZoneSeg[] {
+function zoneSegments(snap: ProgressionSnap, t0: number, t1: number, only?: ZoneFilter): ZoneSeg[] {
   const segs: ZoneSeg[] = []
   const n = snap.zoneName.length
   const headEnd = Math.min(n > 0 ? snap.zoneStart[0] : t1, t1)
-  if (headEnd > t0) segs.push({ key: UNKNOWN_ZONE, name: UNKNOWN_ZONE, start: t0, end: headEnd })
+  const admits = (name: string): boolean => zoneAdmits(name, only?.key, only?.exact)
+  // The pre-first-zone remainder is a NAMED row (`unknown`) and a zone filter judges it like any
+  // other: asking for one zone never quietly re-admits the stretch the log could not place.
+  if (headEnd > t0 && admits(UNKNOWN_ZONE)) {
+    segs.push({ key: UNKNOWN_ZONE, name: UNKNOWN_ZONE, start: t0, end: headEnd })
+  }
   // The last interval starting at/before t0 is the one we are inside when the range opens.
   for (let i = Math.max(0, upperBound(snap.zoneStart, t0) - 1); i < n && snap.zoneStart[i] < t1; i++) {
     const start = Math.max(snap.zoneStart[i], t0)
     const end = Math.min(snap.zoneEnd[i] === 0 ? t1 : snap.zoneEnd[i], t1)
-    if (end > start) segs.push({ key: zoneIdKey(snap.zoneName[i]), name: snap.zoneName[i], start, end })
+    const name = snap.zoneName[i]
+    // Grouped by the ROW fold, admitted by the MEMBERSHIP test — see `RangeStatsArgs.zoneKey`.
+    if (end > start && admits(name)) {
+      segs.push({ key: zoneIdKey(name), name, start, end })
+    }
   }
   return segs
 }
 
 /**
- * Index of the segment containing `ts`, or -1 when the range has no segments. A `ts` past the
- * last segment clamps to it, so every in-range sample is attributed exactly once and the
- * `Σ zones[].kills == kills` identity holds by construction.
+ * Index of the segment containing `ts`, or -1 when no segment does.
+ *
+ * EXACT CONTAINMENT, never a clamp. Unfiltered the two are the same test — `zoneSegments` covers
+ * `[t0,t1)` contiguously and gaplessly, so every in-range sample lands inside a segment and the
+ * `Σ zones[].kills == kills` identity holds exactly as before. Under a zone filter the segments
+ * are disjoint but NOT contiguous, and a clamp would file a kill from the zone next door into the
+ * nearest visit of the zone you asked about.
  */
 function segAt(segs: readonly ZoneSeg[], ts: number): number {
   let lo = 0
@@ -329,7 +212,24 @@ function segAt(segs: readonly ZoneSeg[], ts: number): number {
     if (segs[mid].end <= ts) lo = mid + 1
     else hi = mid
   }
-  return lo < segs.length ? lo : segs.length - 1
+  return lo < segs.length && segs[lo].start <= ts ? lo : -1
+}
+
+/**
+ * `spans` ∩ `segs` — both ascending and disjoint. This is what keeps a zone-filtered range's idle
+ * and offline inside the visits they are being attributed to, so the Σ identity still holds when
+ * the range is full of holes.
+ */
+function intersectSpans(spans: readonly Span[], segs: readonly ZoneSeg[]): Span[] {
+  const out: Span[] = []
+  for (const s of spans) {
+    for (const g of segs) {
+      const start = Math.max(s.start, g.start)
+      const end = Math.min(s.end, g.end)
+      if (end > start) out.push({ start, end })
+    }
+  }
+  return out.sort((a, b) => a.start - b.start)
 }
 
 /**
@@ -434,7 +334,8 @@ function newRow(zone: string): ZoneRangeRow {
     expSamples: 0,
     levelsPerHourActive: null,
     levelsPerHourWall: null,
-    killsPerHourActive: null
+    killsPerHourActive: null,
+    killsPerHourWall: null
   }
 }
 
@@ -493,10 +394,46 @@ interface FoldCtx {
   t1: number
 }
 
-/** The row a sample at `ts` belongs to. Total whenever the range has any span at all. */
+/** The row a sample at `ts` belongs to, or null when no segment holds that instant. */
 function rowAt(ctx: FoldCtx, ts: number): ZoneRangeRow | null {
   const at = segAt(ctx.segs, ts)
   return at < 0 ? null : ctx.rows[ctx.of[at]]
+}
+
+/**
+ * Third-party kills inside the range. Unfiltered this is the O(1) index subtraction it always
+ * was; a zone filter costs a walk, because a witnessed kill carries only a timestamp and the
+ * segments it must be tested against are no longer contiguous.
+ */
+function witnessedIn(snap: ProgressionSnap, ctx: FoldCtx, filtered: boolean): number {
+  const lo = lowerBound(snap.witnessTs, ctx.t0)
+  const hi = lowerBound(snap.witnessTs, ctx.t1)
+  if (!filtered) return hi - lo
+  let n = 0
+  for (let i = lo; i < hi; i++) if (segAt(ctx.segs, snap.witnessTs[i]) >= 0) n++
+  return n
+}
+
+/**
+ * The range's silence and its logouts — both already clipped to `segs` when a zone filter is in
+ * force. Bundled because `max-params` is 4 and because the two are derived TOGETHER: offline is
+ * carved out of the silence it sits in (see `subtractSpans`) before either is clipped, so a zone
+ * row's idle and its offline can never claim the same instant.
+ */
+function rangeSpans(o: {
+  snap: ProgressionSnap
+  segs: readonly ZoneSeg[]
+  t0: number
+  t1: number
+  filtered: boolean
+}): { idle: Span[]; offline: Span[] } {
+  const { snap, segs, t0, t1, filtered } = o
+  if (t1 <= t0) return { idle: [], offline: [] }
+  const offline = offlineSpansIn(snap, t0, t1)
+  const idle = subtractSpans(idleSpans(snap, t0, t1), offline)
+  return filtered
+    ? { idle: intersectSpans(idle, segs), offline: intersectSpans(offline, segs) }
+    : { idle, offline }
 }
 
 /** Fold the credited kills of [t0,t1) into the range totals and their zone rows. */
@@ -505,12 +442,15 @@ function foldKills(snap: ProgressionSnap, ctx: FoldCtx): Pick<RangeStats, 'kills
   let killsSelf = 0
   let killsPet = 0
   for (let i = lowerBound(snap.killTs, ctx.t0); i < lowerBound(snap.killTs, ctx.t1); i++) {
+    // The ROW decides membership, not the range: unfiltered every in-range sample has one (the
+    // segments are contiguous), and under a zone filter a sample with no row happened somewhere
+    // this slice is not about, so it enters neither the row nor the total.
+    const row = rowAt(ctx, snap.killTs[i])
+    if (!row) continue
     const pet = snap.killCredit[i] === 1
     kills++
     if (pet) killsPet++
     else killsSelf++
-    const row = rowAt(ctx, snap.killTs[i])
-    if (!row) continue
     row.kills++
     if (pet) row.killsPet++
     else row.killsSelf++
@@ -528,14 +468,15 @@ function foldExp(
   let expUnstated = 0
   let levelEquiv = 0
   for (let i = lowerBound(snap.expTs, ctx.t0); i < lowerBound(snap.expTs, ctx.t1); i++) {
+    // Membership is the row's, exactly as in `foldKills` — see the note there.
+    const row = rowAt(ctx, snap.expTs[i])
+    if (!row) continue
     const unstated = (snap.expFlag[i] & 1) !== 0
     const equiv = unstated ? 0 : snap.expPct[i] / 100
     expSamples++
     if ((snap.expFlag[i] & 2) !== 0) expParty++
     if (unstated) expUnstated++
     levelEquiv += equiv
-    const row = rowAt(ctx, snap.expTs[i])
-    if (!row) continue
     row.expSamples++
     row.levelEquiv += equiv
     if (unstated) row.expUnstated++
@@ -543,13 +484,16 @@ function foldExp(
   return { expSamples, expParty, expUnstated, levelEquiv }
 }
 
-/** Dings in range, plus the disjoint runs a loadout swap splits them into. */
-function levelSeriesIn(snap: ProgressionSnap, t0: number, t1: number): Pick<RangeStats, 'levelUps' | 'levelRuns'> {
+/** Dings in range (and inside the range's segments, which is the same set unless a zone filter
+ *  is in force), plus the disjoint runs a loadout swap splits them into. */
+function levelSeriesIn(snap: ProgressionSnap, ctx: FoldCtx): Pick<RangeStats, 'levelUps' | 'levelRuns'> {
+  const { t0, t1, segs } = ctx
   const levelUps: RangeStats['levelUps'] = []
   const levelRuns: RangeStats['levelRuns'] = []
   for (let i = lowerBound(snap.levelTs, t0); i < lowerBound(snap.levelTs, t1); i++) {
-    const level = snap.levelValue[i]
     const ts = snap.levelTs[i]
+    if (segAt(segs, ts) < 0) continue
+    const level = snap.levelValue[i]
     levelUps.push({ ts, level })
     const run = levelRuns[levelRuns.length - 1]
     if (!run || level < run.toLevel) levelRuns.push({ fromLevel: level, toLevel: level, startTs: ts, endTs: ts })
@@ -565,11 +509,14 @@ function levelSeriesIn(snap: ProgressionSnap, t0: number, t1: number): Pick<Rang
 function finishRows(rows: ZoneRangeRow[]): void {
   for (const row of rows) {
     row.activeMs = Math.max(0, row.spanMs - row.idleMs - row.offlineMs)
+    // ONLINE wall: the hours you were logged out of this camp are not hours it paid badly in. The
+    // row's wall clock is its `spanMs` (Σ of its visits), so that is what goes in as `durationMs`.
+    const wall = wallMs({ durationMs: row.spanMs, offlineMs: row.offlineMs })
     const unknown = levelsUnknown(row.expSamples, row.expUnstated)
     row.levelsPerHourActive = unknown ? null : perHour(row.levelEquiv, row.activeMs)
-    // ONLINE wall: the hours you were logged out of this camp are not hours it paid badly in.
-    row.levelsPerHourWall = unknown ? null : perHour(row.levelEquiv, row.spanMs - row.offlineMs)
+    row.levelsPerHourWall = unknown ? null : perHour(row.levelEquiv, wall)
     row.killsPerHourActive = perHour(row.kills, row.activeMs)
+    row.killsPerHourWall = perHour(row.kills, wall)
   }
 }
 
@@ -579,28 +526,38 @@ function finishRows(rows: ZoneRangeRow[]): void {
  * repo's ESLint `max-params` is 4 and this would otherwise be at the ceiling.
  */
 export function rangeStats(args: RangeStatsArgs): RangeStats {
-  const { snap, range, combo } = args
+  const { snap, range, combo, zoneKey } = args
   const t0 = range.t0
   const t1 = Math.max(range.t0, range.t1)
-  const durationMs = t1 - t0
-  const segs = zoneSegments(snap, t0, t1)
-  const offline = durationMs > 0 ? offlineSpansIn(snap, t0, t1) : []
-  // Offline is carved OUT of the silence it sits in — see `subtractSpans`. Do it before the
-  // rows are built so a zone row's idle and its offline can never claim the same instant.
-  const spans = subtractSpans(durationMs > 0 ? idleSpans(snap, t0, t1) : [], offline)
+  // THE EXACT KEY NARROWS; IT NEVER STANDS ALONE (JOS-291). Absent ⇒ this query is byte-identical
+  // to the one this file has answered since JOS-130 — which is what the golden windows pin.
+  const zoneExactKey = args.zoneExactKey ?? null
+  const filtered = zoneKey != null || zoneExactKey != null
+  const segs = zoneSegments(snap, t0, t1, { key: zoneKey ?? null, exact: zoneExactKey })
+  // WHAT THE RANGE IS WORTH IN TIME. Unfiltered the segments tile `[t0,t1)` exactly, so this is
+  // the wall clock it has always been; under a zone filter it is Σ of the visits, which is the
+  // only denominator a per-zone rate may divide by.
+  const durationMs = filtered ? segs.reduce((n, s) => n + (s.end - s.start), 0) : t1 - t0
+  const { idle: spans, offline } = rangeSpans({ snap, segs, t0, t1, filtered })
   const { rows, of } = buildRows(segs, spans, offline)
   const idleMs = spans.reduce((n, s) => n + (s.end - s.start), 0)
   const offlineMs = offline.reduce((n, s) => n + (s.end - s.start), 0)
   const activeMs = Math.max(0, durationMs - idleMs - offlineMs)
+  // The ONLINE WALL denominator, computed ONCE for every rate below that divides by it (JOS-288's
+  // `wallMs` — see that function for why it is not spelled out four times).
+  const wall = wallMs({ durationMs, offlineMs })
   const ctx: FoldCtx = { segs, rows, of, t0, t1 }
   const kills = foldKills(snap, ctx)
   const exp = foldExp(snap, ctx)
   finishRows(rows)
   const unknown = levelsUnknown(exp.expSamples, exp.expUnstated)
   let aaGained = 0
-  const aaLo = lowerBound(snap.aaGainTs, t0)
-  const aaHi = lowerBound(snap.aaGainTs, t1)
-  for (let i = aaLo; i < aaHi; i++) aaGained += snap.aaGainAmount[i]
+  let aaEvents = 0
+  for (let i = lowerBound(snap.aaGainTs, t0); i < lowerBound(snap.aaGainTs, t1); i++) {
+    if (segAt(segs, snap.aaGainTs[i]) < 0) continue
+    aaGained += snap.aaGainAmount[i]
+    aaEvents++
+  }
   return {
     t0,
     t1,
@@ -612,18 +569,23 @@ export function rangeStats(args: RangeStatsArgs): RangeStats {
     offlineMs,
     offlineGaps: offline.length,
     ...kills,
-    killsWitnessed: lowerBound(snap.witnessTs, t1) - lowerBound(snap.witnessTs, t0),
+    killsWitnessed: witnessedIn(snap, ctx, filtered),
     ...exp,
     levelsPerHourActive: unknown ? null : perHour(exp.levelEquiv, activeMs),
     // ONLINE wall (duration - offline): a rate whose denominator counted a logout is a
     // statement about an empty chair. See the field's doc.
-    levelsPerHourWall: unknown ? null : perHour(exp.levelEquiv, durationMs - offlineMs),
+    levelsPerHourWall: unknown ? null : perHour(exp.levelEquiv, wall),
     killsPerHourActive: perHour(kills.kills, activeMs),
-    ...levelSeriesIn(snap, t0, t1),
+    killsPerHourWall: perHour(kills.kills, wall),
+    ...levelSeriesIn(snap, ctx),
     aaGained,
-    aaGainEvents: aaHi - aaLo,
-    aaPerHourActive: perHour(aaHi - aaLo, activeMs),
+    aaGainEvents: aaEvents,
+    aaPerHourActive: perHour(aaEvents, activeMs),
     aaPointsPerHourActive: perHour(aaGained, activeMs),
+    // The wall halves (JOS-288). Same numerators, the other honest denominator — so a surface can
+    // show the pair the way the loot ledger shows its pair, and neither reading passes for the other.
+    aaPerHourWall: perHour(aaEvents, wall),
+    aaPointsPerHourWall: perHour(aaGained, wall),
     zones: rows,
     combos: combo ? combo.intervalsIn(t0, t1) : [],
     clipped: snap.windowStart > 0 && t0 < snap.windowStart

@@ -66,6 +66,103 @@ export function pxToUser(cssX: number, rectW: number, w = CHART_W): number {
 }
 
 /**
+ * A chart's VERTICAL mapping: the value domain it plots and the user-unit band it plots it in.
+ *
+ * WHY THIS EXISTS (JOS-339). Both charts computed their y domain inline as "the data, exactly",
+ * and at a short window that is a picture of nothing: the AA chart's top was the last point's own
+ * value, so the line was pinned FLAT AGAINST THE TOP EDGE of an empty box, and the level chart's
+ * was `[lowest ding - 1, ceil(highest)]`, which spends one whole level below a curve that never
+ * goes there and rounds up to another above it — a hairline staircase in dead space. Neither
+ * number was wrong; both pictures were unreadable.
+ *
+ * The rules that replace them are DIFFERENT ON PURPOSE, and the difference is what each axis
+ * measures — see `paddedAxis` and `levelAxis` below. They are here, pure, so the shape of a short
+ * window is a thing tests can state (tests/levelChartAxis.test.mts) rather than a thing a reviewer
+ * has to squint at.
+ */
+export interface YAxis {
+  /** the value at the BOTTOM of the drawn band. */
+  lo: number
+  /** the value at the TOP of the drawn band. */
+  hi: number
+  /** user-unit y of `hi` — the top inset the caller reserved (band strip, labels). */
+  top: number
+  /** user-unit y of `lo` — the bottom inset. */
+  bottom: number
+}
+
+/** The user-unit band a chart draws its values inside. */
+export interface PlotBand {
+  top: number
+  bottom: number
+}
+
+/** Value -> user units. The one y mapping both charts use, so a value and a label cannot disagree
+ *  about where they are. */
+export function yOf(a: YAxis, v: number): number {
+  const span = a.hi > a.lo ? a.hi - a.lo : 1
+  return a.bottom - ((v - a.lo) / span) * (a.bottom - a.top)
+}
+
+export interface PadOpts {
+  /** the narrowest domain worth drawing — a window whose data does not move still needs a box. */
+  minSpan: number
+  /** headroom at each end, as a fraction of the span. */
+  padFrac: number
+  /** …and never less than this, in the value's own units. */
+  minPad: number
+  /** a value the domain may not go below — 0 for a cumulative total, which cannot be negative. */
+  floor?: number
+}
+
+/**
+ * A PROPORTIONALLY PADDED axis: the data, plus headroom above and below.
+ *
+ * This is the rule for a running total (the AA chart). Cumulative AA has no natural quantum to
+ * snap an axis to — 442 is not a boundary of anything — so the honest treatment is to draw the
+ * range the window actually covers and leave air at both ends, which is the difference between a
+ * line pinned to the frame and a line with somewhere to have come from and somewhere to go.
+ *
+ * `minPad` is what makes a SMALL INTEGER domain readable: +2 AA over a window is a span of 2, and
+ * 12% of 2 is a quarter of one point — visually nothing. The floor of 0.35 gives that window real
+ * headroom without snapping the domain out to whole numbers, which would halve the staircase it
+ * exists to show. A window with NO gain at all grows to `minSpan` about its own midpoint, so the
+ * flat line sits across the MIDDLE of the box instead of glued to its bottom edge.
+ */
+export function paddedAxis(dataLo: number, dataHi: number, band: PlotBand, opts: PadOpts): YAxis {
+  const mid = (dataLo + dataHi) / 2
+  const span = Math.max(dataHi - dataLo, opts.minSpan)
+  const pad = Math.max(span * opts.padFrac, opts.minPad)
+  const lo = mid - span / 2 - pad
+  return {
+    lo: opts.floor !== undefined ? Math.max(lo, opts.floor) : lo,
+    hi: mid + span / 2 + pad,
+    top: band.top,
+    bottom: band.bottom
+  }
+}
+
+/**
+ * A WHOLE-LEVEL axis: the bar you are filling, and the one above it.
+ *
+ * This is the rule for the level chart, and it is deliberately not the padded one. A level HAS a
+ * natural quantum: the fractional curve is `last ding + the percentages since it`, so the
+ * meaningful bounds are the whole levels either side of it. Snapping to them makes the axis mean
+ * something ("this is level 22's bar, filling toward 23") instead of being an arbitrary window on
+ * a number line.
+ *
+ * IT ALSO MAKES THE LABELS TRUE. The chart already prints these two integers at the top and bottom
+ * of the plot; before this rule the bottom one sat at a floor that was actually `lo - 1`, so the
+ * printed axis and the drawn axis disagreed by a whole level. Nothing the chart states changes —
+ * the same two numbers are printed — they are simply where they say they are, and the curve gets
+ * the whole box instead of the middle fifth of it.
+ */
+export function levelAxis(dataLo: number, dataHi: number, band: PlotBand): YAxis {
+  const lo = Math.floor(dataLo)
+  return { lo, hi: Math.max(Math.ceil(dataHi), lo + 1), top: band.top, bottom: band.bottom }
+}
+
+/**
  * The level in effect at `ts`, HONESTLY.
  *
  * The `swap-gap` arm deliberately carries NO `level` field: between the last ding of one
@@ -162,7 +259,7 @@ export function cumulativeAt(points: readonly { ts: number; y: number }[], ts: n
  * for the same span; there is no fourth elapsed formatter in this feature.
  */
 export function fmtDelta(ms: number): string {
-  if (ms <= 0) return '—'
+  if (ms <= 0) return '-'
   const mins = ms / 60000
   if (mins < 60) return `${Math.round(mins)}m`
   const hrs = mins / 60

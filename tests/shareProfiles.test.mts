@@ -417,7 +417,45 @@ test('scalar changes are reported only when they actually differ', () => {
     ui: { 'eq.combat.scope': 'overall' }
   })
   const ids = changes.map((c) => c.id).sort()
-  assert.deepEqual(ids, ['alertPrefs.muted', 'overlay.fight.bgAlpha'])
+  // `overlayBgAlpha.shared` is there because this body is an OLD one (JOS-407): it carries per-kind
+  // alphas and no preference, so the planner reads the sender's mode off the values themselves —
+  // one value, therefore unanimous, therefore synced at 90% against this machine's 72%. Its
+  // `independent` twin offers no row: both sides are Off, and a row nobody would change is noise.
+  assert.deepEqual(ids, ['alertPrefs.muted', 'overlay.fight.bgAlpha', 'overlayBgAlpha.shared'])
+})
+
+test('the global always-play preference travels, and an OLD bundle offers no row for it', () => {
+  // JOS-222. It is written only when true (store, export and wire all agree), so "absent" and
+  // "off" have to read as the same thing — otherwise every share string written before the
+  // preference existed would arrive asking the user to turn something off.
+  const off = buildSettingsBody({ alerts: [], alertPrefs: { globalVolume: 0.7, muted: false } })
+  assert.equal('alwaysPlayAll' in (off.alertPrefs ?? {}), false, 'off is absent, byte for byte')
+  const on = buildSettingsBody({
+    alerts: [],
+    alertPrefs: { globalVolume: 0.7, muted: false, alwaysPlayAll: true }
+  })
+  assert.equal(on.alertPrefs?.alwaysPlayAll, true)
+
+  const ctx = {
+    alertPrefs: { globalVolume: 0.7, muted: false },
+    overlays: {},
+    ui: {}
+  }
+  // A pre-JOS-222 bundle: nothing to opt into.
+  assert.deepEqual(planScalarChanges(off, ctx).map((c) => c.id), [])
+  // A bundle from someone who turned it on: one row, false → true.
+  const rows = planScalarChanges(on, ctx)
+  assert.deepEqual(rows.map((c) => c.id), ['alertPrefs.alwaysPlayAll'])
+  assert.deepEqual(
+    { current: rows[0]?.current, incoming: rows[0]?.incoming },
+    { current: 'false', incoming: 'true' }
+  )
+  // …and the row exists in the other direction too, so an import can turn it back OFF.
+  const backOff = planScalarChanges(off, {
+    ...ctx,
+    alertPrefs: { globalVolume: 0.7, muted: false, alwaysPlayAll: true }
+  })
+  assert.deepEqual(backOff.map((c) => c.id), ['alertPrefs.alwaysPlayAll'])
 })
 
 test('list-shaped UI prefs union additively; nothing you had is dropped', () => {

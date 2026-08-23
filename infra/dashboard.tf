@@ -34,11 +34,13 @@ locals {
     height = 6
 
     properties = {
-      title  = "Telemetry pulse — events/min and live sessions"
+      title  = "Telemetry pulse — events per 5 min and live sessions"
       region = local.dashboard_region
       view   = "timeSeries"
       stat   = "Sum"
-      period = 60
+      # JOS-269 moved the client flush to 5 minutes; a 60s Sum over a 5-minute
+      # cadence reads as spikes-and-zeroes. One bar per flush window instead.
+      period = 300
 
       metrics = [
         ["EQCompanion/Telemetry", "EventsAccepted", "Channel", "prod"],

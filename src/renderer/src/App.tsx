@@ -1,18 +1,34 @@
 import { type JSX, useEffect, useState } from 'react'
-import { Box, CssBaseline, Snackbar, Alert } from '@mui/material'
-import ShieldMoonIcon from '@mui/icons-material/ShieldMoon'
-import EmojiEventsIcon2 from '@mui/icons-material/EmojiEvents'
-import type { AppFocus, CharacterRef } from '@shared/types'
+import { Box, CssBaseline } from '@mui/material'
+import type { AppFocus, CharacterDelta, CharacterRef, CharacterSnap } from '@shared/types'
 import TitleBar from './components/TitleBar'
 import NavDrawer from './components/NavDrawer'
+// The gear area's in-area tab bar (JOS-324) — four views behind one nav row. It sits ABOVE the
+// scrolling content box rather than inside it, so it stays put under a long table and so the
+// views' own `height: 100%` still means "the content area", not "the content area minus a bar".
+import GearAreaTabs from './components/GearAreaTabs'
+// The two app-wide celebration snackbars — they fire on ANY tab, so they live at app level. Their
+// markup moved into its own file when this one hit the factoring ceiling (see its header).
+import CelebrationToasts from './components/CelebrationToasts'
+// "Another character's log is active — switch?" (JOS-432). Self-contained: it subscribes to its own
+// push and switches through the same `character:set` IPC the title bar uses, so the shell gains an
+// element and no state. Main guarantees it can ask at most once per candidate log per app session.
+import LogSwitchNudge from './components/LogSwitchNudge'
 import NoLogsEmptyState from './components/NoLogsEmptyState'
-import { VIEW_KEY, loadView, type View } from './appViews'
+import { VIEW_KEY, isGearAreaView, loadView, rememberGearTab, type View } from './appViews'
 // The app's navigation MODEL — the deep-link routers and their nonce contract. See appRouting.ts.
 import { useAppRouting, usePrefsRouting, type AppRouting, type PrefsRouting } from './appRouting'
+// The mouse's Back button (JOS-201): the app-level answer, behind whatever drill is on screen.
+import { useBackFallback } from './appBack'
 import PoskyView from './features/posky/PoskyView'
 import LootView from './features/loot/LootView'
 import LevelingView from './features/leveling/LevelingView'
 import PlannerView from './features/planner/PlannerView'
+import GearView from './features/gear/GearView'
+// The gear area's third tab (JOS-324). A placeholder panel until JOS-326 fills it, and imported
+// plainly rather than lazily: it is a heading and two sentences, which is cheaper than the code
+// that would defer it.
+import WishlistView from './features/wishlist/WishlistView'
 import BossView from './features/bosses/BossView'
 import MobsView from './features/mobs/MobsView'
 import MapsView from './features/maps/MapsView'
@@ -20,7 +36,13 @@ import CombatView from './features/combat/CombatView'
 import OverviewView from './features/overview/OverviewView'
 import AlertsView from './features/alerts/AlertsView'
 import BuffsView from './features/buffs/BuffsView'
+import TimersView from './features/timers/TimersView'
 import PreferencesView from './features/preferences/PreferencesView'
+// TWO FACTS THE PREFERENCES SNAPSHOT CANNOT LEARN FROM A CARD: what the X does (JOS-139 — the tray
+// menu carries the same checkbox) and WHICH OVERLAYS ARE OPEN (JOS-408 — the title bar's Overlay
+// menu opens them, and the Appearance rows tag a closed one). Both are recorded HERE, at the root.
+// See the effect.
+import { peekPrefsSnapshot, recordPref } from './features/preferences/prefsSnapshot'
 import FeedbackDialog from './features/feedback/FeedbackDialog'
 // OWNER-ONLY. `devTriage` holds the single `DEV_TOOLS ? lazy(() => import(…)) : null` — the
 // STRIP, which is a compile-time question and stays on `DEV_TOOLS`; in a build without the flag
@@ -28,10 +50,12 @@ import FeedbackDialog from './features/feedback/FeedbackDialog'
 // it. WHETHER TO SHOW IT is a second question and a runtime one (`OWNER_TOOLS`, JOS-72). See
 // devTriage.tsx / devFlags.ts.
 import DevTriageView from './devTriage'
-// UNRELEASED (JOS-45). Same shape, different axis: a product surface awaiting the owner's
-// review rather than operator tooling. See unreleasedCharacter.tsx / devFlags.ts.
-import UnreleasedCharacterView from './unreleasedCharacter'
-import { OWNER_TOOLS, UNRELEASED } from './devFlags'
+// The CHARACTER SHEET (JOS-45, released JOS-327). It used to come through `unreleasedCharacter.tsx`
+// — a `UNRELEASED ? lazy(() => import(…)) : null` twin of `devTriage` above, whose whole job was to
+// keep the tree out of packaged bytes. The owner released the tab, so that file is gone and this is
+// an ordinary static import like the eleven views above it.
+import CharacterView from './features/character/CharacterView'
+import { OWNER_TOOLS } from './devFlags'
 import { useFeedbackDialog, type FeedbackPrefill } from './features/feedback/useFeedback'
 // Usage analytics (docs/plans/usage-analytics.md). The notice is mounted unconditionally and
 // renders nothing once it has been answered; `useViewDwell` reports how long each tab was on
@@ -42,6 +66,8 @@ import { TelemetryNotice } from './features/preferences/TelemetryNotice'
 // the bottom edge, never a modal — and renders nothing unless this launch is the first one after
 // an update. See features/whatsnew/WhatsNewTeaser.tsx.
 import { WhatsNewTeaser } from './features/whatsnew/WhatsNewTeaser'
+import { setCurrentView } from './lib/currentView'
+import { useModule } from './lib/useModule'
 import { dwellView, useViewDwell } from './lib/telemetry'
 import AlertPlayer, { fireAppSignal } from './features/alerts/player'
 import { getBossData } from './data'
@@ -73,7 +99,8 @@ function PlainView({
   view,
   viewKey,
   routing,
-  onOpenVoicePrefs
+  onOpenVoicePrefs,
+  onOpenOverlayPrefs
 }: {
   view: View
   viewKey: string
@@ -81,6 +108,9 @@ function PlainView({
   /** CONTRACT with the alerts wave: AlertsView's optional "take me to the voice settings" hook.
    *  Spread rather than named so this tree compiles whether or not that prop exists yet. */
   onOpenVoicePrefs: () => void
+  /** The same contract for Preferences → Overlays (JOS-378): the alert editor's on-screen block
+   *  links there when the banner overlay is off. */
+  onOpenOverlayPrefs: () => void
 }): JSX.Element {
   return (
     <>
@@ -115,14 +145,30 @@ function PlainView({
           remount `key` is the whole character contract. The one prop it takes is the app's own
           router — every donor name in the pane links OUT to that item's Loot drill-down. */}
       {view === 'planner' && <PlannerView key={viewKey} onOpenLoot={routing.openLoot} />}
+      {/* GEAR (JOS-284) takes the same one prop and for the same reason: the table reads the
+          committed corpus, which is character-independent, so the remount `key` is the whole
+          character contract and every item name links OUT to that item's Loot drill-down — which
+          is where the per-item tier block is drawn. */}
+      {view === 'gear' && <GearView key={viewKey} onOpenLoot={routing.openLoot} />}
+      {/* WISH LIST (JOS-324's tab, JOS-326's feature) — one flat list of items this character has
+          decided they want, grouped by where to go and get them. Keyed like the rest because a
+          wish list is a CHARACTER's: the rebuild counter is how this app says that, and the
+          remount is what re-reads the store under the new one. The one prop is the app's router —
+          every wish name links OUT to that item's Loot drill-down, the same contract the
+          Exaltations tab's donor names use, so the drill's Back arrow comes home here. */}
+      {view === 'wishlist' && <WishlistView key={viewKey} onOpenLoot={routing.openLoot} />}
       {view === 'buffs' && <BuffsView key={viewKey} />}
-      {view === 'alerts' && <AlertsView key={viewKey} {...{ onOpenVoicePrefs }} />}
-      {/* UNRELEASED (JOS-45). It sits HERE, below the no-characters gate, and not beside the
-          triage branch: unlike triage this tab reads the game log (name, level, loadout) and
-          the character's own inventory dump, so a machine with no EverQuest install has
-          nothing to show it. `UNRELEASED` folds to a literal in every build, so the branch and
-          the lazily-imported tree behind it are deleted from shipped bytes. */}
-      {UNRELEASED && view === 'character' && <UnreleasedCharacterView key={viewKey} />}
+      {/* Respawn clocks (JOS-194). Character-scoped like the rest: the remount `key` is the
+          whole contract, since the watch list lives in the store and the clocks are re-derived
+          by the fold the character switch kicks off. */}
+      {view === 'timers' && <TimersView key={viewKey} />}
+      {view === 'alerts' && <AlertsView key={viewKey} {...{ onOpenVoicePrefs, onOpenOverlayPrefs }} />}
+      {/* CHARACTER (JOS-45, released JOS-327). It sits HERE, below the no-characters gate, and not
+          beside the triage branch: unlike triage this tab reads the game log (name, level, loadout)
+          and the character's own inventory dump, so a machine with no EverQuest install has nothing
+          to show it. Keyed like the rest — the sheet and its carry-all ledger are one character's,
+          and the remount is how this app says that. */}
+      {view === 'character' && <CharacterView key={viewKey} />}
     </>
   )
 }
@@ -170,6 +216,7 @@ function ViewContent({
         viewKey={viewKey}
         routing={routing}
         onOpenVoicePrefs={() => prefs.openSection('voice')}
+        onOpenOverlayPrefs={() => prefs.openSection('overlays')}
       />
       {/* The Mobs tab stays MOUNTED across a deep link (no `key` churn on target
           change) — remounting per character rebuild only, like every other view. */}
@@ -223,57 +270,6 @@ function ViewContent({
   )
 }
 
-/** The two app-wide celebration toasts — they fire on ANY tab, so they live at app level. */
-function CelebrationToasts({
-  defeatToast,
-  questToast,
-  onDismissDefeat,
-  onDismissQuest
-}: {
-  defeatToast: TargetStatus | null
-  questToast: string | null
-  onDismissDefeat: () => void
-  onDismissQuest: () => void
-}): JSX.Element {
-  return (
-    <>
-      <Snackbar
-        open={!!defeatToast}
-        autoHideDuration={6000}
-        onClose={onDismissDefeat}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-      >
-        <Alert
-          severity="success"
-          variant="filled"
-          icon={<EmojiEventsIcon2 fontSize="inherit" />}
-          onClose={onDismissDefeat}
-          sx={{ alignItems: 'center' }}
-        >
-          Raid target defeated: {defeatToast?.target.name}!
-        </Alert>
-      </Snackbar>
-
-      <Snackbar
-        open={!!questToast}
-        autoHideDuration={6000}
-        onClose={onDismissQuest}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-      >
-        <Alert
-          severity="success"
-          variant="filled"
-          icon={<ShieldMoonIcon fontSize="inherit" />}
-          onClose={onDismissQuest}
-          sx={{ alignItems: 'center' }}
-        >
-          Quest complete: {questToast}
-        </Alert>
-      </Snackbar>
-    </>
-  )
-}
-
 /**
  * The two ALWAYS-MOUNTED celebration watches, so both fire on any tab.
  *
@@ -312,28 +308,45 @@ function useAppCelebrations(
   // every level the character ever gained) and joins its counts to the combo at the ding's ts.
   useLevelUpToast()
 
+  // WHERE YOU ARE, from the module that owns that question (the ZoneStrip precedent). Read as a
+  // plain value, not a ref: `useBossKills` refreshes its callback from every render before its
+  // effect runs, so the closure below always holds the zone of the render the kill arrived in.
+  const zone = useModule<CharacterSnap, CharacterDelta>('character', (s, d) => ({ ...s, ...d }))?.zone
+
   useBossKills(bossData.targets, {
-    onKill: (s) => {
+    // THE TIER OF THIS KILL, AND THE INSTANCE IT HAPPENED IN (JOS-165). This block used to print
+    // `tierStyle(s.bestTier)` and the roster's static zone — the target's ALL-TIME summary, which
+    // is the right thing for the boss card and a false sentence on a per-event toast: the owner
+    // clears d0 through d4 every week, so a Sunday d1 kill announced itself "D4 · Refined" all
+    // the way back to the first Saturday he beat it at d4. The tier now comes off the KILL
+    // (bossStatus.BossKill) and the zone off the CHARACTER module, so the toast says the instance
+    // you were standing in — raw, as the game spells it (law 2), which is also the only way to
+    // tell "- Solo 1 (Awakened)" from "- Group 2 (Awakened)". Only the toast changed: the card
+    // badge still means highest-ever, because a card is a summary.
+    onKill: ({ status: s, tier }) => {
       onDefeat(s)
       fireAppSignal('bossDefeat', s.target.name)
       window.eq.showToast({
         id: `boss:${s.target.name}:${String(s.lastTs)}`,
         kind: 'bossKill',
         title: `${s.target.name} defeated`,
-        subtitle: [tierStyle(s.bestTier).long, s.target.zone].filter(Boolean).join(' · ')
+        // A zone we have never seen a line for falls back to the roster's — never invented.
+        subtitle: [tierStyle(tier).long, zone ?? s.target.zone].filter(Boolean).join(' · ')
       })
     }
   })
 
   useProgress({
-    onQuestComplete: (q) => {
+    onQuestComplete: (q, count) => {
       onQuestComplete(q.name)
       fireAppSignal('questComplete', q.name)
       // The celebration toast (docs/plans/celebration-toasts.md T4) rides the SAME detector as
       // the sound and the snackbar — one live-only gate, three surfaces. The reward is sent by
       // NAME; main resolves the item card, because the overlay fetches nothing.
+      // THE COUNT IS IN THE ID (JOS-131): a Sky quest can be run again, and the overlay keys its
+      // cards by id, so the second turn-in of one quest has to be a second card.
       window.eq.showToast({
-        id: `quest:${q.className}::${q.name}`,
+        id: `quest:${q.className}::${q.name}#${String(count)}`,
         kind: 'skyQuestComplete',
         title: `Quest complete: ${q.name}`,
         subtitle: q.giver ? `${q.className} · turned in to ${q.giver}` : q.className,
@@ -366,6 +379,45 @@ function useAppCelebrations(
  * A component rather than two lines in App because App is at its factoring ceiling — and because
  * "what may appear along the bottom" is a real thing to be able to read in one place.
  */
+/**
+ * THE CONTENT COLUMN: everything to the right of the nav drawer, in the two pieces it has.
+ *
+ * `app-content` is the app's ONE scroller between a view and the window — every feature view sizes
+ * itself with `height: 100%` against it, and a long list clips inside its own box rather than
+ * growing the page (the Task-#56 law, measured by `pageOverflow` in half the e2e suite).
+ *
+ * ABOVE it, and deliberately OUTSIDE it, sits the gear area's tab bar (JOS-324): four views behind
+ * one nav row need a header, and a header inside the scroller would both slide away under a long
+ * table and silently eat the height that every `height: 100%` is measured against — turning that
+ * page-overflow assertion red across four unrelated specs. Out here it is a fixed band and the
+ * scroll box simply flexes into what is left. Its clicks go through `selectView`, the same MANUAL
+ * navigator the nav rows use, so the Back stack reads a tab switch as exactly what it is.
+ *
+ * A component rather than two nested boxes in App for the reason `BottomStrips` is one: App sits
+ * at the measured 100-code-line function ceiling, and this is a self-contained piece of shell.
+ */
+function MainColumn({
+  view,
+  onSelect,
+  children
+}: {
+  view: View
+  onSelect: (v: View) => void
+  children: JSX.Element
+}): JSX.Element {
+  return (
+    <Box
+      component="main"
+      sx={{ flexGrow: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+    >
+      {isGearAreaView(view) && <GearAreaTabs view={view} onSelect={onSelect} />}
+      <Box data-testid="app-content" sx={{ flexGrow: 1, overflow: 'auto', p: 2 }}>
+        {children}
+      </Box>
+    </Box>
+  )
+}
+
 function BottomStrips({ prefs }: { prefs: PrefsRouting }): JSX.Element {
   return (
     <>
@@ -430,6 +482,38 @@ function applyDeepLink(focus: AppFocus | null, open: DeepLinkOpeners): void {
   else open.selectView('mobs')
 }
 
+/**
+ * THE TWO PREFERENCES FACTS THAT CHANGE WHERE THE PREFERENCES PANE CANNOT SEE THEM.
+ *
+ * The pane's cards seed from a warm snapshot (JOS-340, features/preferences/prefsSnapshot.ts) and
+ * that cache is otherwise only ever written by a card's OWN reply — so anything moved from another
+ * surface would be invisible in the pane until the next launch. Two things are:
+ *
+ *   * WHAT THE X DOES (JOS-139). The tray icon's menu carries the same checkbox, and it is used
+ *     precisely while this window is hidden.
+ *   * WHICH OVERLAYS ARE OPEN (JOS-408). The Appearance section's rows tag a row whose window is
+ *     closed — the one control there whose honest answer to "what does pressing this change on
+ *     screen" is "nothing yet" — and the thing that opens those windows is the TITLE BAR's Overlay
+ *     menu, used with Preferences nowhere in sight. The card subscribes too, for a pane that is
+ *     already open; this is what makes the NEXT mount right.
+ *
+ * Its own function rather than two more `const off…`s inside App's effect: that component is at the
+ * repo's 100-code-line-per-function ceiling, and these two subscriptions are one idea.
+ */
+function keepPrefsSnapshotCurrent(): () => void {
+  const offTray = window.eq.onCloseToTray((p) => {
+    recordPref('closeToTray', p)
+  })
+  const offOverlays = window.eq.onOverlayState((s) => {
+    const cur = peekPrefsSnapshot()?.overlayOpen
+    if (cur) recordPref('overlayOpen', { ...cur, [s.kind]: s.open })
+  })
+  return () => {
+    offTray()
+    offOverlays()
+  }
+}
+
 export default function App(): JSX.Element {
   const [view, setView] = useState<View>(loadView)
   const [character, setCharacter] = useState<CharacterRef | null>(null)
@@ -451,19 +535,39 @@ export default function App(): JSX.Element {
   const routing = useAppRouting(view, setView)
   const prefsRouting = usePrefsRouting(view, routing.selectView)
   const { openMob, openQuest, openLeveling, selectView } = routing
+  // The mouse's Back button, when no drill on screen claimed it (JOS-201): the SAME parked-origin
+  // walk every Back affordance in the app reads. `back()` reports whether it navigated, so a press
+  // with nothing parked is a no-op rather than a surprise tab switch.
+  useBackFallback(routing.nav.back)
 
   useAppCelebrations(setDefeatToast, setQuestToast)
 
-  // Remember the selected tab across launches (renderer-only).
+  // Remember the selected tab across launches (renderer-only) — and, when that tab is one of the
+  // gear area's four, remember it a SECOND time as the area's last-used tab (JOS-324). Two keys
+  // because they answer two questions: `eq.view` is "where was I", which relaunch restores, while
+  // `eq.gear.tab` is "which door does the Gear nav row open", which has to survive visits to every
+  // other tab in the app. Written here rather than in the tab bar's click handler so that arriving
+  // by deep link or by Back counts as using the tab, which is what a reader means by last-used.
   useEffect(() => {
     localStorage.setItem(VIEW_KEY, view)
+    rememberGearTab(view)
   }, [view])
 
   // How long each tab was on screen, reported ON SWITCH (plan §2). `View` and the schema's
-  // `viewDwell` enum are the same set apart from the UNRELEASED views, which report nothing:
-  // widening the enum before the ingest Lambda is deployed would 400 the whole batch and drop
-  // every counter with it (JOS-45; `dwellView` states the rule).
+  // `viewDwell` enum are the SAME SET as of JOS-327, which released the last view that was held out
+  // of it — `dwellView` still folds an unknown id to `null` rather than reporting it, because
+  // widening the enum before the ingest Lambda is deployed would 400 the whole batch and drop every
+  // counter with it. `tests/telemetryContract.test.mts` pins the equality in both directions.
   useViewDwell(dwellView(view))
+
+  // …and the same fact, kept for the ERROR reporter (JOS-100). It is a separate mechanism on
+  // purpose: `useViewDwell` reports the view you LEFT, on a switch, which is exactly the wrong
+  // answer for "which tab was open when it broke". This is a plain module variable because its
+  // readers — the global error handlers in main.tsx and ErrorBoundary — run at moments when the
+  // React tree is not something to rely on. A view the schema has not learned would set it too and
+  // be folded to `unknown` by main's closed-enum check, which is the right outcome: an error there
+  // is worth reporting even though the view id is not.
+  setCurrentView(view)
 
   useEffect(() => {
     void window.eq.getCharacter().then(setCharacter)
@@ -487,11 +591,13 @@ export default function App(): JSX.Element {
     const offFocus = window.eq.onFocusView((focus) =>
       applyDeepLink(focus, { openMob, openQuest, openLeveling, selectView })
     )
+    const offPrefs = keepPrefsSnapshotCurrent()
     return () => {
       offDelta()
       offChar()
       offEqConfig()
       offFocus()
+      offPrefs()
     }
   }, [openMob, openQuest, openLeveling, selectView])
 
@@ -513,32 +619,29 @@ export default function App(): JSX.Element {
         character={character}
         characters={characters}
         onSelectCharacter={(logPath) => void selectCharacter(logPath, onCharacterSwitched)}
-        onOpenPreferences={() => selectView('preferences')}
       />
 
       {/* Everything below the bar: nav drawer + main content, side by side. */}
       <Box sx={{ display: 'flex', flexGrow: 1, minHeight: 0 }}>
         {/* MANUAL navigation: `selectView`, not the raw setter — the user choosing a tab by hand
             is also the user ending whatever deep-link journey was parked (navOrigin.ts). */}
-        <NavDrawer view={view} onSelect={selectView} onSendFeedback={() => feedback.openFeedback()} />
+        {/* …and it takes the prefs router the way `BottomStrips` does (JOS-254): the patch-notes
+            icon beside the version number in the chip at its foot opens a Preferences SECTION,
+            which is not a view, so the destination travels as the router rather than as a tab. */}
+        <NavDrawer view={view} onSelect={selectView} prefs={prefsRouting} onSendFeedback={() => feedback.openFeedback()} />
 
-        <Box
-          component="main"
-          sx={{ flexGrow: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
-        >
-          <Box sx={{ flexGrow: 1, overflow: 'auto', p: 2 }}>
-            <ViewContent
-              view={view}
-              hasCharacters={characters.length > 0}
-              viewKey={viewKey}
-              routing={routing}
-              prefs={prefsRouting}
-              onOpenPreferences={() => selectView('preferences')}
-              onOpenLeveling={() => openLeveling()}
-              onSendFeedback={feedback.openFeedback}
-            />
-          </Box>
-        </Box>
+        <MainColumn view={view} onSelect={selectView}>
+          <ViewContent
+            view={view}
+            hasCharacters={characters.length > 0}
+            viewKey={viewKey}
+            routing={routing}
+            prefs={prefsRouting}
+            onOpenPreferences={() => selectView('preferences')}
+            onOpenLeveling={() => openLeveling()}
+            onSendFeedback={feedback.openFeedback}
+          />
+        </MainColumn>
       </Box>
 
       {/* Always-mounted: plays fired alert sounds regardless of the active tab. */}
@@ -550,6 +653,8 @@ export default function App(): JSX.Element {
         onDismissDefeat={() => setDefeatToast(null)}
         onDismissQuest={() => setQuestToast(null)}
       />
+
+      <LogSwitchNudge />
 
       {/* Feedback is a DIALOG, not a view (appViews.ts is untouched), so it is hosted here and
           opened from the nav footer, from Preferences, and by the ErrorBoundary's "Report this"

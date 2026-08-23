@@ -34,12 +34,17 @@ function live(buckets: number[], asOfMs = 0): {
 }
 
 test('active now is the LAST COMPLETE bucket, and a period still filling is never it', () => {
-  // A 5-minute period containing `now` is still accumulating, and heartbeats reach CloudWatch
-  // through a 60-second flush loop besides — so "right now" is defined as the last FULL bucket,
-  // not as the newest datapoint the API will hand over.
+  // A bucket containing `now` is still accumulating, and heartbeats reach CloudWatch through a
+  // flush loop besides — so "right now" is defined as the last FULL bucket, not as the newest
+  // datapoint the API will hand over.
+  //
+  // THE OFFSETS BELOW ARE A BUCKET-LENGTH APART ON PURPOSE (JOS-269 took the bucket 5 min → 10 min
+  // with the heartbeat). Left at 3 min and 4:59 they would still have passed while testing nothing
+  // — both are now comfortably mid-bucket — so they are re-derived from BUCKET_MS instead of
+  // restated in minutes, and the last one lands one second short of the boundary wherever it is.
   const noon = Date.UTC(2026, 7, 10, 12, 0, 0)
   assert.equal(lastCompleteBucketEnd(noon + 3 * 60_000), noon)
-  assert.equal(lastCompleteBucketEnd(noon + 4 * 60_000 + 59_000), noon)
+  assert.equal(lastCompleteBucketEnd(noon + BUCKET_MS - 1_000), noon)
   assert.equal(lastCompleteBucketEnd(noon + BUCKET_MS), noon + BUCKET_MS)
 
   assert.equal(live([1, 2, 9]).activeNow, 9)
@@ -55,8 +60,8 @@ test('NOBODY ALIVE has no age — a zero there would read as "everyone just arri
 
 test('a session in its first bucket is zero old, and the estimate says so', () => {
   // Three sessions appear in the newest bucket with nothing before them: they are new. Reporting
-  // "5 min" because a bucket is five minutes long would be inventing the very precision the
-  // bucketing threw away.
+  // "10 min" because a bucket is that long would be inventing the very precision the bucketing
+  // threw away.
   const fresh = live([0, 0, 3])
   assert.equal(fresh.activeNow, 3)
   assert.equal(fresh.avgAgeMs, 0)
@@ -65,7 +70,8 @@ test('a session in its first bucket is zero old, and the estimate says so', () =
 
 test('a steady fleet ages by exactly one bucket per bucket it has been sustained', () => {
   // Two sessions, alive in four consecutive buckets: three prior buckets each contribute their
-  // full overlap, so the mean age is 3 buckets = 15 minutes.
+  // full overlap, so the mean age is 3 buckets — 30 minutes at today's 10-minute bucket, and the
+  // assertion is written in BUCKETS so the arithmetic, not the cadence, is what it pins.
   const steady = live([2, 2, 2, 2])
   assert.equal(steady.activeNow, 2)
   assert.equal(steady.avgAgeMs, 3 * BUCKET_MS)

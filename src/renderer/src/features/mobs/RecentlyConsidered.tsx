@@ -26,8 +26,9 @@
 
 import type { JSX } from 'react'
 import { Box, Chip, Paper, Stack, Typography } from '@mui/material'
-import type { ConsiderDelta, ConsiderRow, ConsiderSnap, KillMap } from '@shared/types'
+import type { ConsiderDelta, ConsiderRow, ConsiderSnap } from '@shared/types'
 import { CONSIDER_FACTION_LABEL } from '@shared/logEvents'
+import { mobDropNames, splitMobDrops } from '@shared/mobDrops'
 import { KnownItemTooltip } from '../../lib/KnownItemTooltip'
 import { formatAge, formatDateTime } from '../../lib/formatDate'
 import type { MobTarget } from './mobTarget'
@@ -44,8 +45,16 @@ export function applyConsiderDelta(state: ConsiderSnap, delta: ConsiderDelta): C
   return [...byId.values()].sort((a, b) => a.ts - b.ts)
 }
 
-/** The MobTarget a considered row opens — everything the log line and the enrichment knew. */
-export function considerTarget(r: ConsiderRow, kills: KillMap): MobTarget {
+/**
+ * The MobTarget a considered row opens — everything the log line and the enrichment knew.
+ *
+ * NO KILL FACTS (JOS-350). It used to attach `kills[r.mob.trim().toLowerCase()]` under a comment
+ * claiming that was "the same fold `mobKey` applies" — it was not; it was `idKey`, which folds
+ * neither the spawn-generation ` (N)` suffix nor the three apostrophe glyphs. Rather than fix a
+ * fourth inline copy of a key, the page now joins its OWN name through `shared/kills.killsFor`,
+ * so every surface that opens it reports the same count.
+ */
+export function considerTarget(r: ConsiderRow): MobTarget {
   return {
     mob: r.mob,
     seed: r.knowledge,
@@ -56,10 +65,7 @@ export function considerTarget(r: ConsiderRow, kills: KillMap): MobTarget {
       difficulty: r.difficulty,
       cons: r.cons,
       zone: r.zone
-    },
-    // The KillMap is keyed by the canonical lowercase name (KillInfo.display) — the same fold
-    // `mobKey` applies — so a considered mob finds its kills without a second index.
-    kill: kills[r.mob.trim().toLowerCase()]
+    }
   }
 }
 
@@ -67,22 +73,24 @@ export function considerTarget(r: ConsiderRow, kills: KillMap): MobTarget {
 interface RowDrops {
   /** every drop name, wiki-first */
   all: string[]
-  /** lowercased item name -> your own sighting (count) */
-  seenByKey: Map<string, { item: string; count: number }>
+  /** lowercased item name -> how many you have looted */
+  countByKey: Map<string, number>
 }
 
 /**
  * WIKI DROPS LEAD — the page's drop table is the definitive statement of what this can drop.
  * Your own history is corroboration: it annotates a listed drop with a count, and only
  * contributes NAMES of its own for items the page doesn't list.
+ *
+ * The split itself is `shared/mobDrops.ts`, which is the ONE fold over a `MobKnowledge` (JOS-194
+ * round 6 folded this strip, the event overlay's card and the respawn row's card onto it).
  */
 function rowDrops(k: ConsiderRow['knowledge']): RowDrops {
-  const seen = k?.dropsSeen ?? []
-  const seenByKey = new Map(seen.map((d) => [d.item.toLowerCase(), d]))
-  const wiki = (k?.dropsWiki ?? []).map((d) => d.item)
-  const wikiKeys = new Set(wiki.map((i) => i.toLowerCase()))
-  const all = [...wiki, ...seen.filter((d) => !wikiKeys.has(d.item.toLowerCase())).map((d) => d.item)]
-  return { all, seenByKey }
+  const split = splitMobDrops(k)
+  const countByKey = new Map<string, number>()
+  for (const d of split.wiki) if (d.seenCount !== undefined) countByKey.set(d.item.toLowerCase(), d.seenCount)
+  for (const d of split.extraSeen) countByKey.set(d.item.toLowerCase(), d.count)
+  return { all: mobDropNames(split), countByKey }
 }
 
 /** The `drops: a, b, c +N` tail of a row. Renders nothing when nothing is known (law 1). */
@@ -93,7 +101,7 @@ function DropsLine({ drops }: { drops: RowDrops }): JSX.Element | null {
     <Typography variant="caption" color="text.secondary" noWrap sx={{ minWidth: 0 }}>
       drops:{' '}
       {shown.map((item, i) => {
-        const mine = drops.seenByKey.get(item.toLowerCase())
+        const mine = drops.countByKey.get(item.toLowerCase())
         return (
           <Box component="span" key={item}>
             {i > 0 && ', '}
@@ -104,10 +112,10 @@ function DropsLine({ drops }: { drops: RowDrops }): JSX.Element | null {
               </Box>
             </KnownItemTooltip>
             {/* Corroboration rides ON the definitive row, never in place of it. */}
-            {mine && (
+            {mine !== undefined && (
               <Box component="span" sx={{ color: 'success.main' }}>
                 {' '}
-                ×{mine.count}
+                ×{mine}
               </Box>
             )}
           </Box>
@@ -134,7 +142,7 @@ function ConsiderRowView({ r, onOpen }: { r: ConsiderRow; onOpen: (r: ConsiderRo
 
   return (
     <Stack direction="row" spacing={1} alignItems="baseline" sx={{ py: 0.25, minWidth: 0 }}>
-      <Tooltip title={`${CONSIDER_FACTION_LABEL[r.faction]} — click to open its page`}>
+      <Tooltip title={`${CONSIDER_FACTION_LABEL[r.faction]} - click to open its page`}>
         <Typography
           variant="body2"
           role="button"
@@ -188,12 +196,10 @@ function ConsiderRowView({ r, onOpen }: { r: ConsiderRow; onOpen: (r: ConsiderRo
 
 export function RecentlyConsidered({
   rows,
-  kills,
   onOpen
 }: {
   /** the consider ring, oldest-first (the module's own order) — subscribed by the view */
   rows: ConsiderSnap
-  kills: KillMap
   onOpen: (t: MobTarget) => void
 }): JSX.Element | null {
   if (rows.length === 0) return null
@@ -208,7 +214,7 @@ export function RecentlyConsidered({
       </Typography>
       <Box sx={{ maxHeight: CONSIDER_STRIP_HEIGHT, overflow: 'auto' }}>
         {newestFirst.map((r) => (
-          <ConsiderRowView key={r.id} r={r} onOpen={(row) => onOpen(considerTarget(row, kills))} />
+          <ConsiderRowView key={r.id} r={r} onOpen={(row) => onOpen(considerTarget(row))} />
         ))}
       </Box>
     </Paper>

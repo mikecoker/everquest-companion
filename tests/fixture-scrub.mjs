@@ -13,11 +13,12 @@
 // this file's job is now only to bind the `selfName` parameter to the character whose log the
 // fixtures are cut from.
 //
-// THAT PARAMETER IS WHAT GATES THE JOS-52 CARVE-OUT for every extractor at once: `<Name> says,
-// 'My leader is Primitive.'` survives, a leader say naming anyone else does not. Only ONE such
-// line exists in the whole 1.4M-line log (Thu Aug 06 12:44:20) and only `extract-pet-claim`'s p2
-// window spans it, so no OTHER committed fixture changes if it is re-cut — verified rather than
-// assumed when the carve-out landed.
+// THE JOS-52 CARVE-OUT NO LONGER READS THAT PARAMETER (JOS-270, owner ruling 2026-08-13):
+// `<Name> says, 'My leader is <anyone>.'` survives for every reader now, because the leader's
+// name is a structural fact about the fight and already appears uncensored in every combat line
+// beside it. NO COMMITTED FIXTURE MOVES: only ONE such line exists in the whole 1.4M-line log
+// (Thu Aug 06 12:44:20, and it names Primitive) and only `extract-pet-claim`'s p2 window spans
+// it — verified rather than assumed, both when the carve-out landed and when it was un-gated.
 //
 // CONSEQUENCE FOR EXTRACTORS: because the shared module is TypeScript, the extractors must run
 // under the tsx loader —

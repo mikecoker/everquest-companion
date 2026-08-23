@@ -54,6 +54,12 @@ const EXCLUSIVE_BUCKETS = 2
 export interface ClassScore {
   cls: ClassAbbr
   exclusive: number
+  /**
+   * Distinct hourly buckets holding EXCLUSIVE evidence for this class — how far across the window
+   * the class's own unambiguous evidence reaches, as opposed to how many different names it went
+   * by. See `byStrength` for why this and not `exclusive` decides admission (JOS-239).
+   */
+  spread: number
   support: number
   sustain: number
   /** the distinct labels naming it, strongest source first — the slot's `because`. */
@@ -92,29 +98,69 @@ function foldLabels(observations: readonly ClassObservation[]): LabelFold[] {
   return [...byKey.values()]
 }
 
-/** Per-class exclusivity / support / sustain over a window's observations. */
+/** Union `hours` into a class's bucket set, creating it on first sight. */
+function addHours(into: Map<ClassAbbr, Set<number>>, cls: ClassAbbr, hours: ReadonlySet<number>): void {
+  const seen = into.get(cls) ?? new Set<number>()
+  for (const hour of hours) seen.add(hour)
+  into.set(cls, seen)
+}
+
+/** Per-class exclusivity / spread / support / sustain over a window's observations. */
 export function scoreClasses(observations: readonly ClassObservation[]): Map<ClassAbbr, ClassScore> {
   const scores = new Map<ClassAbbr, ClassScore>()
   const buckets = new Map<ClassAbbr, Set<number>>()
+  const exclusiveBuckets = new Map<ClassAbbr, Set<number>>()
   for (const fold of foldLabels(observations)) {
+    const exclusive = fold.candidates.length === 1
     for (const cls of fold.candidates) {
-      const s = scores.get(cls) ?? { cls, exclusive: 0, support: 0, sustain: 0, labels: [] }
-      if (fold.candidates.length === 1 && fold.buckets.size >= EXCLUSIVE_BUCKETS) s.exclusive += 1
+      const s = scores.get(cls) ?? { cls, exclusive: 0, spread: 0, support: 0, sustain: 0, labels: [] }
+      if (exclusive && fold.buckets.size >= EXCLUSIVE_BUCKETS) s.exclusive += 1
       s.support += fold.weight / fold.candidates.length
       s.labels.push(fold.display)
       scores.set(cls, s)
-      const b = buckets.get(cls) ?? new Set<number>()
-      for (const bucket of fold.buckets) b.add(bucket)
-      buckets.set(cls, b)
+      addHours(buckets, cls, fold.buckets)
+      // Spread counts every hour an UNAMBIGUOUS label put this class in the window, whether or not
+      // that particular label cleared the two-bucket bar on its own — the bar is what makes a class
+      // admissible at all (`exclusive >= 1`), and spread is then the reach of the whole body of
+      // exclusive evidence rather than of one name inside it.
+      if (exclusive) addHours(exclusiveBuckets, cls, fold.buckets)
     }
   }
-  for (const [cls, s] of scores) s.sustain = buckets.get(cls)?.size ?? 0
+  for (const [cls, s] of scores) {
+    s.sustain = buckets.get(cls)?.size ?? 0
+    s.spread = exclusiveBuckets.get(cls)?.size ?? 0
+  }
   return scores
 }
 
-/** Admission ranking: exclusivity first, support as the tie-break. Deterministic (code last). */
+/**
+ * Admission ranking: SPREAD first, exclusive-label count as the tie-break, then support.
+ * Deterministic (code last).
+ *
+ * WHY SPREAD AND NOT THE LABEL COUNT (JOS-239, and this is the third of the three fixes that
+ * ticket names). `exclusive` counts distinct NAMES — how many different unambiguous labels a class
+ * went by — which is a property of the class's spellbook, not of how long it was in the loadout. A
+ * caster who empties four different nukes into one evening scores 4; a paladin who lays hands and
+ * summons a steed across five days scores 2. MEASURED on the owner's polluted Aug 04-09 span, the
+ * one this ticket is about: WIZ had 4 exclusive labels in a single evening and PAL had 2 across the
+ * whole 4.5 days, so raw label count admitted a level-25 wizard over the class that was running the
+ * entire time — and the roster credited that wizard with a Lord Nagafen kill at D4. By spread the
+ * same window reads PAL 16 buckets against WIZ 6, and the class that was actually present wins.
+ *
+ * The count stays as the TIE-BREAK, which is where it is a good question: two classes present for
+ * the same hours are separated by how much unambiguous evidence each of them left.
+ *
+ * WHAT THIS DOES *NOT* FIX, stated so nobody expects it to. Spread is measured INSIDE one interval,
+ * so it says nothing about stale classes surviving a swap — that is the boundary's job (above, and
+ * `reinstatedDrops`). Where a boundary is MISSING, spread actively prefers the OLDER loadout,
+ * because weeks of it outreach one fresh evening. It is the right answer for attribution over a
+ * polluted span (the class that was there for most of it did most of the killing) and it is not a
+ * substitute for cutting the span.
+ */
 function byStrength(a: ClassScore, b: ClassScore): number {
-  return b.exclusive - a.exclusive || b.support - a.support || a.cls.localeCompare(b.cls)
+  return (
+    b.spread - a.spread || b.exclusive - a.exclusive || b.support - a.support || a.cls.localeCompare(b.cls)
+  )
 }
 
 /**

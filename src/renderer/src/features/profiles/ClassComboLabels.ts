@@ -21,7 +21,7 @@ import { formatDateTime } from '../../lib/formatDate'
 import { fmtDuration } from '../leveling/levelChartGeometry'
 
 /** Every unknown prints as this — the app's one spelling for "the log did not say". */
-export const NONE = '—'
+export const NONE = '-'
 
 /**
  * How many candidates make a slot UNKNOWN rather than merely ambiguous. Mirrors
@@ -82,8 +82,8 @@ export function provenanceLabel(p: ComboProvenance): string {
  */
 export function loadoutSourceText(interval: ComboInterval): string {
   const p = intervalProvenance(interval)
-  if (p === 'user') return 'Set by you — autodetection will not change it.'
-  if (p === 'who') return 'Named by your own /who row — the game stated this outright.'
+  if (p === 'user') return 'Set by you - autodetection will not change it.'
+  if (p === 'who') return 'Named by your own /who row - the game stated this outright.'
   return 'Autodetected from the classes showing up in your log.'
 }
 
@@ -123,6 +123,25 @@ export function spanText(interval: ComboInterval): string {
   return `${formatDateTime(interval.startTs)} → ${end}`
 }
 
+/**
+ * The span of SEVERAL intervals a surface has grouped together because they state the same
+ * loadout (JOS-236 — the raid roster's sectioning, features/bosses/loadoutGroups.ts).
+ *
+ * RULE 3'S SIBLING: a merged span has HOLES in it. Earliest start → latest end is the only
+ * bracket that is true of all of them, and drawn alone it would claim every hour in between, so
+ * the count of ranges is part of the sentence rather than a tooltip's afterthought. One interval
+ * prints exactly what `spanText` always printed; zero prints nothing rather than a fake bracket.
+ */
+export function spansText(intervals: readonly ComboInterval[]): string {
+  if (intervals.length === 0) return ''
+  if (intervals.length === 1) return spanText(intervals[0])
+  const start = Math.min(...intervals.map((i) => i.startTs))
+  // One open member makes the whole union open — it is still running now.
+  const open = intervals.some((i) => i.endTs === null)
+  const end = open ? 'now' : formatDateTime(Math.max(...intervals.map((i) => i.endTs ?? 0)))
+  return `${formatDateTime(start)} → ${end} · ${String(intervals.length)} ranges`
+}
+
 /** Width of the start's uncertainty window, in ms. 0 = the log pinned the instant. */
 export function startFuzzMs(interval: ComboInterval): number {
   return Math.max(0, interval.startHi - interval.startLo)
@@ -146,9 +165,30 @@ export function confidenceText(confidence: number): string {
   return `${Math.round(confidence * 100)}%`
 }
 
+/**
+ * Why the confidence gate (`loadoutUncertain`, shared/comboIndex.ts) is holding this interval, or
+ * null when it is not — the wording for the Profile tab's per-interval row (JOS-239).
+ *
+ * The two conditions read differently to a user and are worth separating: "more classes than a
+ * loadout holds" is about the evidence, "your level went backwards" is about a swap the log did
+ * announce and nothing dated. Both end the same way — the classes on this row are the ranking's
+ * opinion, and the row is the place to correct it.
+ */
+export function uncertainText(interval: ComboInterval): string | null {
+  const reasons: string[] = []
+  if (interval.startAlso?.includes('overDetermined') === true) {
+    reasons.push('more classes showed up here than a loadout holds')
+  }
+  if (interval.levelRegressed === true) {
+    reasons.push('your level went backwards inside this range, which only a swap does')
+  }
+  if (reasons.length === 0) return null
+  return `${reasons.join(', and ')} - so a swap probably happened in here that nothing dated. Treat these classes as a guess, and correct the range if you know better.`
+}
+
 /** `levels 10–24`, `level 50`, or null when no level was observed inside the interval. */
 export function levelRangeText(interval: ComboInterval): string | null {
   const { levelLo: lo, levelHi: hi } = interval
   if (lo === null || hi === null) return null
-  return lo === hi ? `level ${lo}` : `levels ${lo}–${hi}`
+  return lo === hi ? `level ${lo}` : `levels ${lo}-${hi}`
 }

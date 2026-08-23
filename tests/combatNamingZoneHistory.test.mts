@@ -21,6 +21,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseEvent } from '../src/main/log/parser'
 import { CombatEngine } from '../src/main/combat/engine'
+import { ZONE_HISTORY_CAP } from '../src/main/combat/encounter'
 import { LIVE_SELECTION, scopeOptions } from '../src/renderer/src/features/combat/dashboardData'
 
 function feed(eng: CombatEngine, lines: string[]): number {
@@ -48,6 +49,13 @@ const MULTI_ADD: string[] = [
 
 test('N1: LIVE fight name = current (most-recent) target; +N counts the other engaged target', () => {
   const eng = new CombatEngine()
+  // LIVE FROM THE START, because that is the only state anybody ever LOOKS at a meter in, and
+  // since JOS-208 phase 4 it is also the only state the wall-clock closure sweep runs in: a
+  // replay is not a moment in time, so `snapshot(now)` no longer finalizes a fight while the
+  // historical fold is still reading (engine.ts). Every window below asks what the meter shows
+  // after its span, which is a live question; the poll-lag arms model the live tick race and
+  // still exercise it.
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lastTs = feed(eng, MULTI_ADD)
   // Snapshot WHILE the fight is still open (just after the last hit, within the linger window).
@@ -62,6 +70,7 @@ test('N1: LIVE fight name = current (most-recent) target; +N counts the other en
 
 test('N2: FINALIZED fight name = largest-damage target (+N suffix preserved)', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lastTs = feed(eng, MULTI_ADD)
   // Snapshot far in the future → the fight closes (death-linger/fallback), so it's finalized and
@@ -74,6 +83,7 @@ test('N2: FINALIZED fight name = largest-damage target (+N suffix preserved)', (
 
 test('N3: single-target fight has no +N and live==finalized name', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lines = [
     '[Sun Jul 19 09:10:00 2026] You crush a lone rat for 20 points of damage.',
@@ -88,6 +98,7 @@ test('N3: single-target fight has no +N and live==finalized name', () => {
 
 test('Z1: a zone change finalizes the prior zone aggregate into a selectable session', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   feed(eng, [
     '[Sun Jul 19 09:20:00 2026] You have entered Befallen.',
@@ -113,16 +124,21 @@ test('Z1: a zone change finalizes the prior zone aggregate into a selectable ses
   assert.ok(sel.selected!.name.includes('Befallen'))
 })
 
-test('Z2: zone-session history is capped at 20 finalized sessions', () => {
+test('Z2: zone-session history is capped at ZONE_HISTORY_CAP finalized sessions', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   let seq = 0
   const ing = (raw: string): void => {
     const ev = parseEvent(raw, seq++)
     if (ev) eng.ingestEvent(ev, false)
   }
-  // 25 zones, each with one damage line, then a final zone to flush the 25th.
-  for (let i = 0; i < 25; i++) {
+  // Two more zones than the ring can hold, each with one damage line, then a final zone to flush
+  // the last. Counted OFF THE CONSTANT since JOS-322 raised it 20 → 24 (one click now mints a mark
+  // AND a zone session, and the two rings must reach equally far) — a frozen 20 here would have
+  // made a deliberate owner ruling look like a regression.
+  const zones = ZONE_HISTORY_CAP + 2
+  for (let i = 0; i < zones; i++) {
     const mm = String(i).padStart(2, '0')
     ing(`[Sun Jul 19 10:${mm}:00 2026] You have entered Zone${i}.`)
     ing(`[Sun Jul 19 10:${mm}:01 2026] You crush a mob for 5 points of damage.`)
@@ -130,9 +146,12 @@ test('Z2: zone-session history is capped at 20 finalized sessions', () => {
   ing('[Sun Jul 19 11:00:00 2026] You have entered Final.')
   const snap = eng.snapshot(Date.parse('Sun Jul 19 11:00:01 2026'), {})
   const finalized = snap.zoneSessions.filter((z) => !z.live)
-  assert.equal(finalized.length, 20, 'only the last 20 finalized zone sessions are retained')
-  // Newest-first: the most recent finalized zone is Zone24.
-  assert.equal(finalized[0].zone, 'Zone24')
+  assert.equal(finalized.length, ZONE_HISTORY_CAP, 'only the last ZONE_HISTORY_CAP sessions are retained')
+  // Newest-first: the most recent finalized zone is the last one entered before `Final`.
+  assert.equal(finalized[0].zone, `Zone${String(zones - 1)}`)
+  // …and every one of them says a ZONE LINE closed it, which is what keeps them out of the
+  // merge-back path (JOS-322: only a MARK leaves a boundary the engine may remove).
+  assert.ok(finalized.every((z) => z.closedBy === 'zone'), 'a zone line closed each of these')
 })
 
 // ============================================================================
@@ -162,6 +181,7 @@ const ONE_PULL: string[] = [
 
 test('L1: the default selection with an OPEN fight is that fight', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lastTs = feed(eng, ONE_PULL)
   const snap = eng.snapshot(lastTs + 500, {})
@@ -174,6 +194,7 @@ test('L1: the default selection with an OPEN fight is that fight', () => {
 
 test('L2: with NO open fight the default STAYS on the last fight — it never switches to the zone', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lastTs = feed(eng, ONE_PULL)
   // Far enough in the future that the fight closed on the idle fallback.
@@ -194,6 +215,7 @@ test('L2: with NO open fight the default STAYS on the last fight — it never sw
 
 test('L2b: with no fights at all the fight scope resolves to NOTHING (it never borrows the zone)', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   // A zone line only — no damage anywhere, so there is no fight to show.
   feed(eng, ['[Sun Jul 19 13:00:00 2026] You have entered Befallen.'])
@@ -206,6 +228,7 @@ test('L2b: with no fights at all the fight scope resolves to NOTHING (it never b
 // scope may list. Fight must never offer a zone session and Overall must never offer a fight.
 test('S1: the Fight scope lists only fights and labels a finished head row honestly', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const lastTs = feed(eng, ONE_PULL)
 
@@ -220,7 +243,7 @@ test('S1: the Fight scope lists only fights and labels a finished head row hones
   const doneSnap = eng.snapshot(lastTs + 120_000, {})
   const done = scopeOptions('fight', doneSnap.segments, doneSnap.zoneSessions)
   assert.equal(done.head!.live, false)
-  assert.match(done.head!.label, /^Last fight — /)
+  assert.match(done.head!.label, /^Last fight - /)
   assert.equal(done.head!.name, 'a skeleton')
   // …and it is not duplicated below itself.
   assert.equal(done.rest.length, 0)
@@ -232,6 +255,7 @@ test('S1: the Fight scope lists only fights and labels a finished head row hones
 
 test('S2: the Overall scope lists only zone sessions', () => {
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   feed(eng, [
     '[Sun Jul 19 14:00:00 2026] You have entered Befallen.',
@@ -243,7 +267,7 @@ test('S2: the Overall scope lists only zone sessions', () => {
   const overall = scopeOptions('overall', snap.segments, snap.zoneSessions)
   assert.equal(overall.head!.value, 'zone', 'the live zone session heads the list')
   assert.equal(overall.head!.live, true)
-  assert.match(overall.head!.label, /East Commonlands — overall/)
+  assert.match(overall.head!.label, /East Commonlands - overall/)
   assert.ok(overall.rest.length >= 1, 'the finalized Befallen session is selectable')
   // A fight id ('e<n>') must never leak into the Overall scope.
   const ids = [overall.head!.value, ...overall.rest.map((r) => r.value)]
@@ -251,6 +275,7 @@ test('S2: the Overall scope lists only zone sessions', () => {
 })
 
 test('L3: hydrating is true during the historical replay and false once the tail takes over', () => {
+  // THE ONE ENGINE IN THIS FILE THAT IS NOT LIVE FROM THE START, because the flag is its subject.
   const eng = new CombatEngine()
   eng.setPlayerName('Primitive')
   assert.equal(eng.snapshot(Date.now(), {}).hydrating, true, 'fresh engine = replay phase')

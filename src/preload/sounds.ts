@@ -24,11 +24,23 @@ import type {
   UserSoundImportResult,
   UserSoundRemoveResult
 } from '../shared/types'
+import type { SoundPackPrefs } from '../shared/soundPacks'
 
 export const soundsBridge = {
   listSoundPacks: (): Promise<SoundPack[]> => ipcRenderer.invoke(IPC.listSoundPacks),
   getSoundData: (packId: string, soundId: string): Promise<SoundData | null> =>
     ipcRenderer.invoke(IPC.getSoundData, packId, soundId),
+  // ---- the default-pack preference (JOS-273) ----
+  /** The stored blob: the user's default pack and the shipped packs they deleted. */
+  getSoundPackPrefs: (): Promise<SoundPackPrefs> => ipcRenderer.invoke(IPC.getSoundPackPrefs),
+  /** "Make this pack my default" — or null for "use whatever the app ships". */
+  setDefaultSoundPack: (packId: string | null): Promise<SoundPackPrefs> =>
+    ipcRenderer.invoke(IPC.setDefaultSoundPack, packId),
+  // NO `readAudioSession` HERE ANY MORE (JOS-443, owner: "we don't need any special audio
+  // debugging tools at all"). It bridged a WASAPI read of this app's own mixer session for the
+  // Preferences sound check; card, channel and native reader are all deleted. Audio failures are
+  // still never silent — they go to errors.log from alerts/audioHealth.ts — they simply have no
+  // surface of their own.
   /** Subscribe to "available sound packs changed" pushes (startup auto-provisioning). */
   onSoundPacksChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()

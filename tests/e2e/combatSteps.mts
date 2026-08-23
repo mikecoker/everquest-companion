@@ -20,6 +20,7 @@ import type { Page } from 'playwright-core'
 import {
   check,
   closePicker,
+  combatText,
   countOf,
   listedValues,
   note,
@@ -32,7 +33,14 @@ import {
   type Snap,
   type SnapEntity
 } from './appHarness.mjs'
-import { drilled, meterRows } from './drill.mjs'
+import { drilled, leaveCombat, meterRows, returnToCombat } from './drill.mjs'
+import {
+  RETIRED_SCOPE_CHIP,
+  SCOPE_LABEL_SEL,
+  scopeFromPrefs,
+  setMeterScope,
+  type Scope
+} from './combatPrefsSteps.mjs'
 import {
   PET_BOUND_DAMAGE,
   PET_LEADER_BOUND_DAMAGE,
@@ -175,52 +183,87 @@ export async function stepMeterDrill(page: Page): Promise<void> {
   check('…and Back returns to the same source list it came from', after === rows, `${rows} → ${after} rows`)
 }
 
-// ── THE MULTI-ATTACK PANEL (JOS-37; the engine half is docs/plans/attack-round-stats.md) ──
+// ── ONE BAR PER ABILITY, STATS EXPAND INLINE (JOS-113) ─────────────────────────────────────
 //
-// The grouper and the tiers are pinned in tests/combatRoundStats.test.mts, and the words in
-// tests/multiAttackRows.test.mts, against real log windows. What only the real app can show is
-// that the panel MOUNTS inside the drill and states something: it lives one level down (the
-// drilled source's breakdown), so a wiring mistake would leave it invisible with every unit
-// test still green. It stays in the drill on purpose — the JOS-37 arrangement note in
-// CombatView.tsx says why — so this step is also what proves it did not drift up into a cell.
+// This step replaces `stepCategoryDrill`. JOS-105 grouped a source's abilities under a CATEGORY
+// chip and put the multi-attack readout one level down; the owner rejected both — "one bar per
+// ability, flat, NO category strip; click an ability that has stats and its crit/double/triple/
+// miss appear INLINE beneath its bar; an ability with no stats (a DoT tick) does nothing." So this
+// walks that path with a mouse: drill a source, assert NO category chip, click a stat-bearing
+// ability and watch its stats open in place.
 //
-// FLOORS ONLY (AGENTS.md: frozen numbers rot). The live log decides how many verbs the
-// selected fight used, so this asserts "at least one stated lane, with its denominator on
-// screen" and notes rather than fails when the selection has no swings at all.
+// The shaping is pinned purely in tests/abilityStats.test.mts (which lane belongs to which
+// ability, where flurry rides, the clickability gate) and the rows' words in
+// tests/multiAttackRows.test.mts. What only the real app can show is that the expansion is
+// REACHABLE with a click and that no category chip survives anywhere.
+//
+// FLOORS ONLY (AGENTS.md: frozen numbers rot). The live log decides what the selected fight used,
+// so this asserts "an ability expanded, and its stats are inside" and notes on an empty selection.
 
-const MULTI = '[data-testid="multi-attack-panel"]'
-const MULTI_LANE = '[data-testid="multi-attack-lane"]'
+const CHIP = '[data-testid="category-chip"]'
+const SKILL = '[data-testid="skill-bar"]'
+const STATS = '[data-testid="ability-stats"]'
 
-export async function stepMultiAttackPanel(page: Page): Promise<void> {
-  // The dashboard opens on LEVEL 1 (JOS-35), so this step drills itself — `stepMeterDrill` above
-  // left it un-drilled on purpose, and the multi-attack panel lives one level down.
-  if ((await inMeterPanel(page, MULTI)) === 0 && !(await drilled(page))) {
+/** The visible text of the first element matching `sel`, or '' when there is none. */
+function textOf(page: Page, sel: string): Promise<string> {
+  return page.evaluate((s) => (document.querySelector(s) as HTMLElement | null)?.innerText ?? '', sel)
+}
+
+export async function stepAbilityStats(page: Page): Promise<void> {
+  // The dashboard opens on LEVEL 1 (JOS-35), so this step drills down to a source first — the
+  // abilities belong to ONE source, and that is the level where a source is the subject.
+  if (!(await drilled(page))) {
     await page.click('[data-testid="meter-row"]', { timeout: 15_000 }).catch(() => undefined)
     await settle(() => drilled(page), (d) => d, { timeoutMs: 10_000 })
   }
-  const lanes = await inMeterPanel(page, MULTI_LANE)
-  if ((await inMeterPanel(page, MULTI)) === 0) {
-    note('the drilled source landed no swings in this selection — the multi-attack panel correctly renders nothing')
+
+  // 1. NO CATEGORY CHIP. The strip the owner rejected must be gone — one bar per ability, flat.
+  check('the drilled source shows NO category chip (JOS-113 removed the grouping layer)', (await inMeterPanel(page, CHIP)) === 0)
+
+  const bars = await inMeterPanel(page, SKILL)
+  if (bars === 0) {
+    note('the drilled source dealt no damage in this selection — no ability bar to expand')
     return
   }
-  check('the multi-attack panel mounts inside the combat drill', true)
-  check('…with at least one attack-type lane', lanes >= 1, `${lanes} lanes`)
-  const text = await page.evaluate((sel) => {
-    const el = document.querySelector(sel)
-    return (el as HTMLElement | null)?.innerText ?? ''
-  }, MULTI)
-  // The denominator is on screen, in rounds — law 11's spirit, and the one thing the design
-  // insists the panel can never omit.
-  check('…and its denominator is visible, in ROUNDS', /\brounds\b/i.test(text), text.slice(0, 120).replace(/\s+/g, ' '))
-  // Every lane states its multi-attack reading — a rate, or the honest "it never did".
-  check(
-    '…and every lane states how often it multi-attacked',
-    /%\s*doubled|never multi-attacked/i.test(text),
-    text.slice(0, 160).replace(/\s+/g, ' ')
-  )
-  // The whole stated-vs-inferred tier is ONE word now (TOOLTIP AND CAVEAT DIET) — the old
-  // panel's four hover paragraphs are gone, and so is the `inferred` chip they explained.
-  check('…and the old Rounds block’s chips are gone', !/inferred|riposte|rampage|excluded/i.test(text), text.slice(0, 160).replace(/\s+/g, ' '))
+  check('…just one bar per ability, flat', bars >= 1, `${bars} abilities`)
+
+  // 2. CLICKING A STAT-BEARING ABILITY EXPANDS IT IN PLACE. Most abilities are melee/slay swings
+  //    (crit + miss are core stats there), so click each — a positional click at the BAR row, not
+  //    a synthetic one, so React re-renders between awaits — until one opens its readout. A DoT
+  //    tick is correctly inert and simply does not respond.
+  const inPanel = page.locator(`[data-testid="dash-panel"] ${SKILL}`)
+  let picked: string | null = null
+  for (let i = 0; i < bars && picked === null; i++) {
+    const bar = inPanel.nth(i)
+    await bar.click({ position: { x: 12, y: 8 }, timeout: 5_000 }).catch(() => undefined)
+    if ((await inMeterPanel(page, STATS)) >= 1) picked = ((await bar.textContent()) ?? '').split('·')[0]?.trim() ?? ''
+  }
+  const opened = picked !== null
+  check('…and clicking a stat-bearing ability expands its stats INLINE, beneath its own bar', opened, picked ?? 'none expanded')
+  if (!opened) return
+
+  // 3. THE STATS ARE THE OWNER'S: crit is stated for every weapon swing; double/triple appear on
+  //    the ability that multi-attacked (the auto-attack Melee, where the fixture has one).
+  const body = await textOf(page, STATS)
+  check('…whose figures include the crit rate', /crit/i.test(body), body.slice(0, 160).replace(/\s+/g, ' '))
+  if (/double attack|triple attack|rounds/i.test(body)) {
+    check('…and the double/triple attack it lists is over its ROUNDS (law 11)', /rounds/i.test(body))
+  } else {
+    note('the expanded ability opened no attack rounds — its multi-attack section correctly renders nothing')
+  }
+
+  // 4. THE OLD PANEL AND THE OLD LEVEL ARE GONE, everywhere on the page.
+  check('the standalone multi-attack panel is gone', (await countOf(page, '[data-testid="multi-attack-panel"]')) === 0)
+  check('and no category-drill level survives', (await countOf(page, '[data-testid="category-drill"]')) === 0)
+
+  // 5. CLICKING AGAIN COLLAPSES IT — the list never gained a nav level, so the flat list is still
+  //    right there and the SAME ability closes in place. Click the BAR row (y:8, above the now
+  //    open readout) of the skill-bar that holds the stats, not its expanded body.
+  const openBar = inPanel.filter({ has: page.locator(STATS) }).first()
+  await openBar.click({ position: { x: 12, y: 8 }, timeout: 5_000 }).catch(() => undefined)
+  await settleGone(page, STATS, { timeoutMs: 10_000 }).catch(() => undefined)
+  check('…and clicking it again collapses the stats in place', (await inMeterPanel(page, STATS)) === 0)
+  check('…while the ability list and its Back control stay put', await drilled(page))
 }
 
 // ── THE OPEN FIGHT LIST IS FROZEN (Task #61) ───────────────────────────────────────────
@@ -339,65 +382,103 @@ export async function stepScriptedPull(page: Page, log: FixtureLog): Promise<Sna
  * 6b. THE METER SCOPE — You / Group / Everyone (docs/plans/group-model.md §2), a different axis
  * from the Fight|Overall toggle: that one says WHICH segment, this one says WHOSE damage in it.
  *
- * THE ROSTER STATE IS NOT ASSERTED, because it belongs to whatever the live log happens to
- * contain: a log with group lines in it leaves `seen: true`, one without leaves `seen: false`,
- * and both are correct. What IS asserted is that the chip and the popover AGREE about which of
- * the two it is — the pairing is the identity, and it is the one that can actually break. They
- * are separate sentences derived from one flag, and a Group scope silently narrowing while the
- * popover says it is showing everyone is precisely the lie this surface exists to prevent.
+ * IT IS NO LONGER A CONTROL ON THIS SURFACE (JOS-115, owner: the selector "is shown INLINE on
+ * every combat surface and is too crowded"). It is ONE preference in Preferences > Combat, and
+ * the Combat tab keeps only the READOUT — because a meter that is filtering rows out has to be
+ * able to say so where the rows are missing. So this step walks the new shape: the chip is gone,
+ * the word is there, changing the preference two tabs away changes what this meter shows, and the
+ * roster popover (which was never a scope control) still opens.
+ *
+ * THE ROSTER STATE IS NOT ASSERTED, because it belongs to whatever the log happens to contain: a
+ * log with group lines in it leaves `seen: true`, one without leaves `seen: false`, and both are
+ * correct. What IS asserted is that the readout and the popover AGREE about which of the two it
+ * is — the pairing is the identity, and it is the one that can actually break. They are separate
+ * sentences derived from one flag, and a Group scope silently narrowing while the popover says it
+ * is showing everyone is precisely the lie this surface exists to prevent.
  */
 export async function stepMeterScope(page: Page): Promise<void> {
-  const chip = '[data-testid="meter-scope-chip"]'
-  check('the meter scope chip is on the combat toolbar', (await countOf(page, chip)) === 1)
+  check(
+    'the inline You/Group/Everyone control is GONE from the combat toolbar (JOS-115)',
+    (await countOf(page, RETIRED_SCOPE_CHIP)) === 0
+  )
+  check('…replaced by a readout of the preference', (await countOf(page, SCOPE_LABEL_SEL)) === 1)
 
-  const label = async (): Promise<string> => (await page.textContent(chip))?.trim() ?? ''
+  const label = async (): Promise<string> => (await page.textContent(SCOPE_LABEL_SEL))?.trim() ?? ''
 
-  // The default is Group either way — any fallback shows up in the chip's own words, never as a
-  // different scope silently selected for you.
+  // THE DEFAULT IS EVERYONE (JOS-229). It was Group, on the argument that an empty roster falls
+  // back to Everyone anyway — which covers the empty roster and not the incomplete one, and an
+  // incomplete roster is a missing player's bars with no word to explain them. One unambiguous
+  // sentence now: no fallback wording, because nothing is being filtered.
   const first = await label()
-  const noRoster = first === 'Group (no roster yet)'
-  check('it defaults to Group', first === 'Group' || noRoster, first)
-  const baseline = await meterRows(page)
+  check('it defaults to Everyone', first === 'Everyone', first)
+  // …and the PREFERENCE agrees, on a profile that has never written the key: an absent value is
+  // Everyone, and the control has to say so too — the readout alone could not tell "chosen
+  // Everyone" from "defaulted to Everyone", and only one of those is the claim.
+  const chosen = await scopeFromPrefs(page, 'nav-combat')
+  await settleCount(page, '[data-testid="combat-dashboard"]', 1, { timeoutMs: 20_000 })
+  check('an absent preference resolves to Everyone in the control too', chosen === 'everyone', chosen)
+  const baseline = await settle(() => meterRows(page), (n) => n > 0, { timeoutMs: 15_000 })
 
-  // One click per scope, all the way round. The cycle is the whole control on this surface, and
-  // the CONDITION each click produces is the chip's own next word.
-  const cycleTo = async (want: string): Promise<string> => {
-    await page.click(chip)
-    return settle(label, (t) => t === want, { timeoutMs: 8_000 })
+  // THE PREFERENCE APPLIES. Setting it two tabs away is the whole control now, and the CONDITION
+  // each write produces is this surface's own next word.
+  //
+  // WAIT FOR THE BODY, not just for the header. Coming back from Preferences REMOUNTS this view,
+  // and its first frames render the hydrating skeleton while the first snapshot is in flight — the
+  // header (and this readout with it) is already there, so settling on the WORD alone would count
+  // the meter's rows before the meter had any. `combat-dashboard` is the body, and it exists only
+  // once there is a segment to rank.
+  //
+  // The wanted word is a PREDICATE rather than a string, because Group has two legal spellings and
+  // which one this log produces is not this spec's business (see the popover pairing below).
+  const setTo = async (scope: Scope, want: (t: string) => boolean): Promise<string> => {
+    await setMeterScope(page, scope, 'nav-combat')
+    await settleCount(page, '[data-testid="combat-dashboard"]', 1, { timeoutMs: 20_000 })
+    return settle(label, want, { timeoutMs: 8_000 })
   }
 
-  check('clicking cycles Group to Everyone', (await cycleTo('Everyone')) === 'Everyone', await label())
-  const everyone = await meterRows(page)
-  check('Everyone shows at least what Group did', everyone >= baseline, `${everyone} vs ${baseline}`)
+  const groupWord = await setTo('group', (t) => t.startsWith('Group'))
+  check('choosing Group in Preferences reaches the Combat tab', groupWord.startsWith('Group'), groupWord)
+  // Which of the two Group states this log leaves behind — the popover pairing at the end of this
+  // step is the one that cares, and it now learns it HERE rather than from the opening readout.
+  const noRoster = groupWord === 'Group (no roster yet)'
+  // The row count has to have STOPPED MOVING before it means anything: the panel is fed by a
+  // snapshot that arrives a beat after the remount, so a reading taken on the first frame is a
+  // reading of an empty meter (settleStable's argument, spelled with a floor).
+  const group = await settle(() => meterRows(page), (n) => n > 0, { timeoutMs: 15_000 })
+  // NARROWING NEVER WIDENS. Equal is legal and expected on the law-1 fallback, where Group renders
+  // as Everyone; more rows under Group than under Everyone would mean the filter added somebody.
+  check('Group shows no more than Everyone did', group <= baseline, `${group} vs ${baseline}`)
 
-  check('clicking again cycles Everyone to You', (await cycleTo('You')) === 'You', await label())
-  // NO SCOPE EVER HIDES YOU OR YOUR PETS. The live log is the owner's own, so the rows here are
-  // his and his pets' — they must survive every scope, and only a member row may ever go.
-  const you = await meterRows(page)
-  check('You scope keeps your own rows — only a member is ever filtered', you >= 1 && you <= everyone, `${you} of ${everyone}`)
+  check('…and so does choosing You', (await setTo('you', (t) => t === 'You')) === 'You', await label())
+  // NO SCOPE EVER HIDES YOU OR YOUR PETS. The rows here are yours and your pets' — they must
+  // survive every scope, and only a member row may ever go.
+  const you = await settle(() => meterRows(page), (n) => n > 0, { timeoutMs: 15_000 })
+  check('You scope keeps your own rows — only a member is ever filtered', you >= 1 && you <= group, `${you} of ${group}`)
 
-  // PERSISTED PER SURFACE: the choice survives leaving the tab and coming back, because it is a
-  // stored preference and not component state.
+  // PERSISTED: the choice survives leaving the tab and coming back, because it is a stored
+  // preference and not component state.
   await page.click('[data-testid="nav-overview"]')
   await settleCount(page, '[data-testid="overview-grid"]')
   await page.click('[data-testid="nav-combat"]')
-  await settleCount(page, chip)
+  await settleCount(page, SCOPE_LABEL_SEL)
   check('the scope is remembered across a tab round trip', (await settle(label, (t) => t === 'You')) === 'You', await label())
 
-  // The roster popover (G3) — the answer to "who does the app think is with me, and why".
+  // The roster popover (G3) — the answer to "who does the app think is with me, and why". Still a
+  // control, and deliberately so: correcting a mis-inferred group is a different act from choosing
+  // a scope, and it belongs where the missing rows are.
   await page.click('[data-testid="roster-open"]')
   const opened = await settleCount(page, '[data-testid="roster-popover"]')
-  check('the roster popover opens from the chip', opened === 1)
+  check('the roster popover still opens beside the readout', opened === 1)
   const popover = (await page.textContent('[data-testid="roster-popover"]'))?.toLowerCase() ?? ''
   check('…and offers the add box for the join line the log never carried', popover.includes('add'))
   if (popover.includes('nobody on the roster') || popover.includes('no group signal')) {
     // THE PAIRING. An empty roster says which KIND of empty it is, and the sentence has to match
-    // the chip: `seen: false` falls back to Everyone (law 1), `seen: true` means the group ended
-    // and Group really is narrowing to you and your pets.
+    // the readout: `seen: false` falls back to Everyone (law 1), `seen: true` means the group
+    // ended and Group really is narrowing to you and your pets.
     check(
-      'the empty roster and the chip tell the same story',
+      'the empty roster and the readout tell the same story',
       noRoster ? popover.includes('no group signal') : popover.includes('nobody on the roster'),
-      `chip=${first} · popover=${popover.slice(0, 70)}`
+      `readout=${first} · popover=${popover.slice(0, 70)}`
     )
     check(
       '…and only the law-1 fallback claims to be showing everyone',
@@ -405,19 +486,20 @@ export async function stepMeterScope(page: Page): Promise<void> {
       popover.slice(0, 90)
     )
   } else {
-    note('the live log left real members on the roster — the empty-state wording was not exercised')
+    note('the log left real members on the roster — the empty-state wording was not exercised')
   }
 
-  // Close the popover and leave the surface on its default, so nothing downstream inherits a
-  // narrowed meter. Bounded: three clicks is a full cycle, whatever it is on now.
+  // Close the popover and put the preference back on its default, so nothing downstream inherits
+  // a narrowed meter.
   await page.keyboard.press('Escape')
   await settleGone(page, '[data-testid="roster-popover"]', { timeoutMs: 8_000 })
-  for (let i = 0; i < 3 && !(await label()).startsWith('Group'); i++) {
-    const was = await label()
-    await page.click(chip)
-    await settle(label, (t) => t !== was, { timeoutMs: 8_000 })
-  }
-  check('the meter is left on its Group default', (await label()).startsWith('Group'), await label())
+  await setMeterScope(page, 'everyone', 'nav-combat')
+  await settleCount(page, '[data-testid="combat-dashboard"]', 1, { timeoutMs: 20_000 })
+  check(
+    'the meter is left on its Everyone default',
+    (await settle(label, (t) => t === 'Everyone', { timeoutMs: 8_000 })) === 'Everyone',
+    await label()
+  )
 }
 
 /**
@@ -506,6 +588,91 @@ const petRowFor = (s: Snap, name: string): SnapEntity | undefined =>
  * unit test installs it by hand; only a real launch proves the product does — and the harness
  * tails `eqlog_Primitive_freeport.txt`, so the answer has to name Primitive to work at all.
  */
+// ── THE DPS LEGEND SWITCHES ITS OWN LINES OFF (JOS-264) ────────────────────────────────────
+//
+// From a report of the chart read from across a room: four curves plus four marker colours in one
+// small plot, and the ask was to be able to put some of it away. The geometry is node-tested
+// (tests/dpsChartLines.test.mts) and so is the stored vocabulary (tests/combatPrefs.test.mts).
+// What only the real app can show is the part those two cannot see:
+//   * the legend entry is WIRED to the drawing — a click removes that line's element from the SVG;
+//   * hiding is REVERSIBLE, because the entry it was made from is still on screen (dimmed) rather
+//     than deleted. A legend that removed its own entries would be a one-way door, and no unit
+//     test can tell "styled as off" from "gone";
+//   * it SURVIVES THE TAB SWITCH, which is the whole reason this is a stored pref rather than a
+//     useState (AGENTS.md: prove it by navigating and asserting the view was GONE first);
+//   * and ALL LINES OFF renders a card, not a crash or an empty box.
+//
+// It leaves the legend exactly as it found it, so no step after this one inherits a hidden line.
+
+const LEGEND_KEYS = ['out', 'pet', 'group', 'inc'] as const
+const DPS_PLOT = '[data-testid="dps-plot"]'
+const legendSel = (k: string): string => `[data-testid="chart-legend-${k}"]`
+const lineSel = (k: string): string => `[data-testid="dps-line-${k}"]`
+
+/** '1' when the entry says its line is hidden, '0' when drawn, '' when there is no such entry —
+ *  the control's own account of the state, which is what the user reads off the strip. */
+function legendHidden(page: Page, k: string): Promise<string> {
+  return page.evaluate((sel) => document.querySelector(sel)?.getAttribute('data-hidden') ?? '', legendSel(k))
+}
+
+/** The curve entries this fight actually has. `pet`/`group`/`incoming` appear only when the fight
+ *  had one, so the set is log-dependent and is read rather than assumed. */
+async function legendEntries(page: Page): Promise<string[]> {
+  const found: string[] = []
+  for (const k of LEGEND_KEYS) {
+    if ((await countOf(page, legendSel(k))) === 1) found.push(k)
+  }
+  return found
+}
+
+export async function stepChartLegendToggles(page: Page): Promise<void> {
+  // The outgoing entry exists whenever the curve is drawn at all; no curve is a NOTE, the same
+  // convention the hover step uses for a ringless or damage-free selection.
+  if ((await countOf(page, legendSel('out'))) === 0) {
+    note('the DPS-over-time curve is not drawn for this selection - its legend is not asserted this run')
+    return
+  }
+  const entries = await legendEntries(page)
+  check('every drawn line has a legend entry', entries.includes('out'), entries.join(' · '))
+
+  // 1. ONE CLICK TAKES A LINE OFF THE PLOT — and leaves the entry that says so.
+  await page.click(legendSel('out'), { timeout: 15_000 })
+  check('clicking a legend entry takes its line off the chart', await settleGone(page, lineSel('out'), { timeoutMs: 10_000 }))
+  check('…and the shaded area under it goes with it, not on its own', (await countOf(page, '[data-testid="dps-area"]')) === 0)
+  check(
+    'THE ENTRY STAYS IN THE LEGEND, DIMMED — hidden is a state you can see and undo',
+    (await countOf(page, legendSel('out'))) === 1 && (await legendHidden(page, 'out')) === '1',
+    `entry ${String(await countOf(page, legendSel('out')))}, data-hidden=${await legendHidden(page, 'out')}`
+  )
+
+  // 2. …AND IT SURVIVES THE TAB SWITCH. A `useState` here would pass every check above and lose
+  //    the choice on the way to the Overview tab — the JOS-90/97/116 bug, which is why the value
+  //    is a renderer pref.
+  const left = await leaveCombat(page)
+  if (check('leaving the Combat tab unmounts it', left) && (await returnToCombat(page))) {
+    const still = await settle(() => legendHidden(page, 'out'), (v) => v === '1', { timeoutMs: 10_000 })
+    check('A HIDDEN LINE SURVIVES LEAVING AND RETURNING TO THE COMBAT TAB', still === '1', `data-hidden=${still}`)
+    check('…and the line is still off the plot, not merely remembered', (await countOf(page, lineSel('out'))) === 0)
+  }
+
+  // 3. REVERSIBLE from the entry it left behind.
+  await page.click(legendSel('out'), { timeout: 15_000 })
+  check('clicking the dimmed entry draws its line again', (await settleCount(page, lineSel('out'), 1, { timeoutMs: 10_000 })) === 1)
+  check('…and the entry reads as drawn again', (await legendHidden(page, 'out')) === '0')
+
+  // 4. EVERY LINE OFF is a legal state: a note where the plot was, the legend still under it.
+  for (const k of entries) await page.click(legendSel(k), { timeout: 15_000 })
+  check('with every line hidden the card draws no plot at all', await settleGone(page, DPS_PLOT, { timeoutMs: 10_000 }))
+  check('…and says so, rather than rendering an empty box', /every line is hidden/i.test(await combatText(page)))
+  check('…with the whole legend still there to switch one back on', (await legendEntries(page)).length === entries.length)
+  check('…and the dashboard still standing', (await countOf(page, '[data-testid="combat-dashboard"]')) === 1)
+
+  // 5. Put it back the way it was found.
+  for (const k of entries) await page.click(legendSel(k), { timeout: 15_000 })
+  const back = await settleCount(page, DPS_PLOT, 1, { timeoutMs: 10_000 })
+  check('switching them back on restores the chart', back === 1 && (await countOf(page, lineSel('out'))) === 1)
+}
+
 export async function stepPetAnswersWhoLeads(page: Page, log: FixtureLog): Promise<void> {
   const asked = playPetLeaderAnswer(log)
   check('the harness asked the new pet who its leader is', asked === PET_LEADER_LINES, `${String(asked)} lines`)

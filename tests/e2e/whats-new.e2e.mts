@@ -20,6 +20,17 @@
  * asserts `nav-triage` is: this build is production-shaped, and "compiled out" is a claim about
  * bytes that only a build can answer.
  *
+ * JOS-254 adds the two ends of "patch notes, one click from the version number":
+ *
+ *   3. THE ICON IS BESIDE THE VERSION NUMBER AND IT OPENS THE PANEL. Both halves are geometry
+ *      and navigation, which is exactly what a unit test cannot see — "next to" is a rendered
+ *      relationship between two boxes, and the click crosses the nav → Preferences → section
+ *      seam that only the real app has.
+ *   4. …AND THE PANEL CARRIES A WAY OUT TO GITHUB. The href is checked against
+ *      `allowedExternalUrl` — main's OWN boundary, imported here — because a link this app
+ *      renders but main refuses to open is a dead control that looks alive, and that is the
+ *      failure mode a rendered-attribute check alone would miss.
+ *
  * Run: `npm run test:e2e -- whats-new`
  */
 import type { ElectronApplication, Page } from 'playwright-core'
@@ -37,11 +48,16 @@ import {
 import { mainWindow } from './appWindow.mjs'
 import { launchOnFixture } from './logFixture.mjs'
 import { RELEASE_NOTES, variantLastSeen } from '../../src/shared/releaseNotes'
+// Main's own link boundary, as a pure function (no Electron — that is the point of security.ts).
+import { allowedExternalUrl } from '../../src/main/security'
 
 const TEASER = '[data-testid="whats-new-teaser"]'
 const PANEL = '[data-testid="whats-new-panel"]'
 const RAIL = '[data-testid="prefs-rail-whatsnew"]'
 const DEV_ROW = '[data-testid="whats-new-dev"]'
+/** The patch-notes icon beside the version number in the nav chip (JOS-254). */
+const NOTES_ICON = '[data-testid="update-chip-notes"]'
+const GITHUB_LINK = '[data-testid="whats-new-github"]'
 
 const NEWEST = RELEASE_NOTES[0]!.version
 /** Derived from the data, never typed twice: the spec asserts the panel drew what the module
@@ -105,13 +121,24 @@ async function openPanel(page: Page): Promise<{ releases: number; marked: string
  * past the pane and the PAGE scrolls instead of the list. So the reading is the rendered box
  * against the rendered pane, plus whether the page itself acquired a scrollbar.
  */
-function paneFit(page: Page): Promise<{ gap: number; boxHeight: number; pageOverflow: number }> {
+function paneFit(page: Page): Promise<{
+  gap: number
+  footerGap: number
+  boxHeight: number
+  pageOverflow: number
+}> {
   return page.evaluate(() => {
     const box = document.querySelector('[data-testid="whats-new-history"]')?.getBoundingClientRect()
     const pane = document.querySelector('main')?.getBoundingClientRect()
+    const footer = document.querySelector('[data-testid="whats-new-github"]')?.getBoundingClientRect()
     const scroller = document.querySelector('main > div')
     return {
-      gap: box && pane ? pane.bottom - box.bottom : Number.NaN,
+      // The list ends where the ONE thing under it begins (JOS-254 put the GitHub link there).
+      gap: box && footer ? footer.top - box.bottom : Number.NaN,
+      // …and that link is the last thing in the pane. Two readings rather than one, because
+      // "the box claims the height" and "nothing else is squatting at the bottom" are two
+      // claims, and a single pane-bottom measurement could not tell them apart any more.
+      footerGap: footer && pane ? pane.bottom - footer.bottom : Number.NaN,
       boxHeight: box ? box.height : 0,
       // How far the pane's own scroller can travel. The list scrolls; the page must not.
       pageOverflow: scroller ? scroller.scrollHeight - scroller.clientHeight : Number.NaN
@@ -157,8 +184,9 @@ function teaserText(page: Page): Promise<string> {
  *
  * Two, because "fills" is a claim about a RELATIONSHIP and a single measurement cannot tell it
  * apart from a fixed height that happens to look right at this window size — which is exactly the
- * thing being replaced. So the box must end near the pane's bottom at both, must never hand its
- * scrolling to the page, and must GROW between them.
+ * thing being replaced. So the box must end where the GitHub link under it begins (JOS-254), that
+ * link must be the last thing in the pane, the page must never take over the scrolling, and the
+ * box must GROW between the two heights.
  */
 async function checkFillsPane(page: Page, app: ElectronApplication): Promise<void> {
   const heights: number[] = []
@@ -168,9 +196,14 @@ async function checkFillsPane(page: Page, app: ElectronApplication): Promise<voi
     // reflow that follows it, where "stopped changing" really is the right condition.
     const fit = await settleStable(() => paneFit(page))
     check(
-      `${label} window: the history box reaches the bottom of the pane`,
-      fit.gap >= 0 && fit.gap < 48,
+      `${label} window: the history box runs down to the link under it`,
+      fit.gap >= 0 && fit.gap < 24,
       `gap=${fit.gap.toFixed(1)}px boxHeight=${fit.boxHeight.toFixed(1)}px`
+    )
+    check(
+      `${label} window: …and that link is the last thing in the pane`,
+      fit.footerGap >= 0 && fit.footerGap < 48,
+      `footerGap=${fit.footerGap.toFixed(1)}px`
     )
     check(
       `${label} window: the LIST scrolls, never the page`,
@@ -222,9 +255,114 @@ async function checkBulletsAndThanks(page: Page): Promise<void> {
   )
   check(
     '…collectively, naming nobody',
-    seen.firstThanks === 'Thanks to everyone who filed reports — many of these came from you.',
+    seen.firstThanks === 'Thanks to everyone who filed reports - many of these came from you.',
     `line="${seen.firstThanks}"`
   )
+}
+
+/**
+ * THE ICON SITS BESIDE THE VERSION NUMBER, AND CLICKING IT LANDS ON THE NOTES (JOS-254).
+ *
+ * "Beside" is asserted as geometry rather than as DOM order: the two boxes must share a line and
+ * the icon must start at or after the version line's right edge, close enough to read as one row.
+ * A DOM-order check would pass on a layout that stacked them, which is the failure this is for.
+ *
+ * The version LINE is whichever of the two states prints the installed version — the muted quiet
+ * line in a build whose updater runs, the dev line in one whose updater is off. Named positively
+ * rather than assumed, because which one this build shows is not this spec's subject.
+ */
+function versionIconGeometry(page: Page): Promise<{
+  text: string
+  sameLine: boolean
+  gap: number
+  label: string
+}> {
+  return page.evaluate(() => {
+    const icon = document.querySelector('[data-testid="update-chip-notes"]')
+    const line =
+      document.querySelector('[data-testid="update-chip-quiet"]') ??
+      document.querySelector('[data-testid="update-chip-disabled"]')
+    if (!icon || !line) return { text: '', sameLine: false, gap: Number.NaN, label: '' }
+    const i = icon.getBoundingClientRect()
+    const l = line.getBoundingClientRect()
+    return {
+      text: line.textContent?.trim() ?? '',
+      sameLine: i.top < l.bottom && l.top < i.bottom,
+      gap: i.left - l.right,
+      label: icon.getAttribute('aria-label') ?? ''
+    }
+  })
+}
+
+async function checkVersionIcon(page: Page): Promise<void> {
+  // The version arrives over IPC a frame or two after mount; wait for the line to actually NAME
+  // one, or "beside the version number" would be asserted against an empty line.
+  const seen = await settle(
+    () => versionIconGeometry(page),
+    (s) => /v\d+\.\d+\.\d+/.test(s.text)
+  )
+  if (!check('the nav chip names the version this app is running', seen.text !== '', seen.text || 'no version line')) {
+    return
+  }
+  check(
+    'a patch-notes icon sits BESIDE the version number, on the same line',
+    seen.sameLine && seen.gap >= -1 && seen.gap < 40,
+    `line="${seen.text}" sameLine=${String(seen.sameLine)} gap=${seen.gap.toFixed(1)}px`
+  )
+  check(
+    '…and it says what it opens, without a popper that could eat the row above it',
+    seen.label === "What's new in this version" && (await countOf(page, '.MuiTooltip-popper')) === 0,
+    `label="${seen.label}" poppers=${String(await countOf(page, '.MuiTooltip-popper'))}`
+  )
+
+  await page.click(NOTES_ICON, { timeout: 20_000 })
+  const landed = await settleCount(page, PANEL, 1)
+  check(
+    'ONE click from the version number lands on the notes, in the app',
+    landed === 1,
+    `panels=${String(landed)}`
+  )
+}
+
+/**
+ * THE PANEL'S WAY OUT (JOS-254) — and it has to be a link main will actually open.
+ *
+ * `target="_blank"` is the whole mechanism: main's `setWindowOpenHandler` turns it into
+ * `shell.openExternal` for an allowlisted https host and drops everything else on the floor. So
+ * the rendered href is run through that very allowlist here — a link the panel draws and main
+ * refuses is a control that looks alive and does nothing, and nothing else in the suite would say
+ * so.
+ */
+async function checkGitHubLink(page: Page): Promise<void> {
+  const found = await settleCount(page, GITHUB_LINK, 1)
+  if (!check('the panel carries a way out to the full release history', found === 1, `links=${String(found)}`)) {
+    return
+  }
+  const link = await page.evaluate(() => {
+    const a = document.querySelector('[data-testid="whats-new-github"]')
+    return {
+      href: a?.getAttribute('href') ?? '',
+      target: a?.getAttribute('target') ?? '',
+      rel: a?.getAttribute('rel') ?? '',
+      text: a?.textContent?.trim() ?? ''
+    }
+  })
+  check(
+    "…pointing at this app's releases page",
+    link.href === 'https://github.com/jmoyers/everquest-companion/releases',
+    `href="${link.href}"`
+  )
+  check(
+    '…in the SYSTEM browser, never an Electron window that would inherit the preload bridge',
+    link.target === '_blank' && link.rel.includes('noreferrer'),
+    `target="${link.target}" rel="${link.rel}"`
+  )
+  check(
+    '…and main will really open it — the href passes the same allowlist the handler applies',
+    allowedExternalUrl(link.href) === link.href,
+    `allowed=${allowedExternalUrl(link.href) ?? 'null'}`
+  )
+  check('…under a label that says where it goes', link.text.includes('GitHub'), `text="${link.text}"`)
 }
 
 async function main(): Promise<void> {
@@ -246,6 +384,11 @@ async function main(): Promise<void> {
       `teasers=${String(settled)}`
     )
 
+    // ---- the door beside the version number (JOS-254) ----------------------
+    // Before any Preferences navigation, so the click under test is the ONLY thing that could
+    // have put the panel on screen.
+    await checkVersionIcon(page)
+
     const fresh = await openPanel(page)
     check(
       'the full history is browsable anyway — every release renders',
@@ -264,6 +407,7 @@ async function main(): Promise<void> {
 
     await checkFillsPane(page, launched.app)
     await checkBulletsAndThanks(page)
+    await checkGitHubLink(page)
 
     // ---- 2. an upgraded install -------------------------------------------
     // The state is read ONCE per launch, so the reload is not a shortcut around anything: it is

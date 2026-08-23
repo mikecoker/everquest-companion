@@ -285,9 +285,12 @@ test('the Coldain anchor, layer 2: no zone anywhere, but the page says Velious',
   assert.ok(coldain.length >= 5, `only ${coldain.length} Coldain Velium donors`)
   for (const d of coldain) assert.equal(d.eraTag, 'Velious', d.name)
 
-  // WITHOUT a zone the layered verdict is the banner's; with one, the zone still wins.
+  // WITHOUT a zone the layered verdict is the banner's — and SINCE JOS-298 so is the verdict WITH
+  // one: `{{Velious Era}}` is an out-of-era badge the wiki renders in red, and a drop zone cannot
+  // refute a claim about which content the server has opened. (It used to read `in-era` here, on
+  // the zone-wins doctrine; `tests/plannerEra.test.mts` carries the inversion and its evidence.)
   assert.equal(layeredVerdict([], sword.eraTag), 'out-of-era')
-  assert.equal(layeredVerdict(['Lower Guk'], sword.eraTag), 'in-era')
+  assert.equal(layeredVerdict(['Lower Guk'], sword.eraTag), 'out-of-era')
 })
 
 test('THE EPIC PIN: a dropperless epic reward is out-of-era on a classic server (V1)', () => {

@@ -23,6 +23,7 @@ import { startDevStack, type DevStack } from '../scripts/dev-feedback-server.mts
 import {
   MAX_UPLOAD_BYTES,
   type FeedbackEnv,
+  type InventoryDumpMeta,
   type LogSliceMeta,
   type PresignedUpload,
   type SubmitRequest,
@@ -64,9 +65,41 @@ function request(over: Partial<SubmitRequest> = {}): SubmitRequest {
     clientReportId: randomUUID(),
     clientTs: Date.now(),
     log: null,
+    inventory: null,
+    achievements: null,
     ...over,
   }
 }
+
+/** A gzipped `/outputfile inventory` dump, in the real tab-separated shape (JOS-296). */
+const INV_GZ = gzipSync(
+  Buffer.from('Location\tName\tID\tCount\tSlots\r\nEar\tDrop of Crystallized Flame +7\t177839\t1\t10\r\n'),
+)
+
+function invMetaFor(gz: Buffer): InventoryDumpMeta {
+  return {
+    bytes: gz.byteLength,
+    lines: 2,
+    updatedAt: Date.UTC(2026, 7, 1, 12, 0, 0),
+    sha256: createHash('sha256').update(gz).digest('hex'),
+  }
+}
+
+/** A gzipped `/outputfile achievements` dump, in the real tab-INDENTED shape (JOS-441). */
+const ACH_GZ = gzipSync(
+  Buffer.from(
+    'Untapped Potential: Classes\r\nC\tPrimary Class Unlock - Paladin\r\n' +
+      'C\t\tObtain Truvinan.\r\n' +
+      'C\t\tThis achievement will autocomplete if you chose to confirm your Primary Class as a Paladin.\r\n',
+  ),
+)
+
+const achMetaFor = (gz: Buffer): InventoryDumpMeta => ({
+  bytes: gz.byteLength,
+  lines: 4,
+  updatedAt: Date.UTC(2026, 7, 21, 11, 0, 0),
+  sha256: createHash('sha256').update(gz).digest('hex'),
+})
 
 interface Answer {
   status: number
@@ -161,6 +194,149 @@ test('no log attached ⇒ no presign is minted at all', async () => {
     const a = await submit(stack, request())
     assert.equal(a.status, 201)
     assert.equal(a.body.upload, null)
+    assert.equal(a.body.inventoryUpload, null)
+    assert.equal(a.body.achievementsUpload, null)
+  })
+})
+
+/**
+ * JOS-296 — the SECOND attachment, end to end against the real server.
+ *
+ * The two legs are INDEPENDENT and this is where that stops being a claim: two presigns, two
+ * keys under two different top-level prefixes, two uploads, two files on disk. A design that
+ * folded them into one presign would fail here on the second key.
+ */
+test('a submit with BOTH attachments mints two presigns and lands two objects', async () => {
+  await withStack(async (stack) => {
+    const a = await submit(stack, request({ log: metaFor(GZ), inventory: invMetaFor(INV_GZ) }))
+    assert.equal(a.status, 201)
+    const reportId = String(a.body.reportId)
+
+    const up = upstairs(a)
+    const inv = a.body.inventoryUpload as PresignedUpload
+    assert.notEqual(inv, null)
+    // Its own token, so the two presigns cannot collide in the server's map…
+    assert.equal(inv.url, `http://127.0.0.1:${stack.port}/devstack/upload/${reportId}.inventory`)
+    // …and its own S3 prefix, which is what makes the bucket's two lifecycle rules meaningful.
+    assert.match(inv.key, /^inventory\/\d{4}\/\d{2}\/\d{2}\/[0-9A-Z]{26}\.txt\.gz$/)
+    assert.notEqual(inv.key, up.key)
+    assert.equal(inv.fields['Content-Type'], 'application/gzip')
+    assert.equal(inv.fields['x-amz-server-side-encryption'], 'AES256')
+
+    assert.equal(await upload(up.url, up.fields, GZ), 204)
+    assert.equal(await upload(inv.url, inv.fields, INV_GZ), 204)
+
+    const slice = join(stack.dir, 'uploads', `${reportId}.log.gz`)
+    const dump = join(stack.dir, 'uploads', `${reportId}.inventory.txt.gz`)
+    assert.ok(existsSync(slice), 'the slice did not land')
+    assert.ok(existsSync(dump), 'the inventory export did not land')
+    assert.ok(readFileSync(dump).equals(INV_GZ), 'the dump bytes were altered in flight')
+
+    // The ledger records both, and says which is which.
+    const rows = readFileSync(join(stack.dir, 'reports.jsonl'), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+    const uploads = rows.filter((r) => r.t === 'upload')
+    assert.equal(uploads.length, 2)
+    assert.deepEqual(uploads.map((r) => r.kind).sort(), ['inventory', 'log'])
+    assert.equal(uploads.every((r) => r.shaMatches === true), true)
+    const report = rows.find((r) => r.t === 'report')
+    assert.equal(typeof report?.inventoryKey, 'string')
+  })
+})
+
+/**
+ * JOS-441 — the THIRD attachment, and the same independence claim a third time.
+ *
+ * The interesting one is the TOKEN: at two kinds the server picked the URL segment with an
+ * `isLog` ternary, and a third kind is where that shape would have started guessing. Its own
+ * token, its own prefix, its own file — asserted beside the other two in one report, because a
+ * collision between any pair of them is what this test exists to catch.
+ */
+test('all THREE attachments mint three presigns and land three distinct objects', async () => {
+  await withStack(async (stack) => {
+    const a = await submit(
+      stack,
+      request({
+        log: metaFor(GZ),
+        inventory: invMetaFor(INV_GZ),
+        achievements: achMetaFor(ACH_GZ)
+      }),
+    )
+    assert.equal(a.status, 201)
+    const reportId = String(a.body.reportId)
+
+    const up = upstairs(a)
+    const inv = a.body.inventoryUpload as PresignedUpload
+    const ach = a.body.achievementsUpload as PresignedUpload
+    assert.notEqual(ach, null)
+    assert.equal(ach.url, `http://127.0.0.1:${stack.port}/devstack/upload/${reportId}.achievements`)
+    assert.match(ach.key, /^achievements\/\d{4}\/\d{2}\/\d{2}\/[0-9A-Z]{26}\.txt\.gz$/)
+    assert.equal(new Set([up.key, inv.key, ach.key]).size, 3, 'three keys, no collision')
+    assert.equal(new Set([up.url, inv.url, ach.url]).size, 3, 'three tokens, no collision')
+
+    assert.equal(await upload(up.url, up.fields, GZ), 204)
+    assert.equal(await upload(inv.url, inv.fields, INV_GZ), 204)
+    assert.equal(await upload(ach.url, ach.fields, ACH_GZ), 204)
+
+    const landed = join(stack.dir, 'uploads', `${reportId}.achievements.txt.gz`)
+    assert.ok(existsSync(landed), 'the achievements export did not land')
+    assert.ok(readFileSync(landed).equals(ACH_GZ), 'the dump bytes were altered in flight')
+
+    const rows = readFileSync(join(stack.dir, 'reports.jsonl'), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+    const uploads = rows.filter((r) => r.t === 'upload')
+    assert.equal(uploads.length, 3)
+    assert.deepEqual(uploads.map((r) => r.kind).sort(), ['achievements', 'inventory', 'log'])
+    assert.equal(uploads.every((r) => r.shaMatches === true), true)
+    const report = rows.find((r) => r.t === 'report')
+    assert.equal(typeof report?.achievementsKey, 'string')
+  })
+})
+
+test('an achievements export alone is a complete report, and its policy is the same', async () => {
+  await withStack(async (stack) => {
+    const a = await submit(stack, request({ achievements: achMetaFor(ACH_GZ) }))
+    assert.equal(a.status, 201)
+    assert.equal(a.body.upload, null)
+    assert.equal(a.body.inventoryUpload, null)
+    const ach = a.body.achievementsUpload as PresignedUpload
+    assert.equal(await upload(ach.url, ach.fields, ACH_GZ), 204)
+    // The pinned key and the two `eq` conditions, exactly as the other two legs enforce them.
+    assert.equal(
+      await upload(ach.url, { ...ach.fields, key: 'achievements/2026/08/21/elsewhere.txt.gz' }, ACH_GZ),
+      403,
+    )
+    assert.equal(await upload(ach.url, { ...ach.fields, 'Content-Type': 'text/plain' }, ACH_GZ), 403)
+  })
+})
+
+test('an inventory export alone is a complete report — the slice is not a precondition', async () => {
+  await withStack(async (stack) => {
+    const a = await submit(stack, request({ inventory: invMetaFor(INV_GZ) }))
+    assert.equal(a.status, 201)
+    assert.equal(a.body.upload, null, 'no log was attached, so no slice presign')
+    const inv = a.body.inventoryUpload as PresignedUpload
+    assert.equal(await upload(inv.url, inv.fields, INV_GZ), 204)
+    assert.ok(existsSync(join(stack.dir, 'uploads', `${String(a.body.reportId)}.inventory.txt.gz`)))
+  })
+})
+
+test('the dump’s upload leg enforces the same policy the slice’s does', async () => {
+  await withStack(async (stack) => {
+    const a = await submit(stack, request({ inventory: invMetaFor(INV_GZ) }))
+    const inv = a.body.inventoryUpload as PresignedUpload
+    // The pinned key, and the two `eq` conditions — the presign is exact, not starts-with.
+    assert.equal(await upload(inv.url, { ...inv.fields, key: 'inventory/2026/08/13/elsewhere.txt.gz' }, INV_GZ), 403)
+    assert.equal(await upload(inv.url, { ...inv.fields, 'Content-Type': 'text/plain' }, INV_GZ), 403)
+    // content-length-range 1..MAX_UPLOAD_BYTES, the SERVER-side half of the cap.
+    assert.equal(await upload(inv.url, inv.fields, Buffer.alloc(MAX_UPLOAD_BYTES + 1)), 400)
+    assert.equal(await upload(inv.url, inv.fields, Buffer.alloc(0)), 400)
+    // …and after all that the honest upload still works.
+    assert.equal(await upload(inv.url, inv.fields, INV_GZ), 204)
   })
 })
 

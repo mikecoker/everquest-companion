@@ -8,10 +8,18 @@
 import { ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { GraphicsPrefs } from '../shared/graphicsPrefs'
+import type { GraphicsEnvironment } from '../shared/wineDetect'
 
 export const graphicsBridge = {
-  /** The persisted graphics switches. Both off by default. */
+  /** The persisted graphics switches. Both 'auto' by default. */
   getGraphicsPrefs: (): Promise<GraphicsPrefs> => ipcRenderer.invoke(IPC.graphicsPrefsGet),
+  /**
+   * What this MACHINE recommends for a switch left on 'auto' (JOS-31) — a launch-time constant,
+   * so one hydration is the whole story. The renderer folds it against the prefs with the same
+   * `resolveGraphics` main used, which is what lets the Preferences card say why a switch is on.
+   */
+  getGraphicsEnvironment: (): Promise<GraphicsEnvironment> =>
+    ipcRenderer.invoke(IPC.graphicsEnvGet),
   /**
    * Merge-patch them; resolves to what was ACTUALLY stored.
    *

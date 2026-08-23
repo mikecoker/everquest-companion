@@ -16,51 +16,52 @@
 // The rows are also the completeness check: `TELEMETRY_DOC_EVENTS` must cover
 // `TELEMETRY_EVENT_KINDS` exactly, which is what makes "adding an event means adding a doc row"
 // a test failure rather than a good intention.
+//
+// THE EVENT TABLE ITSELF LIVES IN `./telemetryDocEvents.ts` — split out when JOS-100's
+// `errorReport` row pushed this file past the repo's 400-code-line ceiling, and re-exported
+// below so the generator and the parity test import exactly what they always did. What stays
+// here is the RENDERING and the bucket tables.
 
 import {
   ALERT_COUNT_EDGES,
   CHAR_COUNT_EDGES,
   COLD_START_MS_EDGES,
+  CPU_COUNT_EDGES,
+  DISPLAY_COUNT_EDGES,
   LOG_SIZE_BYTES_EDGES,
   MAX_TZ_OFFSET_HOURS,
   MIN_TZ_OFFSET_HOURS,
+  NEW_BYTES_EDGES,
+  PRIMARY_SCALE_EDGES,
+  SESSION_AGE_MS_EDGES,
+  STUTTER_MS_EDGES,
   TELEMETRY_API_VERSION,
   TELEMETRY_BUFFER_CAP,
   TELEMETRY_EVENT_KINDS,
-  TELEMETRY_FAILURE_CLASSES,
-  TELEMETRY_FEATURES,
   TELEMETRY_FUNNELS,
   TELEMETRY_FUNNEL_STEPS,
-  TELEMETRY_OUTCOMES,
-  TELEMETRY_OVERLAY_KINDS,
-  TELEMETRY_UPDATE_CHANNELS,
-  TELEMETRY_UPDATE_STEPS,
-  TELEMETRY_VIEWS,
-  TELEMETRY_VOICE_ENGINES,
+  TOTAL_MEM_GB_EDGES,
   bucketRange,
   type TelemetryEventKind
 } from './telemetry'
+import { FREE_MEM_GB_EDGES, LIVE_STALL_MS_EDGES, WORKING_SET_MB_EDGES } from './telemetryLive'
+import { TELEMETRY_DOC_EVENTS, type DocEvent, type DocField } from './telemetryDocEvents'
+
+export { TELEMETRY_DOC_EVENTS }
+export type { DocEvent, DocField }
 
 // ------------------------------------------------------------------ the tables
-
-export interface DocField {
-  name: string
-  /** Rendered from the schema's own enums/edges — never a hand-typed list of values. */
-  type: string
-  note: string
-}
-
-export interface DocEvent {
-  t: TelemetryEventKind
-  when: string
-  fields: DocField[]
-}
 
 export interface DocBucket {
   /** The field name the bucket index appears under. */
   field: string
   edges: readonly number[]
-  format: 'count' | 'ms' | 'bytes'
+  /** `gb` and `percent` arrived with JOS-364's machine class: memory is declared in whole
+   *  gibibytes (a byte ladder would print `4 GB – 8 GB` from numbers nobody wrote) and a display
+   *  scale is a percentage, which no existing format spells. `mb` arrived with JOS-367's working
+   *  set for the same reason in the other direction — that ladder is declared in mebibytes, and
+   *  `gb` would print `0 GB` for its first three rungs. */
+  format: 'count' | 'ms' | 'bytes' | 'gb' | 'mb' | 'percent'
   what: string
 }
 
@@ -68,192 +69,6 @@ export interface DocBucket {
 function values(list: readonly string[]): string {
   return list.map((v) => `\`${v}\``).join(' · ')
 }
-
-const COUNT = 'whole number'
-const BUCKET = 'bucket index'
-
-/**
- * The one place the log-line counter is described, shared by both events that carry it — a
- * second copy of this sentence is a second thing to keep true.
- *
- * It says "how many, including re-reads" out loud because the number is bigger than a reader
- * would expect: the app re-reads your log's history each time it starts, and every one of those
- * lines is parsed again. The count is of PARSING WORK; nothing about a line survives it.
- */
-const LINES_PARSED =
-  'How many log lines were read since the last one of these. A count of lines only — no line, ' +
-  'and no part of one, is ever sent. Starting the app re-reads your log history, so those ' +
-  'lines are counted again each launch.'
-
-/**
- * The startup-replay group, listed on BOTH events that can carry it — one array, spread twice, for
- * the same reason `LINES_PARSED` is one sentence: a second copy is a second thing to keep true.
- *
- * The rows are named `startup.x` because that is where they live in the payload the Preferences
- * viewer prints, and a reader comparing the two should find the same names.
- */
-const STARTUP_FIELDS: DocField[] = [
-  {
-    name: 'startup.replayMs',
-    type: `${COUNT} (optional)`,
-    note: 'How long the app took to read your log history when it started.'
-  },
-  {
-    name: 'startup.eventsReplayed',
-    type: COUNT,
-    note: 'How many log lines that was. A count only — no line, and no part of one, is sent.'
-  },
-  {
-    name: 'startup.dutyPct',
-    type: COUNT,
-    note: 'What share of that time was spent working rather than deliberately pausing, 0–100.'
-  },
-  {
-    name: 'startup.maxBlockMs',
-    type: COUNT,
-    note: 'The longest single moment the app was unresponsive while reading.'
-  },
-  {
-    name: 'startup.blocksOver50',
-    type: COUNT,
-    note: 'How many of those moments were longer than 50 ms.'
-  },
-  {
-    name: 'startup.logSizeBucket',
-    type: BUCKET,
-    note: 'How big the log it read is — a RANGE (see below), never the size itself.'
-  }
-]
-
-/** Why the group is optional and where it appears — said once, printed on both events. */
-const STARTUP_WHEN =
-  'Present on the first of these that follows startup, once per launch: how long reading your ' +
-  'log history took, and how smoothly. Reading a log after switching character is deliberately ' +
-  'not measured.'
-
-export const TELEMETRY_DOC_EVENTS: readonly DocEvent[] = [
-  {
-    t: 'sessionStart',
-    when: 'Once, when the app finishes starting up.',
-    fields: [
-      { name: 'coldStartMsBucket', type: BUCKET, note: 'How long the app took to become usable.' }
-    ]
-  },
-  {
-    t: 'sessionHeartbeat',
-    when:
-      'Every 5 minutes while the app is open — the "is anyone using it right now" signal. ' +
-      STARTUP_WHEN,
-    fields: [
-      { name: 'uptimeMs', type: COUNT, note: 'How long this session has been running.' },
-      { name: 'linesParsed', type: `${COUNT} (optional)`, note: LINES_PARSED },
-      ...STARTUP_FIELDS
-    ]
-  },
-  {
-    t: 'sessionEnd',
-    when: `Once, when the app closes. ${STARTUP_WHEN}`,
-    fields: [
-      { name: 'durationMs', type: COUNT, note: 'How long the session lasted.' },
-      { name: 'viewsVisited', type: COUNT, note: 'How many different tabs were opened.' },
-      { name: 'linesParsed', type: `${COUNT} (optional)`, note: LINES_PARSED },
-      ...STARTUP_FIELDS
-    ]
-  },
-  {
-    t: 'viewDwell',
-    when: 'When you switch away from a tab.',
-    fields: [
-      { name: 'view', type: values(TELEMETRY_VIEWS), note: 'Which tab. A fixed list of tab names.' },
-      { name: 'ms', type: COUNT, note: 'How long it was on screen.' }
-    ]
-  },
-  {
-    t: 'overlayToggle',
-    when: 'When you open or close a floating meter.',
-    fields: [
-      { name: 'kind', type: values(TELEMETRY_OVERLAY_KINDS), note: 'Which overlay.' },
-      { name: 'open', type: 'true / false', note: 'Opened or closed.' }
-    ]
-  },
-  {
-    t: 'featureUse',
-    when: 'When you use one of the listed features.',
-    fields: [
-      { name: 'feature', type: values(TELEMETRY_FEATURES), note: 'Which one. A fixed list.' },
-      { name: 'count', type: COUNT, note: 'How many times, since the last batch.' }
-    ]
-  },
-  {
-    t: 'alertFired',
-    when: 'A rollup of how many alerts fired — never which alert, and never its text.',
-    fields: [
-      { name: 'count', type: COUNT, note: 'Alerts fired.' },
-      { name: 'spokenCount', type: COUNT, note: 'How many of those were spoken aloud.' }
-    ]
-  },
-  {
-    t: 'setupSnapshot',
-    when: 'Once per session: what a typical install looks like.',
-    fields: [
-      { name: 'charCountBucket', type: BUCKET, note: 'How many character logs the app can see.' },
-      { name: 'logSizeBucket', type: BUCKET, note: 'How big the log it reads is.' },
-      { name: 'alertCountBucket', type: BUCKET, note: 'How many alerts you keep.' },
-      {
-        name: 'overlaysEnabled',
-        type: `list of ${values(TELEMETRY_OVERLAY_KINDS)}`,
-        note: 'Which floating meters are open.'
-      },
-      { name: 'cursorRing', type: 'true / false', note: 'Is the cursor ring on.' },
-      { name: 'autoHide', type: 'true / false', note: 'Is overlay auto-hide on.' },
-      {
-        name: 'voiceEngine',
-        type: values(TELEMETRY_VOICE_ENGINES),
-        note: 'Which speech tier your spoken alerts use — off when no alert is set to speak.'
-      },
-      { name: 'soundPackCount', type: COUNT, note: 'How many sound packs are installed.' },
-      { name: 'updateChannel', type: values(TELEMETRY_UPDATE_CHANNELS), note: 'Update channel.' }
-    ]
-  },
-  {
-    t: 'funnelStep',
-    when: 'When you reach a step of one of the three flows listed below.',
-    fields: [
-      { name: 'funnel', type: values(TELEMETRY_FUNNELS), note: 'Which flow.' },
-      { name: 'step', type: 'a step of that flow (below)', note: 'Which step it reached.' },
-      { name: 'outcome', type: `${values(TELEMETRY_OUTCOMES)} (optional)`, note: 'How it ended.' },
-      {
-        name: 'failureClass',
-        type: `${values(TELEMETRY_FAILURE_CLASSES)} (optional)`,
-        note: 'A coarse category when it failed. Never an error message.'
-      }
-    ]
-  },
-  {
-    t: 'healthCounters',
-    when: 'Once per session: counts of things that went wrong. Counts only, never messages.',
-    fields: [
-      { name: 'rendererCrashes', type: COUNT, note: 'Window crashes.' },
-      { name: 'mainErrorLogLines', type: COUNT, note: 'Lines written to the local error log.' },
-      { name: 'parserStalls', type: COUNT, note: 'Times log reading stalled.' },
-      { name: 'presenceRestarts', type: COUNT, note: 'Times the game-window watcher restarted.' },
-      { name: 'speechFailures', type: COUNT, note: 'Times an utterance failed to speak.' }
-    ]
-  },
-  {
-    t: 'updateOutcome',
-    when: 'When an app update is checked for, downloaded, or applied.',
-    fields: [
-      { name: 'step', type: values(TELEMETRY_UPDATE_STEPS), note: 'Which step.' },
-      { name: 'ok', type: 'true / false', note: 'Did it succeed.' },
-      {
-        name: 'failureClass',
-        type: `${values(TELEMETRY_FAILURE_CLASSES)} (optional)`,
-        note: 'A coarse category when it failed.'
-      }
-    ]
-  }
-]
 
 export const TELEMETRY_DOC_BUCKETS: readonly DocBucket[] = [
   {
@@ -279,12 +94,94 @@ export const TELEMETRY_DOC_BUCKETS: readonly DocBucket[] = [
     edges: ALERT_COUNT_EDGES,
     format: 'count',
     what: 'How many alerts are configured.'
+  },
+  {
+    field: 'sessionAgeBucket',
+    edges: SESSION_AGE_MS_EDGES,
+    format: 'ms',
+    what: 'How long the app had been running when an error happened.'
+  },
+  {
+    field: 'startup.newBytesBucket',
+    edges: NEW_BYTES_EDGES,
+    format: 'bytes',
+    what: 'How much the log grew while the app was closed.'
+  },
+  {
+    field: 'startup.stutter.p50Bucket',
+    edges: STUTTER_MS_EDGES,
+    format: 'ms',
+    what: 'How late the app’s own clock ran while it read (typical beat).'
+  },
+  {
+    field: 'startup.stutter.p95Bucket',
+    edges: STUTTER_MS_EDGES,
+    format: 'ms',
+    what: 'The same, at the worse end (one beat in twenty).'
+  },
+  // JOS-364's machine class. Each of these is a range for the same reason every row above is one:
+  // the exact figures together would describe one machine, and the questions they exist to answer
+  // ("do the freezes cluster on four-core boxes, or on scaled 4K displays") only need the range.
+  {
+    field: 'cpuCountBucket',
+    edges: CPU_COUNT_EDGES,
+    format: 'count',
+    what: 'How many processor cores the machine has.'
+  },
+  {
+    field: 'totalMemBucket',
+    edges: TOTAL_MEM_GB_EDGES,
+    format: 'gb',
+    what: 'How much memory the machine has.'
+  },
+  {
+    field: 'displayCountBucket',
+    edges: DISPLAY_COUNT_EDGES,
+    format: 'count',
+    what: 'How many monitors are attached.'
+  },
+  {
+    field: 'primaryScaleBucket',
+    edges: PRIMARY_SCALE_EDGES,
+    format: 'percent',
+    what: 'The main monitor’s display scaling.'
+  },
+  // JOS-367's live-session riders. The stall ladder is printed ONCE and named for the four fields
+  // that share it (two clock readings, two read-latency readings): four identical tables would be
+  // four chances for one of them to be read as a different ladder than it is.
+  {
+    field: 'live.p95Bucket · live.maxBucket · tail.p95Bucket · tail.maxBucket',
+    edges: LIVE_STALL_MS_EDGES,
+    format: 'ms',
+    what: 'How late the app’s own timers ran, and how long its reads of the log took.'
+  },
+  {
+    field: 'tail.deltaBytesBucket',
+    edges: NEW_BYTES_EDGES,
+    format: 'bytes',
+    what: 'The biggest single chunk of new log read at once.'
+  },
+  {
+    field: 'state.freeMemBucket',
+    edges: FREE_MEM_GB_EDGES,
+    format: 'gb',
+    what: 'How much free memory the computer had.'
+  },
+  {
+    field: 'state.workingSetBucket',
+    edges: WORKING_SET_MB_EDGES,
+    format: 'mb',
+    what: 'How much memory this app was using.'
   }
 ]
 
 // ------------------------------------------------------------------ rendering
 
+/** KB below a megabyte, GB above a gigabyte, MB in between. The KB arm arrived with JOS-57's
+ *  new-bytes ladder, whose first edge is 64 KB — rounded to megabytes it would print `0 MB`, which
+ *  is a table saying nothing. Nothing on the log-size ladder is affected: its first edge IS 1 MB. */
 function fmtBytes(n: number): string {
+  if (n < 1_048_576) return `${String(Math.round(n / 1024))} KB`
   const mb = n / 1_048_576
   return mb >= 1024 ? `${String(Math.round(mb / 1024))} GB` : `${String(Math.round(mb))} MB`
 }
@@ -292,6 +189,9 @@ function fmtBytes(n: number): string {
 function fmtValue(n: number, format: DocBucket['format']): string {
   if (format === 'bytes') return fmtBytes(n)
   if (format === 'ms') return n >= 1000 ? `${String(n / 1000)} s` : `${String(n)} ms`
+  if (format === 'gb') return `${String(n)} GB`
+  if (format === 'mb') return `${String(n)} MB`
+  if (format === 'percent') return `${String(n)}%`
   return String(n)
 }
 
@@ -312,8 +212,19 @@ function bucketLabels(b: DocBucket): string[] {
   return out
 }
 
+/**
+ * ONE EVENT'S SECTION. An event with NO fields prints a sentence instead of an empty table
+ * (JOS-109's `optOut` / `optIn`): a table with a header row and nothing under it looks like a
+ * rendering bug, and "there is nothing in it" is the single most reassuring thing this page can
+ * say about those two events, so it is said in words.
+ */
 function eventSection(e: DocEvent): string[] {
-  const lines = [`### \`${e.t}\``, '', e.when, '', '| Field | Values | What it means |', '| --- | --- | --- |']
+  const lines = [`### \`${e.t}\``, '', e.when, '']
+  if (e.fields.length === 0) {
+    lines.push('**This event has no fields at all.** It says only that it happened, alongside the', 'five facts every send carries (above).', '')
+    return lines
+  }
+  lines.push('| Field | Values | What it means |', '| --- | --- | --- |')
   for (const f of e.fields) lines.push(`| \`${f.name}\` | ${f.type} | ${f.note} |`)
   lines.push('')
   return lines
@@ -372,15 +283,28 @@ function headerSection(): string[] {
     '',
     '## What can never be collected',
     '',
-    'Not "what we choose not to collect" — what the schema has no room for. Every field below',
-    'is either a number or one value from a fixed list printed on this page. There is no',
-    'free-text field anywhere in it, so there is nowhere for any of this to go:',
+    'Not "what we choose not to collect" — what the schema has no room for:',
     '',
     '- your character names, your server, your guild, anyone you play with',
     '- zone, mob, spell, item or quest names',
     '- anything you typed: chat, tells, search boxes, alert names, feedback text',
-    '- any line of your log, or any file path',
+    '- any line of your log',
+    '- any path on your machine — where the app is installed, where your log lives, your',
+    '  account name',
     '- your IP address, your machine name, your account — there is no account',
+    '',
+    'Almost every field on this page is a number, or one value from a fixed list printed here,',
+    'so there is simply nowhere for any of that to go.',
+    '',
+    '**One event is different, and it is worth reading about.** `errorReport` sends the',
+    'technical details of a failure: what kind of error it was, a **redacted** version of its',
+    'message, and where in the app’s own program files it happened. It exists because an error',
+    'report nobody can act on is not worth sending. The redaction runs on your machine **and**',
+    'again on arrival — every file path, everything in quotes and every long number in the',
+    'message is replaced first, and a message that arrives unredacted is thrown away rather than',
+    'cleaned up. The file names it sends are the app’s own (they always begin `out/`), never a',
+    'location on your disk. Nothing about your game reaches it: the only thing it says about',
+    'your log is what KINDS of line the app had just read, from the fixed list of kinds.',
     '',
     '## What identifies a send',
     '',
@@ -413,6 +337,18 @@ function footerSection(): string[] {
     'away everything currently held on your machine, and discards the random id — all',
     'immediately. Nothing is kept to be sent later. Turning it back on starts from empty, with a',
     'new id, which counts as a brand-new install.',
+    '',
+    // THE DISCLOSURE, and it is the point of putting it here rather than in a release note: the
+    // one thing this page could not previously be read to allow is a send that happens AFTER you
+    // said stop. There is now exactly one, it carries nothing, and it is described before a user
+    // could be surprised by it.
+    '**One last thing is sent when you turn it off, and this is it:** a single notice saying the',
+    'switch was turned off, so opt-outs can be counted rather than guessed at. It carries no',
+    'measurements at all, only the five facts at the top of this page that every send carries.',
+    'Everything else waiting to be sent is thrown away rather than sent with it, and nothing',
+    'further is ever sent. If your machine is offline at that moment the notice is simply lost;',
+    'it is never retried, because keeping something to send later is exactly what turning this',
+    'off is supposed to stop. Turning it back on sends the matching notice under the new id.',
     ''
   ]
 }

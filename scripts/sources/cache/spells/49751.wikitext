@@ -1,5 +1,5 @@
 {{Classic Era}}
-{{Spellpage|
+{{Spellpagesmart|
 
 | spellname = Sisna's Animation
 | spellicon = 38
@@ -8,7 +8,7 @@
 | classes = * [[Enchanter]] - Level 17 (Autogranted)
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Sisna's Animation Summon|Sisna's Animation]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 19 [[Sisna's Animation Summon|Animation]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
@@ -19,12 +19,12 @@
 | recast_time = 12.00
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 
 
-* '''Reagent:''' 3 x [[Tiny Dagger]]
+* '''Reagent:''' 1 x [[Tiny Dagger]]
 
 | msg_cast_on_you =  
 | msg_cast_on_other =  

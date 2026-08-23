@@ -32,8 +32,9 @@
 | msg_cast_on_other = 's weapons glow.
 | msg_wears_off = The glow fades from your weapons.
 
-| where_to_obtain =
+| where_to_obtain = 
 
-| TableLocations =
-| TableEra = Classic
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 }}

@@ -20,12 +20,26 @@
 //     overridable ingest URL is an exfiltration primitive (net.ts).
 
 import { dialog } from 'electron'
+import { statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import type { FeedbackEnv, LogSliceMeta } from '../../shared/feedback'
+import type {
+  FeedbackAchievementsPreview,
+  FeedbackEnv,
+  FeedbackInventoryPreview,
+  LogSliceMeta
+} from '../../shared/feedback'
 import { logError } from '../errorLog'
 import { getMainWindow } from '../windows'
 import { feedbackEndpointConfigured } from './net'
-import { activeLog, cachedSlice, feedbackEnv } from './submit'
+import {
+  activeAchievementsPath,
+  activeInventoryPath,
+  activeLog,
+  cachedSlice,
+  currentAchievements,
+  currentInventory,
+  feedbackEnv
+} from './submit'
 import { queuedCount } from './state'
 
 export { installId } from './state'
@@ -41,6 +55,18 @@ export interface FeedbackContext {
   queued: number
   /** Is there a character log to slice at all? False on a machine with no EQ install. */
   logAvailable: boolean
+  /** Is there a `/outputfile inventory` dump on disk? False ⇒ the control is DISABLED with the
+   *  command as its hint, never hidden (JOS-296). */
+  inventoryAvailable: boolean
+  /** The dump's mtime, epoch ms, or null. The JOS-253 freshness truth, on the context so the
+   *  dialog can state the age before anything is read. */
+  inventoryUpdatedAt: number | null
+  /** Is there a `/outputfile achievements` dump on disk (JOS-441)? Same disabled-with-a-hint
+   *  treatment, and on this kind the hint is the point: the players whose reports motivated the
+   *  attachment had all just run the command, and the ones who have not need to be told it exists. */
+  achievementsAvailable: boolean
+  /** That dump's mtime, epoch ms, or null. */
+  achievementsUpdatedAt: number | null
 }
 
 /**
@@ -55,13 +81,93 @@ export interface FeedbackSlicePreview extends LogSliceMeta {
   windowMinutes: number
 }
 
-/** Header context for the dialog. Cheap enough to call on every open; nothing here is cached. */
-export function feedbackContext(): FeedbackContext {
+/**
+ * The dump's mtime without reading a byte of it — one `stat`, exactly what `outputs/registry.ts`
+ * does for the same question. Null when the file went away between the listing and the stat,
+ * which is "no dump" and not an error to render.
+ */
+function dumpMtime(path: string): number | null {
+  try {
+    return Math.floor(statSync(path).mtimeMs)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Header context for the dialog. Cheap enough to call on every open; nothing here is cached.
+ *
+ * ASYNC SINCE JOS-369, because `feedbackEnv()` now folds the perf timeline and one of its eleven
+ * state fields is a promise to the GPU process (capped at a second, memoized after the first).
+ * The dialog's preview and the payload therefore come out of the SAME assembly — the alternative
+ * was a second call the two paths could answer differently.
+ */
+export async function feedbackContext(): Promise<FeedbackContext> {
+  const dump = activeInventoryPath()
+  const updatedAt = dump === null ? null : dumpMtime(dump.path)
+  const ach = activeAchievementsPath()
+  const achUpdatedAt = ach === null ? null : dumpMtime(ach.path)
   return {
-    env: feedbackEnv(),
+    env: await feedbackEnv(),
     endpointConfigured: feedbackEndpointConfigured(),
     queued: queuedCount(),
-    logAvailable: activeLog() !== null
+    logAvailable: activeLog() !== null,
+    // A path whose stat failed is a file that is no longer there — both halves go together, the
+    // same atomicity `outputFileStatus` enforces for the freshness line everywhere else.
+    inventoryAvailable: updatedAt !== null,
+    inventoryUpdatedAt: updatedAt,
+    achievementsAvailable: achUpdatedAt !== null,
+    achievementsUpdatedAt: achUpdatedAt
+  }
+}
+
+/**
+ * Package the CURRENT dump and return only what the dialog shows (JOS-296).
+ *
+ * Never null and never a throw: exactly one of `meta` and `unavailable` is set, so the dialog
+ * always has a sentence to render. The gz bytes stay in main — the same rule the slice preview
+ * obeys, for the same reason.
+ */
+export async function buildInventoryPreview(): Promise<FeedbackInventoryPreview> {
+  const dump = await currentInventory()
+  if (!dump.ok) {
+    return {
+      meta: null,
+      unavailable: dump.reason,
+      previewLines: [],
+      truncatedPreview: false,
+      fileName: activeInventoryPath()?.fileName ?? null
+    }
+  }
+  const { bytes, lines, updatedAt, sha256, previewLines, truncatedPreview, fileName } = dump
+  return {
+    meta: { bytes, lines, updatedAt, sha256 },
+    unavailable: null,
+    previewLines,
+    truncatedPreview,
+    fileName
+  }
+}
+
+/** The achievements dump's preview (JOS-441) — the same contract, over its own packager. */
+export async function buildAchievementsPreview(): Promise<FeedbackAchievementsPreview> {
+  const dump = await currentAchievements()
+  if (!dump.ok) {
+    return {
+      meta: null,
+      unavailable: dump.reason,
+      previewLines: [],
+      truncatedPreview: false,
+      fileName: activeAchievementsPath()?.fileName ?? null
+    }
+  }
+  const { bytes, lines, updatedAt, sha256, previewLines, truncatedPreview, fileName } = dump
+  return {
+    meta: { bytes, lines, updatedAt, sha256 },
+    unavailable: null,
+    previewLines,
+    truncatedPreview,
+    fileName
   }
 }
 

@@ -1,8 +1,9 @@
 import { type JSX, useEffect, useRef, useState } from 'react'
 import { Box, LinearProgress, Typography } from '@mui/material'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
+import NewReleasesIcon from '@mui/icons-material/NewReleases'
 import type { UpdateStatus } from '@shared/types'
-import { updateChipState, type UpdateChipState } from '@shared/update'
+import { updateChipLine, updateChipState } from '@shared/update'
 import { formatAge } from '../lib/formatDate'
 
 /**
@@ -12,13 +13,35 @@ import { formatAge } from '../lib/formatDate'
  * The product rule this encodes: an update is a REWARD, not a nag. There is
  * exactly one loud state (downloaded + staged ⇒ "Restart to update", gold,
  * clickable, glowing softly ONCE on arrival) and one resting state (a muted
- * "checked 2h ago" line, click to check). Downloading is a hairline bar. Errors
- * render as the resting state — a failed check is not the user's problem; the
- * message stays available in Preferences > Updates, which remains the DETAIL
- * surface (exact timestamp, version, manual check, error text).
+ * "checked 2h ago" line, click to check). Downloading is a hairline bar.
+ *
+ * AND A FAILED CHECK SAYS SO, IN THE SAME BREATH AND AT THE SAME VOLUME (JOS-307).
+ * It used to render character-for-character like a successful one, admitting the
+ * failure only in a `title` nobody hovers — and after a manual check that failed,
+ * the cooldown line read "checked just now", a sentence about a check that did not
+ * happen. It now reads "update check failed", one step out of `text.disabled` and
+ * no further: still no badge, no red, no modal, no repeat. Preferences > Updates
+ * remains the DETAIL surface (exact timestamp, version, manual check, error text).
  *
  * Nothing here ever re-prompts: if the user ignores the chip, apply-on-quit
  * installs the update the next time they close the app, silently.
+ *
+ * AND THE VERSION NUMBER HAS A DOOR NEXT TO IT (JOS-254). This line is where the
+ * app states which version you are running, from every tab, all the time — so it
+ * is where the question "…and what changed in it?" occurs to somebody, and a
+ * small icon beside the number answers it in one click. The notes already had a
+ * home (Preferences → What's new) and two ways in: a teaser strip that a user can
+ * dismiss forever in half a second, and a link on a Preferences row you have to
+ * already be standing on. Neither is reachable from the number itself, which is
+ * why players kept asking for the changelog and going to GitHub for it (feedback
+ * 01KZVG3NCT7AAFGFSPYVHBQMHN). The icon is a rail switch to that one panel, never
+ * a second copy of it.
+ *
+ * It rides the two states that PRINT THE INSTALLED VERSION — the quiet line and
+ * the dev line — and is deliberately absent from the other two: "Restart to
+ * update" names the version you are about to get rather than the one you have,
+ * and it is a single-action chip that a second control would dilute; downloading
+ * names no version at all. Both are transient, and the quiet line comes back.
  *
  * NO MUI TOOLTIP LIVES IN THIS FILE, and that is a rule rather than an omission
  * (owner report, 2026-08-04: "it interferes with clicking Preferences more often
@@ -109,6 +132,59 @@ function ReadyChip({
   )
 }
 
+/**
+ * The patch-notes door beside the version number (JOS-254).
+ *
+ * A plain button rather than MUI's IconButton, for the same reason the chips
+ * above are plain buttons: this line lives at 11px in a 220px rail, and a ripple
+ * surface with its own 40px hit box would own more of the row than the version it
+ * sits beside. The label is a NATIVE `title` — never a MUI Tooltip, which is the
+ * rule this whole file obeys (see the header: a popper here eats the click the
+ * user was aiming at Preferences).
+ */
+function NotesButton({ onOpen }: { onOpen: () => void }): JSX.Element {
+  return (
+    <Box
+      component="button"
+      type="button"
+      data-testid="update-chip-notes"
+      aria-label="What's new in this version"
+      title="What's new in this version"
+      onClick={onOpen}
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        flexShrink: 0,
+        border: 0,
+        p: 0,
+        bgcolor: 'transparent',
+        color: 'text.disabled',
+        cursor: 'pointer',
+        transition: 'color 140ms ease',
+        '&:hover': { color: 'text.secondary' }
+      }}
+    >
+      <NewReleasesIcon sx={{ fontSize: 14 }} />
+    </Box>
+  )
+}
+
+/**
+ * The row the version line sits in: the line itself, then the notes door.
+ *
+ * One place rather than two, so the quiet line and the dev line can never drift
+ * apart on padding — the chip's bottom-left footprint is a fixed thing and the
+ * icon must land in the same spot whichever line is showing.
+ */
+function VersionRow({ line, notes }: { line: JSX.Element; notes: JSX.Element | null }): JSX.Element {
+  return (
+    <Box sx={{ px: 2, pt: 0.75, pb: 1, display: 'flex', alignItems: 'center', gap: 0.75 }}>
+      <Box sx={{ minWidth: 0, flexGrow: 1 }}>{line}</Box>
+      {notes}
+    </Box>
+  )
+}
+
 /** Downloading: a hairline bar, still quiet. */
 function DownloadingChip({ percent }: { percent: number }): JSX.Element {
   return (
@@ -136,18 +212,21 @@ function DownloadingChip({ percent }: { percent: number }): JSX.Element {
  * "not checked yet" forever — a truthful but misleading state that reads as a broken
  * production updater. Static text, not a button: clicking would no-op.
  */
-function DisabledChip({ version }: { version: string }): JSX.Element {
+function DisabledChip({ version, notes }: { version: string; notes: JSX.Element | null }): JSX.Element {
   return (
-    <Box sx={{ px: 2, pt: 0.75, pb: 1 }}>
-      <Typography
-        data-testid="update-chip-disabled"
-        variant="caption"
-        title="Only the installed app auto-updates."
-        sx={{ display: 'block', color: 'text.disabled', lineHeight: 1.4, cursor: 'default' }}
-      >
-        {version ? `v${version} · ` : ''}updates off (dev)
-      </Typography>
-    </Box>
+    <VersionRow
+      notes={notes}
+      line={
+        <Typography
+          data-testid="update-chip-disabled"
+          variant="caption"
+          title="Only the installed app auto-updates."
+          sx={{ display: 'block', color: 'text.disabled', lineHeight: 1.4, cursor: 'default' }}
+        >
+          {version ? `v${version} · ` : ''}updates off (dev)
+        </Typography>
+      }
+    />
   )
 }
 
@@ -155,83 +234,62 @@ function DisabledChip({ version }: { version: string }): JSX.Element {
 function QuietChip({
   label,
   tip,
+  failed,
   disabled,
-  onCheck
+  onCheck,
+  notes
 }: {
   label: string
   tip: string
+  failed: boolean
   disabled: boolean
   onCheck: () => void
+  notes: JSX.Element | null
 }): JSX.Element {
   return (
-    <Box sx={{ px: 2, pt: 0.75, pb: 1 }}>
-      <Box
-        component="button"
-        type="button"
-        data-testid="update-chip-quiet"
-        disabled={disabled}
-        onClick={onCheck}
-        title={tip}
-        sx={{
-          display: 'block',
-          width: '100%',
-          textAlign: 'left',
-          border: 0,
-          p: 0,
-          bgcolor: 'transparent',
-          fontFamily: 'inherit',
-          fontSize: 11,
-          lineHeight: 1.4,
-          color: 'text.disabled',
-          cursor: 'pointer',
-          transition: 'color 140ms ease',
-          '&:hover': { color: 'text.secondary' },
-          '&:disabled': { cursor: 'default' }
-        }}
-      >
-        {label}
-      </Box>
-    </Box>
+    <VersionRow
+      notes={notes}
+      line={
+        <Box
+          component="button"
+          type="button"
+          data-testid="update-chip-quiet"
+          // The one machine-readable statement that the line is about a failure. An attribute
+          // rather than a second testid: the chip is ONE control in every state, and a test that
+          // has to guess which testid exists cannot assert the transition between them.
+          data-failed={failed ? 'true' : 'false'}
+          disabled={disabled}
+          onClick={onCheck}
+          title={tip}
+          sx={{
+            display: 'block',
+            width: '100%',
+            textAlign: 'left',
+            border: 0,
+            p: 0,
+            bgcolor: 'transparent',
+            fontFamily: 'inherit',
+            fontSize: 11,
+            lineHeight: 1.4,
+            // ONE STEP OUT OF `text.disabled`, AND NOT ONE MORE (JOS-307). The words carry the
+            // fact; this only stops them being rendered at the opacity reserved for text nobody
+            // is meant to read. No warning colour, no icon, no badge — the product rule that the
+            // only loud state is 'ready' is not this ticket's to move.
+            color: failed ? 'text.secondary' : 'text.disabled',
+            cursor: 'pointer',
+            transition: 'color 140ms ease',
+            '&:hover': { color: 'text.secondary' },
+            '&:disabled': { cursor: 'default' }
+          }}
+        >
+          {label}
+        </Box>
+      }
+    />
   )
 }
 
-/**
- * The muted line's text + its native `title` (never a MUI Tooltip — see the file header).
- *
- * The quiet line leads with the INSTALLED version — the chip is the bottom-left
- * "what am I running" spot, and "checked 2h ago" alone answered only half of it.
- *
- * A MANUAL check that finds nothing must say so: for the cooldown window the line reads
- * "up to date" instead of the ambiguous "checked just now" (which never answered the
- * question the click asked).
- *
- * Errors stay INVISIBLE here (same muted line) — only the hover title admits it,
- * and Preferences > Updates carries the detail.
- */
-function quietLine(
-  ui: UpdateChipState,
-  ctx: { version: string; now: number; busy: boolean; cooldown: boolean }
-): { label: string; tip: string } {
-  const vPrefix = ctx.version ? `v${ctx.version} · ` : ''
-  const upToDate = ctx.cooldown && ui.kind === 'quiet' && !ui.failed
-  const label =
-    ui.kind === 'working'
-      ? ui.label
-      : ctx.busy
-        ? 'Checking for updates…'
-        : upToDate
-          ? `${vPrefix}up to date`
-          : ui.checkedAt
-            ? `${vPrefix}checked ${formatAge(ui.checkedAt, ctx.now)}`
-            : `${vPrefix}not checked yet`
-  const tip =
-    ui.kind === 'quiet' && ui.failed
-      ? `Last check didn't complete${ui.message ? ` — ${ui.message}` : ''}. Click to try again.`
-      : 'Click to check for updates'
-  return { label, tip }
-}
-
-export function UpdateChip(): JSX.Element {
+export function UpdateChip({ onWhatsNew }: { onWhatsNew: () => void }): JSX.Element {
   const [status, setStatus] = useState<UpdateStatus>({ state: 'idle' })
   const [version, setVersion] = useState<string>('')
   const [now, setNow] = useState(() => Date.now())
@@ -293,16 +351,31 @@ export function UpdateChip(): JSX.Element {
 
   if (ui.kind === 'downloading') return <DownloadingChip percent={ui.percent} />
 
-  if (ui.kind === 'quiet' && ui.disabled) return <DisabledChip version={version} />
+  // Built once and handed to whichever version line is showing — see the header for why only
+  // those two states carry it.
+  const notes = <NotesButton onOpen={onWhatsNew} />
+
+  if (ui.kind === 'quiet' && ui.disabled) return <DisabledChip version={version} notes={notes} />
 
   // Working / quiet. The cooldown window ALSO disables re-checking — no spinner, no extra
   // chrome, the button just won't fire again for a few seconds. One click's answer is valid
   // for at least that long, and it keeps a rapid-clicker from hammering GitHub.
-  const { label, tip } = quietLine(ui, { version, now, busy, cooldown })
+  //
+  // THE SENTENCE ITSELF IS PURE AND LIVES IN `shared/update.ts` (JOS-307): what this chip says
+  // when a check fails is the only artefact a user like issue 29's ever produced, so it is pinned
+  // by a node test rather than by whoever reads this component next.
+  const { label, tip, failed } = updateChipLine(ui, {
+    version,
+    age: ui.checkedAt === undefined ? null : formatAge(ui.checkedAt, now),
+    busy,
+    cooldown
+  })
   return (
     <QuietChip
       label={label}
       tip={tip}
+      failed={failed}
+      notes={notes}
       disabled={busy || cooldown || ui.kind === 'working'}
       onCheck={() => {
         setBusy(true)

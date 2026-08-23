@@ -2,10 +2,10 @@
 // alert LIST's two dropdowns (owner: "the voice vs sound should be integrated into this dropdown
 // instead of having to drill into edit").
 //
-// The alert row shows two selects and nothing else, but the def carries FOUR things behind them:
-// the audio channel (`audio`: sound | speech | both), the pack sound (`sound.packId`/`soundId`),
-// what a spoken alert says (`speech.mode`/`phrase`) and — editor-only — whose voice says it
-// (`speech.voiceId`). This module is the mapping between the two, kept pure and DOM-free so the
+// The alert row shows two selects and nothing else, but the def carries three things behind them:
+// the audio channel (`audio`: sound | speech — 'both' is retired, JOS-362), the pack sound
+// (`sound.packId`/`soundId`) and what a spoken alert says (`speech.mode`/`phrase`). This module is
+// the mapping between the two, kept pure and DOM-free so the
 // mapping itself is node-testable: every "clicking X writes Y on the def" claim in the row is a
 // function here, not a closure inside a Select.
 //
@@ -15,17 +15,20 @@
 // That is what keeps every pre-voice def, every share string and the import de-duplication
 // fingerprint stable (shared/alertTypes.ts: absent `audio` ⇒ 'sound', by construction).
 //
-// VOICEID IS PRESERVED, NEVER AUTHORED. The row cannot pick a voice — two selects cannot show
-// three dimensions — so the editor's SpeechBlock stays authoritative for it. Every write here
-// carries the def's existing `speech.voiceId` through untouched; a row edit must not silently
-// drop an override the user set in the editor.
+// THERE IS NO PER-ALERT VOICE ANY MORE (JOS-362). This module used to carry a def's
+// `speech.voiceId` through every write untouched, because the editor could author one and a row
+// edit must not silently drop it. The owner retired the whole dimension — "our settings shouldn't
+// store which voice per alert, only the preferences should (within Voice (spoken))" — so the id is
+// neither read nor written here, and Preferences owns who speaks, for every alert at once.
 //
 // Value imports from `shared/` are RELATIVE, never `@shared/*` — the repo-wide rule for anything
 // node:test loads (AGENTS.md toolchain gotchas, the mobSearch.ts precedent). Type-only imports
 // keep the alias, which is erased before Node ever sees the file.
 
-import type { AlertAudio, AlertDef, AlertSpeech, SoundPack, SpeechMode } from '@shared/types'
-import { MAX_SPEECH_CHARS } from '../../../../shared/speechText'
+import type { AlertAudioChoice, AlertDef, AlertSpeech, SoundPack, SpeechMode } from '@shared/types'
+import type { SoundFallback } from '@shared/soundPacks'
+import { MAX_SPEECH_CHARS, resolveAlertAudio } from '../../../../shared/speechText'
+import { resolveSoundRef } from '../../../../shared/soundPacks'
 
 /**
  * The audio state ONE row edits, flattened out of the def.
@@ -34,7 +37,8 @@ import { MAX_SPEECH_CHARS } from '../../../../shared/speechText'
  * because a picker needs a value to display even for a def that has never spoken.
  */
 export interface AudioChoice {
-  audio: AlertAudio
+  /** Never 'both': a stored one is resolved away on the way IN (`audioChoiceOf`), JOS-362. */
+  audio: AlertAudioChoice
   packId: string
   soundId: string
   mode: SpeechMode
@@ -45,19 +49,25 @@ export interface AudioChoice {
 export type AudioDef = Pick<AlertDef, 'audio' | 'sound' | 'speech'>
 
 /**
- * The two non-pack entries of the OUTPUT select, as select values.
+ * The one non-pack entry of the OUTPUT select, as a select value.
  *
- * They share the select's value space with pack ids, so they are namespaced with a colon —
- * `isSafePackId` (main/ipc) restricts a pack id to filename-safe characters, so neither string
- * can ever collide with a real pack.
+ * It shares the select's value space with pack ids, so it is namespaced with a colon —
+ * `isSafePackId` (main/ipc) restricts a pack id to filename-safe characters, so the string can
+ * never collide with a real pack. (`output:both` was the second one until JOS-362 retired the
+ * combined channel: there is no select value for a channel nothing may write.)
  */
 export const OUTPUT_SPEECH = 'output:speech'
-export const OUTPUT_BOTH = 'output:both'
 
-/** Flatten a def into the row's editable state. */
+/**
+ * Flatten a def into the row's editable state.
+ *
+ * The channel comes through `resolveAlertAudio`, so a def still storing the retired 'both' is
+ * shown as the channel it will actually be heard on rather than as a mode the picker cannot
+ * display — AudioPicker's own law that no row may sit in a state it does not state (JOS-362).
+ */
 export function audioChoiceOf(def: AudioDef): AudioChoice {
   return {
-    audio: def.audio ?? 'sound',
+    audio: resolveAlertAudio(def),
     packId: def.sound.packId,
     soundId: def.sound.soundId,
     mode: def.speech?.mode ?? 'alertName',
@@ -65,25 +75,25 @@ export function audioChoiceOf(def: AudioDef): AudioChoice {
   }
 }
 
-/** Which OUTPUT select entry a choice is showing: a pack id, or one of the two voice entries. */
+/** Which OUTPUT select entry a choice is showing: a pack id, or the voice entry. */
 export function outputValueOf(choice: AudioChoice): string {
-  if (choice.audio === 'speech') return OUTPUT_SPEECH
-  if (choice.audio === 'both') return OUTPUT_BOTH
-  return choice.packId
+  return choice.audio === 'speech' ? OUTPUT_SPEECH : choice.packId
 }
 
 /**
  * The `speech` block a choice implies, or undefined for "omit the key".
  *
- * `prev` is the def's current block, read for ONE thing: the voiceId the editor owns.
+ * IT USED TO CARRY A voiceId THROUGH, and deliberately: the row could not author a per-alert
+ * voice, so it preserved the one the editor had written. JOS-362 removed the per-alert voice
+ * outright (owner: "our settings shouldn't store which voice per alert, only the preferences
+ * should"), so there is nothing to preserve — a def that still carries one is not read, and the
+ * first row edit rebuilds the block without it. That is the "drop on next write" half of the rule.
  */
-function speechFieldsOf(choice: AudioChoice, prev: AlertSpeech | undefined): AlertSpeech | undefined {
+function speechFieldsOf(choice: AudioChoice): AlertSpeech | undefined {
   const speech: AlertSpeech = { mode: choice.mode }
   const phrase = choice.phrase.trim().slice(0, MAX_SPEECH_CHARS)
   if (phrase) speech.phrase = phrase
-  if (prev?.voiceId) speech.voiceId = prev.voiceId
-  const configured =
-    speech.mode !== 'alertName' || speech.phrase !== undefined || speech.voiceId !== undefined
+  const configured = speech.mode !== 'alertName' || speech.phrase !== undefined
   return configured ? speech : undefined
 }
 
@@ -98,7 +108,7 @@ export function applyAudioChoice(def: AlertDef, choice: AudioChoice): AlertDef {
   const next: AlertDef = { ...def, sound: { packId: choice.packId, soundId: choice.soundId } }
   if (choice.audio === 'sound') delete next.audio
   else next.audio = choice.audio
-  const speech = speechFieldsOf(choice, def.speech)
+  const speech = speechFieldsOf(choice)
   if (speech) next.speech = speech
   else delete next.speech
   return next
@@ -134,12 +144,46 @@ export function writeBase(choice: AudioChoice, pack: SoundPack | undefined): Aud
 }
 
 /**
+ * WHAT THE ROW SAYS WHEN THE SOUND IT NAMES IS NOT THE SOUND IT WILL PLAY (JOS-273) — or null
+ * when there is nothing to say, which is the overwhelmingly common case.
+ *
+ * The owner's ruling has three parts and this is the third: a ref into a pack that is gone
+ * resolves through the default-pack preference rather than going silently mute, and where it
+ * CANNOT resolve the alert row says so visibly. A user who deletes a pack should find out from
+ * the alerts list, not from an alert that never fired.
+ *
+ * Pure, and here rather than in the component, for the reason this whole module exists: "the row
+ * claims X about the def" is a function, not a closure inside JSX.
+ */
+export function soundNotice(
+  choice: AudioChoice,
+  packs: readonly SoundPack[],
+  fallback: SoundFallback
+): string | null {
+  // A spoken-only alert plays no pack sound at all, so its pack being gone is not a fact about
+  // anything the user can hear.
+  if (choice.audio === 'speech') return null
+  const resolved = resolveSoundRef(
+    { packId: choice.packId, soundId: choice.soundId },
+    packs,
+    fallback
+  )
+  if (resolved.status === 'exact') return null
+  if (resolved.status === 'missing') {
+    return `No sound pack installed - this alert stays silent until you install one.`
+  }
+  if (resolved.packId === choice.packId) return null // same pack, another line: not worth a line of chrome
+  const name = packs.find((p) => p.id === resolved.packId)?.name ?? resolved.packId
+  return `"${choice.packId}" is not installed - playing ${name} instead.`
+}
+
+/**
  * Choosing an entry in the OUTPUT select.
  *
  * A PACK IS A CHANNEL CHOICE TOO: picking one means "play this sound", i.e. `audio:'sound'` —
- * so switching a spoken alert back to a pack is one click, not a trip to the editor. The two
- * voice entries keep the pack/sound the def already had, because 'both' needs it and because a
- * user who tries speech and changes their mind should get their sound back unchanged.
+ * so switching a spoken alert back to a pack is one click, not a trip to the editor. The voice
+ * entry keeps the pack/sound the def already had, because a user who tries speech and changes
+ * their mind should get their sound back unchanged.
  *
  * The soundId is re-seeded from the new pack (its first sound) unless that pack happens to
  * carry the same id — a sound the pack does not have would render an out-of-range select.
@@ -150,14 +194,13 @@ export function withOutput(
   packs: readonly SoundPack[]
 ): AudioChoice {
   if (value === OUTPUT_SPEECH) return { ...choice, audio: 'speech' }
-  if (value === OUTPUT_BOTH) return { ...choice, audio: 'both' }
   const pack = packs.find((p) => p.id === value)
   if (!pack) return { ...choice, audio: 'sound', packId: value }
   const soundId = pack.sounds[choice.soundId] ? choice.soundId : Object.keys(pack.sounds)[0] ?? ''
   return { ...choice, audio: 'sound', packId: value, soundId }
 }
 
-/** Choosing a sound in the contextual select (the 'sound' and 'both' cases). */
+/** Choosing a sound in the contextual select (the 'sound' case). */
 export function withSoundId(choice: AudioChoice, soundId: string): AudioChoice {
   return { ...choice, soundId }
 }

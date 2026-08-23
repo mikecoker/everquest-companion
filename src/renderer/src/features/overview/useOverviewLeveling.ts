@@ -13,17 +13,28 @@
 // one, so the two `rangeStats` sweeps run once per delta rather than once per render.
 
 import { useMemo } from 'react'
-import type { ProgressionDelta, ProgressionSnap } from '@shared/types'
+import type { CharacterDelta, CharacterSnap, ProgressionDelta, ProgressionSnap } from '@shared/types'
 import { useModule } from '../../lib/useModule'
 import { EMPTY_PROGRESSION, applyProgressionDelta } from '../leveling/progressionDelta'
 import { overviewLeveling, type OverviewLevelingState } from './overviewLevelingData'
+
+function applyCharacterDelta(state: CharacterSnap, delta: CharacterDelta): CharacterSnap {
+  return { ...state, ...delta }
+}
 
 /**
  * The leveling card's whole state. Pre-hydration the module hook returns null and
  * `EMPTY_PROGRESSION` stands in — which derives to `empty: true`, the card's quiet state, and
  * never to a zero rate.
+ *
+ * The SECOND module (JOS-192) is `character`, for one field: the level the log last STATED. The
+ * ding series alone is silent across a loadout swap — it re-reports the new class's level only
+ * when that loadout next dings — and `character` carries your own `/who` row's number, which is
+ * the one thing a player can do to correct it. Cheap: that module pushes a delta only when the
+ * character, the zone or the level actually moves.
  */
 export function useOverviewLeveling(): OverviewLevelingState {
   const prog = useModule<ProgressionSnap, ProgressionDelta>('progression', applyProgressionDelta) ?? EMPTY_PROGRESSION
-  return useMemo(() => overviewLeveling(prog), [prog])
+  const level = useModule<CharacterSnap, CharacterDelta>('character', applyCharacterDelta)?.level
+  return useMemo(() => overviewLeveling(prog, level), [prog, level])
 }

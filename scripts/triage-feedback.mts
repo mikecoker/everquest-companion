@@ -49,15 +49,14 @@ import {
 } from './triageCluster.mjs'
 import {
   applySchema,
+  attachmentKeysOf,
+  attachmentReports,
   deleteReportRow,
   deleteSlice,
-  downloadSlice,
   getFeedbackConfig,
   getReport,
   listReports,
   loadStack,
-  logKeyOf,
-  logObjectExists,
   makeClients,
   reportsForInstall,
   SCHEMA_FILE,
@@ -70,13 +69,12 @@ import {
   type ListFilter,
   type Row,
 } from '../src/main/triage/store'
-import { rescrubNotes } from '../src/main/triage/rows'
-import {
-  analyticsFailure,
-  analyticsSubcommand,
-  ANALYTICS_SUBCOMMANDS,
-  ANALYTICS_USAGE,
-} from './triageAnalytics.mjs'
+import { analyticsFailure, runAnalytics, ANALYTICS_USAGE } from './triageAnalytics.mjs'
+import { requireFreshExport } from './analyticsExport.mjs'
+// The error store's own family (JOS-100), a sibling module for the same reason the analytics
+// one is: this file is at the 400-code-line ceiling and a two-verb subcommand family with a
+// symbolication step belongs beside it, not in it.
+import { runErrors, ERRORS_USAGE } from './triageErrors.mjs'
 import {
   REPORT_STATUSES,
   SEVERITIES,
@@ -84,6 +82,8 @@ import {
   type ReportStatus,
   type Severity,
 } from '../src/shared/feedback'
+import { formatPerfBlock } from '../src/shared/feedbackPerf'
+import { parsePerf } from '../src/main/triage/rows'
 import { sanitizeMultiline, sanitizeOneLine } from '../src/shared/sanitizeText'
 
 /**
@@ -107,11 +107,13 @@ const text = (v: unknown, fallback = ''): string =>
 
 const USAGE = `triage-feedback <command> [options]
 
-  migrate                             apply infra/schema.sql to the DSQL cluster
-                                      (idempotent; run once after every apply)
+  migrate                             apply infra/schema.sql to the DSQL cluster (idempotent;
+                                      run after every apply). NEEDS AN \`analytics export\` FROM
+                                      THE LAST 6 HOURS — or --no-export-check, loudly.
   list    [--status S] [--channel prod|dev|all] [--type bug|feature] [--since 7d]
           [--min-score N] [--limit 100] [--json]
-  show    <reportId>                  full record; downloads + gunzips the slice
+  show    <reportId>                  full record; downloads + gunzips the slice, the inventory
+                                      export AND the achievements export, into .triage/
   digest  [--since 7d] [--channel C]  the markdown brief a human/Claude reads
   cluster [--since 30d] [--write]     deterministic clusters; --write stamps them
   set     <reportId...> [--status S] [--severity p0..p3] [--cluster ID]
@@ -123,6 +125,7 @@ const USAGE = `triage-feedback <command> [options]
   closed  [on|off] [--message "..."]  the kill switch (instant, no deploy); bare = read state
 
 ${ANALYTICS_USAGE}
+${ERRORS_USAGE}
   Global: --profile <aws-profile> --role-arn <arn> --refresh (re-read tf outputs)`
 
 const OPTIONS = {
@@ -144,11 +147,20 @@ const OPTIONS = {
   // command line either (plan T3 — they are deliberately non-correlatable).
   id: { type: 'string' },
   days: { type: 'string' },
+  // `errors list --version` / `errors show --maps`. `--maps` names a directory of sourcemaps
+  // for THAT build (the private CI artifact); without it the frames print as bundle positions.
+  version: { type: 'string' },
+  maps: { type: 'string' },
   // `analytics digest --cohort user|owner|all`. The default is `user` — the population
   // question — and `all` prints the two digests separately, never added together.
   cohort: { type: 'string' },
   profile: { type: 'string' },
   'role-arn': { type: 'string' },
+  // `analytics export --out <dir>`; `analytics import --dry-run`; and the loud override for the
+  // 6-hour export guard on `migrate` and the three backfill commands (JOS-399).
+  out: { type: 'string' },
+  'dry-run': { type: 'boolean' },
+  'no-export-check': { type: 'boolean' },
   json: { type: 'boolean' },
   write: { type: 'boolean' },
   stdin: { type: 'boolean' },
@@ -214,10 +226,16 @@ function shortDate(ms: number): string {
  * is substituted from the terraform output.
  */
 async function cmdMigrate(ctx: Ctx): Promise<void> {
+  // THE EXPORT GUARD (JOS-399), and it is the FIRST thing this command does — before the
+  // connection, before the schema is even read — so a refusal costs no round trip and no IAM
+  // token. `migrate` is idempotent, but it is still DDL against the cluster that holds every
+  // counter this product has, and the owner's ruling is that an offline copy exists first.
+  requireFreshExport(ctx.args, 'migrate', NOW)
   const c = ctx.clients()
   const sql = readFileSync(SCHEMA_FILE, 'utf8')
     .replaceAll('${LAMBDA_ROLE_ARN}', text(c.stack.lambda_role_arn))
     .replaceAll('${TELEMETRY_LAMBDA_ROLE_ARN}', text(c.stack.telemetry_lambda_role_arn))
+    .replaceAll('${EXPORT_LAMBDA_ROLE_ARN}', text(c.stack.export_lambda_role_arn))
   // A CACHED .triage/stack.json written before a new output existed has no value for it, and
   // the cache is deliberately read back without re-validating (it is a cache, not a contract).
   // So the check is on the SUBSTITUTED text: an `AWS IAM GRANT … TO '${…}'` that reached the
@@ -250,9 +268,14 @@ async function cmdList(ctx: Ctx): Promise<void> {
   for (const row of rows) {
     const r = toTriageReport(row)
     const head = r.description.replace(/\s+/g, ' ').slice(0, 60)
+    // Three fixed-width attachment markers, `log`/`inv`/`ach` (JOS-296, JOS-441) — blank rather
+    // than absent, so the columns stay aligned and a scan down the list reads which reports can
+    // be answered.
     console.log(
       `${r.reportId}  ${shortDate(r.receivedAt)}  ${r.type.padEnd(7)} ${r.status.padEnd(9)} ` +
-        `${r.appVersion.padEnd(8)} ${r.hasLog ? 'log' : '   '} ${r.spamScore.toString().padStart(3)}  ${head}`,
+        `${r.appVersion.padEnd(8)} ${r.hasLog ? 'log' : '   '} ${r.hasInventory ? 'inv' : '   '} ` +
+        `${r.hasAchievements ? 'ach' : '   '} ` +
+        `${r.spamScore.toString().padStart(3)}  ${head}`,
     )
   }
   console.log(`\n${rows.length} report(s).`)
@@ -276,17 +299,19 @@ async function cmdShow(ctx: Ctx): Promise<void> {
   if (!row) throw new Error(`no such report: ${reportId}`)
   console.log(JSON.stringify(row, sanitizingReplacer, 2))
 
-  const key = logKeyOf(row)
-  if (!key) return
-  if (!(await logObjectExists(c, key))) {
-    console.log('\n[log slice: declared but never landed — the upload failed or expired]')
-    return
+  // The perf timeline (JOS-369), printed as a table rather than left inside the `env_json` string
+  // the dump above escapes into one unreadable line. Same renderer as the dialog's preview and the
+  // triage panel, so what the owner reads is what the reporter saw. Silent when there is none.
+  const perf = parsePerf(row.env_json)
+  if (perf) console.log(`\n${formatPerfBlock(perf)}`)
+
+  // BOTH attachments, downloaded and described by the store (JOS-296). The verdicts print
+  // LOUDLY and only when there are any — both note builders are empty for an honest client,
+  // which is exactly what makes the other case worth reading.
+  for (const leg of await attachmentReports(c, reportId, row)) {
+    console.log(`\n${leg.line}`)
+    for (const note of leg.warnings) console.warn(note)
   }
-  const slice = await downloadSlice(c, reportId, key)
-  console.log(`\n[log slice: ${slice.path}]`)
-  // The verdict, LOUDLY, and only when there is one — `rescrubNotes` is empty for the honest
-  // client, which is what makes the other case worth reading.
-  for (const note of rescrubNotes(slice)) console.warn(note)
 }
 
 function digestInputs(rows: Row[]): { reports: TriageReport[]; clusters: Cluster[] } {
@@ -353,9 +378,21 @@ function issueBody(row: Row, r: TriageReport): string {
   const facts = ['appVersion', 'channel', 'updateChannel', 'platform', 'osRelease', 'arch', 'electron']
     .map((k) => `- ${k}: ${text(env[k], '?')}`)
     .join('\n')
-  const log = r.hasLog
-    ? '\n\nA scrubbed log slice was attached and is available to maintainers; it is deliberately not reproduced here.'
-    : ''
+  // Every attachment is MENTIONED and none is reproduced — THE LAW (see the file header): an
+  // attachment never reaches a public issue. An inventory export is not chat, but it is still a
+  // stranger's character laid out item by item, and an achievements export is that character's
+  // whole play history. This repo is public.
+  const kinds = [
+    r.hasLog ? 'a scrubbed log slice' : '',
+    r.hasInventory ? 'an inventory export' : '',
+    r.hasAchievements ? 'an achievements export' : ''
+  ]
+  const present = kinds.filter((s) => s.length > 0)
+  const attached =
+    present.length <= 1
+      ? (present[0] ?? '')
+      : `${present.slice(0, -1).join(', ')} and ${present[present.length - 1]}`
+  const log = attached === '' ? '' : `\n\n${attached[0].toUpperCase()}${attached.slice(1)} was attached and is available to maintainers; it is deliberately not reproduced here.`
   return `### Reported\n\n${r.description}\n\n### Environment\n\n${facts}\n\n_Report ${r.reportId}_${log}\n`
 }
 
@@ -388,9 +425,13 @@ async function cmdIssue(ctx: Ctx): Promise<void> {
  *
  * It used to do two things: NULL the `contact` column and delete the S3 slice object. The
  * contact half is gone with the column (retired from the wire, then dropped from the schema),
- * so what remains is the half that was always the substantive one — the log window somebody
- * attached is destroyed, and `redacted_at` records that it was. The description stays: it IS
- * the bug report. For "delete everything about me", that is `wipe --install`.
+ * so what remains is the half that was always the substantive one — the artifacts somebody
+ * attached are destroyed, and `redacted_at` records that it happened. The description stays: it
+ * IS the bug report. For "delete everything about me", that is `wipe --install`.
+ *
+ * IT DELETES EVERY ATTACHMENT, not the slice (JOS-296). `attachmentKeysOf` is the list, on
+ * purpose: a `forget` that removed the log window and left the inventory export in the bucket
+ * would be this command telling a requester something untrue.
  */
 async function cmdForget(ctx: Ctx): Promise<void> {
   const [reportId] = ctx.rest
@@ -398,13 +439,13 @@ async function cmdForget(ctx: Ctx): Promise<void> {
   const c = ctx.clients()
   const row = await getReport(c, reportId)
   if (!row) throw new Error(`no such report: ${reportId}`)
-  const key = logKeyOf(row)
-  if (key) await deleteSlice(c, key)
+  const keys = attachmentKeysOf(row)
+  for (const key of keys) await deleteSlice(c, key)
   await stampRedacted(c, reportId)
   console.log(
-    key
-      ? `forgot the log slice for ${reportId} (deleted ${key})`
-      : `${reportId} had no slice; stamped redacted anyway`,
+    keys.length > 0
+      ? `forgot ${String(keys.length)} attachment(s) for ${reportId} (deleted ${keys.join(', ')})`
+      : `${reportId} had no attachments; stamped redacted anyway`,
   )
 }
 
@@ -419,8 +460,9 @@ async function cmdWipe(ctx: Ctx): Promise<void> {
   const c = ctx.clients()
   const rows = await reportsForInstall(c, installId)
   for (const row of rows) {
-    const key = logKeyOf(row)
-    if (key) await deleteSlice(c, key)
+    // EVERY attachment, same list `forget` uses (JOS-296) — "delete everything about me" cannot
+    // mean "everything except the inventory export".
+    for (const key of attachmentKeysOf(row)) await deleteSlice(c, key)
     await deleteReportRow(c, text(row.report_id))
   }
   console.log(`wiped ${rows.length} report(s) for install ${installId}.`)
@@ -434,18 +476,6 @@ async function cmdWipe(ctx: Ctx): Promise<void> {
  * an unreachable one are facts about the CLUSTER, and neither is a useful thing to print at
  * somebody as a postgres string.
  */
-async function cmdAnalytics(ctx: Ctx): Promise<void> {
-  const run = analyticsSubcommand(ctx.rest[0])
-  if (run === null) {
-    throw new Error(`analytics: expected one of ${Object.keys(ANALYTICS_SUBCOMMANDS).join(', ')}`)
-  }
-  try {
-    await run({ args: ctx.args, rest: ctx.rest, clients: ctx.clients, nowMs: NOW })
-  } catch (err) {
-    throw analyticsFailure(err)
-  }
-}
-
 async function cmdBlock(ctx: Ctx): Promise<void> {
   const [installId] = ctx.rest
   if (!installId) throw new Error('block: <installId> is required')
@@ -502,7 +532,12 @@ const COMMANDS: Record<string, (ctx: Ctx) => Promise<void>> = {
   block: cmdBlock,
   unblock: cmdUnblock,
   closed: cmdClosed,
-  analytics: cmdAnalytics,
+  // BOTH SUBCOMMAND FAMILIES OWN THEIR OWN DISPATCH, in their own modules. This file is at the
+  // 400-code-line ceiling, and two nearly identical eleven-line dispatchers living here is
+  // exactly the shape that pushed it over — so each family exports one entry point instead.
+  analytics: (ctx) => runAnalytics({ ...ctx, nowMs: NOW }),
+  // The errors family owns its own dispatch (triageErrors.mts) — see runErrors.
+  errors: (ctx) => runErrors({ ...ctx, nowMs: NOW }, analyticsFailure),
 }
 
 async function main(): Promise<void> {

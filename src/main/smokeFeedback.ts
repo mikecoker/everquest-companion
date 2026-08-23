@@ -64,7 +64,20 @@ export async function runSmokeFeedback(): Promise<void> {
   try {
     const res = await submitFeedback(
       { type: 'bug', description: smokeDescription(nonce) },
-      { attachLog: true, windowMinutes: SMOKE_WINDOW_MINUTES }
+      // `attachInventory: false`, deliberately (JOS-296). The smoke guest stages ONE artifact —
+      // a mocked `eqlog_Smoketest_freeport.txt` (scripts/sandbox/smoke-feedback.ps1) — and no
+      // `/outputfile inventory` dump, so the second leg could only ever report "no dump" and
+      // would add a field to the result line that is always false. The slice leg already proves
+      // the thing this hook exists to prove: presign, bucket pin, upload. Stage a dump beside
+      // the log in that script and flip this to `true` if the inventory leg ever needs its own
+      // released-installer proof. `attachAchievements: false` (JOS-441) for the identical reason
+      // — the smoke guest stages no achievements export either.
+      {
+        attachLog: true,
+        windowMinutes: SMOKE_WINDOW_MINUTES,
+        attachInventory: false,
+        attachAchievements: false
+      }
     )
     line = smokeResultLine(nonce, res)
   } catch (err) {

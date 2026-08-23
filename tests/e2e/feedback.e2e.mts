@@ -48,8 +48,14 @@ const DESCRIPTION_INPUT = `${DESCRIPTION} textarea:not([aria-hidden="true"])`
 const SEND = '[data-testid="feedback-send"]'
 const PREVIEW = '[data-testid="feedback-preview"]'
 const PREVIEW_META = '[data-testid="feedback-preview-meta"]'
+const INV_META = '[data-testid="feedback-inventory-meta"]'
+const INV_PREVIEW = '[data-testid="feedback-inventory-preview"]'
+/** The third attachment's own preview (JOS-441) — its own testids, never the inventory's. */
+const ACH_META = '[data-testid="feedback-achievements-meta"]'
 /** How long main may take to tail + window + scrub + gzip a slice of the real log. */
 const SLICE_WAIT_MS = 30_000
+/** Reading + gzipping a ~10 KB dump is fast, but it still crosses IPC behind a React effect. */
+const DUMP_WAIT_MS = 15_000
 
 function textOf(page: Page, selector: string): Promise<string> {
   return page.evaluate(
@@ -319,11 +325,186 @@ async function stepAttachAndPreview(page: Page): Promise<void> {
   check('"Save a copy…" is offered — the escape hatch that makes the preview honest', (await countOf(page, '[data-testid="feedback-save-copy"]')) === 1)
 }
 
+/**
+ * THE INVENTORY ATTACHMENT (JOS-296), asserted in the running app.
+ *
+ * Why it belongs here and not in a unit test, for the same reasons the slice's step does: the
+ * default tick is renderer state, the dump behind it is read by MAIN out of a real EQ install
+ * root discovered through `effectiveEqRoot()`, and the two are joined by an IPC handler. The
+ * harness stages a REAL committed dump (`Primitive_freeport-Inventory.txt`) into the fake
+ * install beside the log, so what the dialog previews is a file the game actually wrote.
+ *
+ * Identities, never today's numbers: the meta line is asserted to state an AGE, a row count, the
+ * file's name and a compressed size — never that it holds 295 rows.
+ */
+async function stepAttachInventory(page: Page): Promise<void> {
+  const readCheck = (): Promise<boolean | null> =>
+    page.evaluate(
+      () =>
+        (document.querySelector('[data-testid="feedback-attach-inventory"] input') as HTMLInputElement | null)
+          ?.checked ?? null
+    )
+  const checked = await settle(readCheck, (c) => c === true, { timeoutMs: 8_000 })
+  check(
+    'a bug report ticks "attach my inventory export" BY DEFAULT (the owner ruling)',
+    checked === true,
+    String(checked)
+  )
+
+  const dialog = (await textOf(page, DIALOG)).replace(/\s+/g, ' ')
+  check(
+    'the dialog states what the export is and that nothing is removed from it',
+    dialog.includes('Your inventory export is included') && dialog.includes('no chat in it'),
+    dialog.includes('Your inventory export is included') ? 'present' : 'the disclosure is missing'
+  )
+
+  // The dump is staged, so the preview must resolve. An empty run here would mean main did not
+  // find the file the harness planted — which is a failure, not a "not asserted this run".
+  const seen = await settle(() => countOf(page, INV_META), (n) => n > 0, {
+    timeoutMs: DUMP_WAIT_MS,
+    pollMs: 200
+  })
+  if (!check('main packaged the staged inventory export for preview', seen > 0)) {
+    const empty = (await textOf(page, '[data-testid="feedback-inventory-empty"]')).replace(/\s+/g, ' ')
+    note(`the dialog said: ${empty.slice(0, 140)}`)
+    return
+  }
+
+  await stepInventoryPreview(page)
+}
+
+/** The preview half of the inventory step — split out because the two halves together are one
+ *  function too branchy for the repo's complexity ceiling, not because they are two ideas. */
+async function stepInventoryPreview(page: Page): Promise<void> {
+  const meta = (await textOf(page, INV_META)).replace(/\s+/g, ' ')
+  const states =
+    /updated .+ ago|updated just now/.test(meta) &&
+    /[\d,]+ rows/.test(meta) &&
+    /-Inventory\.txt/.test(meta) &&
+    /\d+(\.\d+)? (KB|MB) compressed/.test(meta)
+  check(
+    'the preview states the export as STATE: how old it is, how many rows, which file, what it costs',
+    states,
+    meta.slice(0, 140)
+  )
+  // THE FRESHNESS TRUTH LEADS. It is the fact that turns an export-shaped bug report into an
+  // answer, so it is first in the line rather than buried behind two counts.
+  check('…and the AGE is the first thing it says', /^updated /.test(meta), meta.slice(0, 60))
+
+  const box = await page.evaluate((sel) => {
+    const el = document.querySelector(sel) as HTMLElement | null
+    if (!el) return null
+    const style = getComputedStyle(el)
+    return {
+      h: Math.round(el.getBoundingClientRect().height),
+      scrolls: style.overflowY === 'auto' || style.overflowY === 'scroll',
+      rows: el.querySelectorAll('div').length
+    }
+  }, INV_PREVIEW)
+  if (!check('the export preview box is rendered', box !== null)) return
+  const b = box as { h: number; scrolls: boolean; rows: number }
+  // Same UI law as the slice's box, and the same box: fixed height, own scroll, windowed rows.
+  const windowed = b.h > 0 && b.h <= 320 && b.scrolls && b.rows > 0 && b.rows < 200
+  check(
+    'the export preview is a FIXED-height box that scrolls its own content, windowed like the slice',
+    windowed,
+    `${String(b.h)}px · overflow ${b.scrolls ? 'auto' : 'visible'} · ${String(b.rows)} mounted rows`
+  )
+
+  // Un-ticking it collapses the whole block — the preview is not a thing you keep reading after
+  // deciding not to send it.
+  await page.click('[data-testid="feedback-attach-inventory"] input')
+  const gone = await settle(() => countOf(page, INV_META), (n) => n === 0, { timeoutMs: 8_000 })
+  check('un-ticking the box takes the preview away with it', gone === 0, `${String(gone)} meta line(s)`)
+  await page.click('[data-testid="feedback-attach-inventory"] input')
+}
+
+/**
+ * THE THIRD ATTACHMENT (JOS-441) — its OWN box, its OWN disclosure, its OWN preview.
+ *
+ * WHY IT IS ASSERTED SEPARATELY AND NOT FOLDED INTO THE STEP ABOVE: consent here is per-FILE, and
+ * the failure this guards against is precisely a shared tick. The two exports say different things
+ * about a player and carry different disclosures, so a run where ticking one sent the other would
+ * be consent to something the user was never shown. Two independent boxes, proved by un-ticking
+ * one and watching the other's preview stay.
+ *
+ * The harness stages the REAL committed dump (`Primitive_freeport-Achievements.txt`) into the fake
+ * install beside the inventory one, so what the dialog previews is a file the game actually wrote.
+ */
+async function stepAttachAchievements(page: Page): Promise<void> {
+  const readCheck = (): Promise<boolean | null> =>
+    page.evaluate(
+      () =>
+        (
+          document.querySelector(
+            '[data-testid="feedback-attach-achievements"] input'
+          ) as HTMLInputElement | null
+        )?.checked ?? null
+    )
+  const checked = await settle(readCheck, (c) => c === true, { timeoutMs: 8_000 })
+  check(
+    'a bug report ticks "attach my achievements export" BY DEFAULT, like its sibling',
+    checked === true,
+    String(checked)
+  )
+
+  const dialog = (await textOf(page, DIALOG)).replace(/\s+/g, ' ')
+  check(
+    'the dialog states what THIS export is, and that it does not even carry the character name',
+    dialog.includes('Your achievements export is included') &&
+      dialog.includes('does not even carry your character'),
+    dialog.includes('Your achievements export is included') ? 'present' : 'the disclosure is missing'
+  )
+
+  const seen = await settle(() => countOf(page, ACH_META), (n) => n > 0, {
+    timeoutMs: DUMP_WAIT_MS,
+    pollMs: 200
+  })
+  if (!check('main packaged the staged achievements export for preview', seen > 0)) {
+    const empty = (await textOf(page, '[data-testid="feedback-achievements-empty"]')).replace(
+      /\s+/g,
+      ' '
+    )
+    note(`the dialog said: ${empty.slice(0, 140)}`)
+    return
+  }
+
+  const meta = (await textOf(page, ACH_META)).replace(/\s+/g, ' ')
+  const states =
+    /^updated /.test(meta) &&
+    /[\d,]+ rows/.test(meta) &&
+    /-Achievements\.txt/.test(meta) &&
+    /\d+(\.\d+)? (KB|MB) compressed/.test(meta)
+  check(
+    'the preview states it in the SAME vocabulary as the inventory one, naming ITS file',
+    states,
+    meta.slice(0, 140)
+  )
+
+  // THE CONSENT IS PER FILE. Un-ticking the achievements box must not disturb the inventory one.
+  await page.click('[data-testid="feedback-attach-achievements"] input')
+  const gone = await settle(() => countOf(page, ACH_META), (n) => n === 0, { timeoutMs: 8_000 })
+  check('un-ticking THIS box takes only its own preview away', gone === 0, `${String(gone)} left`)
+  check(
+    '…and the inventory export is still attached, because the two ticks are not one tick',
+    (await countOf(page, INV_META)) > 0
+  )
+  await page.click('[data-testid="feedback-attach-achievements"] input')
+}
+
 async function main(): Promise<void> {
   buildIfStale()
 
   console.log('launch: hidden Electron (EQ_E2E=1) against tests/fixtures/e2e-feedback.log…')
-  const { app, close } = await launchOnFixture('e2e-feedback.log')
+  // The install root carries a REAL committed `/outputfile inventory` dump beside the log, so
+  // the JOS-296 attachment has something the game actually wrote to package (see
+  // stepAttachInventory). The slice half of this spec is unaffected — the dump lives in the
+  // install ROOT, the log in `Logs\`.
+  const { app, close } = await launchOnFixture('e2e-feedback.log', {
+    inventory: 'Primitive_freeport-Inventory.txt',
+    // …and the achievements export beside it (JOS-441), for the same reason and in the same root.
+    achievements: 'Primitive_freeport-Achievements.txt'
+  })
 
   let page: Page | null = null
   try {
@@ -340,6 +521,8 @@ async function main(): Promise<void> {
       await stepDarkBuild(page)
       await stepValidatorGate(page)
       await stepAttachAndPreview(page)
+      await stepAttachInventory(page)
+      await stepAttachAchievements(page)
     }
 
     // A missing IPC handler shows up here first (`invoke` rejects into an unhandled rejection),

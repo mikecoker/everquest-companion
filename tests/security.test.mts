@@ -19,7 +19,10 @@ import {
   allowedExternalUrl,
   isInsideDir,
   isInternalPageUrl,
-  isSafePackId
+  isSafePackId,
+  isSafeSourcePath,
+  isSafeSourceRef,
+  isSafeSourceRepo
 } from '../src/main/security'
 
 const WIN = process.platform === 'win32'
@@ -41,13 +44,86 @@ test('allowedExternalUrl accepts exactly the links the app produces today', () =
     allowedExternalUrl('https://eqlwiki.com/Plane_of_Sky?action=raw#Quests'),
     'https://eqlwiki.com/Plane_of_Sky?action=raw#Quests'
   )
-  // Every allowlisted host, exactly as listed.
-  for (const host of EXTERNAL_LINK_ALLOWLIST) {
-    assert.equal(allowedExternalUrl(`https://${host}/x`), `https://${host}/x`)
+  // Every allowlisted entry, exactly as listed — host-wide entries at the root, scoped entries
+  // inside their own subtree. A scoped entry ALSO refuses the bare host, so no entry can quietly
+  // become host-wide without this loop going red.
+  for (const rule of EXTERNAL_LINK_ALLOWLIST) {
+    const url = `https://${rule.host}${rule.pathPrefix ?? ''}/x`
+    assert.equal(allowedExternalUrl(url), url, url)
+    if (rule.pathPrefix !== undefined) {
+      assert.equal(allowedExternalUrl(`https://${rule.host}/x`), null, rule.host)
+    }
   }
   // An explicit :443 is redundant — WHATWG strips it, so this is the default port, not a
   // different service.
   assert.equal(allowedExternalUrl('https://eqlwiki.com:443/x'), 'https://eqlwiki.com/x')
+  // The What's new panel's way out to the full history (JOS-254). A constant in the renderer,
+  // not scraped text — but it travels the same door as every other link, so it is pinned here.
+  assert.equal(
+    allowedExternalUrl('https://github.com/jmoyers/everquest-companion/releases'),
+    'https://github.com/jmoyers/everquest-companion/releases'
+  )
+  // The subtree, not just that one leaf: query + fragment survive, and the repo's own front page
+  // (the prefix itself, with or without its trailing slash) is inside its own subtree.
+  assert.equal(
+    allowedExternalUrl('https://github.com/jmoyers/everquest-companion/releases/tag/v0.24.0'),
+    'https://github.com/jmoyers/everquest-companion/releases/tag/v0.24.0'
+  )
+  assert.equal(
+    allowedExternalUrl('https://github.com/jmoyers/everquest-companion/issues?q=is%3Aopen#top'),
+    'https://github.com/jmoyers/everquest-companion/issues?q=is%3Aopen#top'
+  )
+  assert.equal(
+    allowedExternalUrl('https://github.com/jmoyers/everquest-companion'),
+    'https://github.com/jmoyers/everquest-companion'
+  )
+  assert.equal(
+    allowedExternalUrl('https://github.com/jmoyers/everquest-companion/'),
+    'https://github.com/jmoyers/everquest-companion/'
+  )
+})
+
+test('the github.com entry is scoped to THIS repo, not to the host (JOS-263)', () => {
+  // The owner's ruling on the JOS-254 widening: github.com is not one site the way a wiki is, so
+  // the entry buys exactly one repo's subtree. Everything else on the host is refused — starting
+  // with the root, which is what an unscoped host entry would have opened.
+  assert.equal(allowedExternalUrl('https://github.com/'), null)
+  assert.equal(allowedExternalUrl('https://github.com'), null)
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers'), null)
+  assert.equal(allowedExternalUrl('https://github.com/other/repo'), null)
+  assert.equal(allowedExternalUrl('https://github.com/other/repo/releases/download/v1/x.exe'), null)
+  // Another owner's repo of the SAME name, and a repo whose name merely starts with ours — the
+  // prefix is segment-aware, never a bare startsWith.
+  assert.equal(allowedExternalUrl('https://github.com/evil/everquest-companion/releases'), null)
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers/everquest-companion-evil/releases'), null)
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers/everquest-companionEVIL'), null)
+  // A path that only LOOKS like it is under the prefix: `..` (and its `%2e%2e` spelling) is
+  // resolved away by `new URL()` before the check, so both of these arrive as `/other/repo`.
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers/everquest-companion/../../other/repo'), null)
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers/everquest-companion/%2e%2e/%2e%2e/other/repo'), null)
+  // An encoded separator is not a separator: `%2f` keeps this ONE segment, and it is not ours.
+  assert.equal(allowedExternalUrl('https://github.com/jmoyers%2feverquest-companion/releases'), null)
+  // The path scope is checked IN ADDITION to the host, never instead of it: our own repo path on
+  // somebody else's host stays shut.
+  assert.equal(allowedExternalUrl('https://evil.com/jmoyers/everquest-companion/releases'), null)
+})
+
+test('widening the allowlist for github.com widened nothing else (JOS-254)', () => {
+  // The host is EXACT, so every neighbour of the new entry stays shut — the same guarantee the
+  // wiki hosts get, restated for the entry that let renderer text name github at all.
+  assert.equal(allowedExternalUrl('https://github.com.evil.com/jmoyers/everquest-companion'), null)
+  assert.equal(allowedExternalUrl('https://evil-github.com/jmoyers/everquest-companion'), null)
+  assert.equal(allowedExternalUrl('https://raw.githubusercontent.com/jmoyers/everquest-companion/main/y'), null)
+  assert.equal(allowedExternalUrl('https://api.github.com/repos/jmoyers/everquest-companion'), null)
+  assert.equal(allowedExternalUrl('https://github.com@evil.com/x'), null)
+  assert.equal(allowedExternalUrl('https://github.com.evil.com/jmoyers'), null)
+  assert.equal(allowedExternalUrl('https://evil-github.com/jmoyers'), null)
+  // …and it is still https-only, so the OS can never be asked to run a downloaded release.
+  assert.equal(allowedExternalUrl('http://github.com/jmoyers/everquest-companion/releases'), null)
+  assert.equal(allowedExternalUrl('http://github.com/jmoyers'), null)
+  assert.equal(allowedExternalUrl('file://github.com/x.exe'), null)
+  // A non-default port is a different service here too.
+  assert.equal(allowedExternalUrl('https://github.com:8443/jmoyers/everquest-companion/releases'), null)
 })
 
 test('allowedExternalUrl refuses every scheme but https — the RCE-adjacent shapes', () => {
@@ -203,4 +279,116 @@ test('isSafePackId accepts real pack ids and rejects anything path-shaped', () =
   assert.equal(isSafePackId(undefined), false)
   assert.equal(isSafePackId(null), false)
   assert.equal(isSafePackId(7), false)
+})
+
+// ---- registry source_* validators: what may reach a URL / an archive path -------------
+
+test('isSafeSourceRepo accepts owner/repo and rejects traversal, extra path, junk', () => {
+  // The honest registry's own shape (the shipped default pack + typical rows).
+  for (const ok of [
+    'utensils/openpeon-alan-rickman-soundpack',
+    'PeonPing/og-packs',
+    'a/b',
+    'user123/pack.v2',
+    'x-y/z_1',
+    // JOS-162: GitHub's REAL namespace, which predates today's signup form. `heron--` is a live
+    // account and owns 45 of the live registry's rows; forbidding its trailing hyphen made all
+    // 45 unreachable. Consecutive and trailing hyphens are legal owner spellings.
+    'heron--/openpeon-mercy-soundpack',
+    'a--b/repo', // consecutive hyphens mid-owner
+    'x-/repo', // trailing hyphen, minimal
+    `${'a'.repeat(38)}-/repo` // trailing hyphen at the 39-char cap
+  ]) {
+    assert.equal(isSafeSourceRepo(ok), true, ok)
+  }
+  for (const bad of [
+    '../../evil', // traversal
+    'owner/repo/../../evil', // extra segments + traversal
+    'owner/repo/extra', // more than one slash
+    'owner//repo', // empty segment
+    '/repo', // missing owner
+    'owner/', // missing repo
+    'owner', // no slash at all
+    'own er/repo', // space
+    '-owner/repo', // leading-hyphen owner: the anchor the loosening KEPT
+    '--/repo', // an all-punctuation owner is never a namespace
+    'ow.ner/repo', // a dot in the owner — the charset is what forbids `..`
+    'ow..ner/repo', // traversal spelled inside the owner
+    './repo', // owner is `.`
+    '../repo', // owner is `..`
+    '%2e%2e/repo', // percent-encoded traversal (never decoded here, and `%` is out of charset)
+    'ow/ner/repo', // a slash smuggled through the owner
+    `${'a'.repeat(39)}-/repo`, // 40-char owner: the length cap survives the looser charset
+    'owner/..', // repo is ..
+    'owner/.', // repo is .
+    'owner/re po', // space in repo
+    'owner/re:po', // colon (ADS-ish)
+    'owner\\repo', // backslash separator
+    `${'a'.repeat(40)}/repo`, // over-long owner
+    ''
+  ]) {
+    assert.equal(isSafeSourceRepo(bad), false, JSON.stringify(bad))
+  }
+  assert.equal(isSafeSourceRepo(undefined), false)
+  assert.equal(isSafeSourceRepo(null), false)
+  assert.equal(isSafeSourceRepo(42), false)
+})
+
+test('isSafeSourceRef accepts a tag and rejects separators/traversal/leading dot', () => {
+  for (const ok of ['v1.1.2', 'v1', '1.0.0', 'release-2', 'RC_3']) {
+    assert.equal(isSafeSourceRef(ok), true, ok)
+  }
+  for (const bad of [
+    '..', // traversal
+    'v1/../../x', // slash + traversal
+    'refs/tags/v1', // slash walks the URL path
+    '.hidden', // leading dot
+    '-flag', // leading dash
+    'v1 2', // space
+    'v1:2', // colon
+    'v1\\2', // backslash
+    'a..b', // embedded ..
+    ''
+  ]) {
+    assert.equal(isSafeSourceRef(bad), false, JSON.stringify(bad))
+  }
+  assert.equal(isSafeSourceRef(undefined), false)
+  assert.equal(isSafeSourceRef(7), false)
+})
+
+test('isSafeSourcePath accepts `.`/relative subpaths and rejects escape shapes', () => {
+  for (const ok of [
+    '.',
+    // JOS-162: `''` is the empty-string alias of `.` — the archive root. Two live registry rows
+    // spell it this way, and every consumer already collapses `''` and `.` to the same prefix.
+    '',
+    'sounds',
+    'sounds/foo',
+    'a/b/c',
+    'pack.v2',
+    'sounds/'
+  ]) {
+    assert.equal(isSafeSourcePath(ok), true, JSON.stringify(ok))
+  }
+  for (const bad of [
+    '..',
+    '../x',
+    'a/../b',
+    'a/..',
+    '/abs/path', // absolute
+    'C:\\Windows', // drive + backslash
+    'C:/Windows', // drive
+    'a\\b', // backslash separator
+    '\\\\server\\share', // UNC
+    'a//b', // empty segment
+    'sounds/\0', // NUL
+    '/', // a bare separator is NOT the empty alias
+    '//',
+    ' ' // whitespace is a path segment, not "no path"
+  ]) {
+    assert.equal(isSafeSourcePath(bad), false, JSON.stringify(bad))
+  }
+  assert.equal(isSafeSourcePath(undefined), false)
+  assert.equal(isSafeSourcePath(null), false)
+  assert.equal(isSafeSourcePath(1), false)
 })

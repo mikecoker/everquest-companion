@@ -1,7 +1,13 @@
-// planner/plannerFarm.ts — the set, turned into a route: what is still missing, and where it is.
+// planner/plannerFarm.ts — a list of wanted items, turned into a route: what is still missing, and
+// where it is.
 //
-// This is the arithmetic behind Farm mode (design §5.4), kept out of the view so the interesting
-// part is one pure function over plain data.
+// This is the arithmetic that was behind Farm mode (design §5.4), kept out of the view so the
+// interesting part is one pure function over plain data. JOS-326 removed the Farm TAB and the plan
+// board that fed it; the arithmetic is untouched and is now aimed at the WISH LIST
+// (features/wishlist/wishFarm.ts collects the needs, this file groups them). That re-aim is the
+// reason `FarmNeed` no longer names a plan CELL: a wish is flat by owner ruling, and every rule
+// below — the primary zone, the "also:" tail, the four non-zone headings, the era override — only
+// ever read a need's ZONES, its SOURCES and its donor row.
 //
 // WHY A DONOR IS LISTED UNDER ONE ZONE AND NOT ALL OF THEM. Roughly a third of donors drop in
 // several zones, and listing each under every zone turns a route into a concordance: eight
@@ -35,31 +41,56 @@
 // donor with no source at all is a fact about our knowledge, not about the game. Each says which
 // one it is rather than being dropped into a zone we invented.
 
-import type { ExaltPlan, ExtractTier, PlanSlotId, SocketType } from '@shared/planner/types'
+import type { ClassAbbr } from '@shared/classCombo'
+import type { EquipSlot, ExtractTier, SocketType } from '@shared/planner/types'
 // RELATIVE value imports (the mobSearch house law): `tests/plannerFarm.test.mts` drives this
 // rollup under the node runner, where the `@shared` alias — a vite-only resolution — does not
 // exist. Type-only imports are erased and keep the alias.
-import { extractionCost, extractionTier } from '../../../../shared/planner/rules'
+import { extractionCost } from '../../../../shared/planner/rules'
 import { CURRENT_ERA, ERA_LABEL, eraRank, zoneEra, type Era } from '../../../../shared/planner/era'
-import { mergeItemSources } from '../../lib/itemSources'
-import type { DonorRow } from './plannerData'
-import { donorFor } from './plannerData'
-import { sourcesFor, type PlannerSource } from './sourceIndex'
+import type { EraSubject } from './plannerData'
+import type { PlannerSource } from './sourceIndex'
 import type { DonorProgress } from './plannerProgress'
 
-/** One planned socket, resolved against the corpus, the catalog and your own progress. */
+/**
+ * ONE WANTED ITEM, resolved against the corpus, the catalog and your own progress.
+ *
+ * `id` is the row's identity for React and for "every need appears exactly once" — the wish's
+ * `itemKey`. It is a field rather than an implied composite because the shape used to be keyed by
+ * `slot:socket:donorKey` and a flat list has no such tuple.
+ *
+ * THE EFFECT CONTEXT IS OPTIONAL, and that is the whole difference between the two kinds of wish.
+ * A DONOR wish is wanted FOR an effect: it names the effect, the socket it occupies and therefore
+ * the merge tier the effect extracts at, and the row states the cost of getting there. A GEAR wish
+ * is wanted for itself: it names none of the three, and the row correctly says nothing about
+ * merging (law 1 — silence, never a guessed tier).
+ *
+ * IT IS SELF-DESCRIBING, WHICH IS WHAT LETS TWO INDICES FEED IT. The need used to carry the
+ * `DonorRow` the effect corpus answered with, and every reader reached through it for the item's
+ * classes, slots, era witnesses and quest/crafted flags. A wish can equally be answered by the
+ * GEAR index — different row type, same five facts — so the collector reads whichever index
+ * knows and copies the facts here. Nothing downstream has to know which one spoke.
+ */
 export interface FarmNeed {
-  /** the plan CELL it was socketed into — `planSlotLabel` is how a farm row spells it */
-  slot: PlanSlotId
-  socket: SocketType
-  effect: string
-  donorKey: string
-  /** the donor's display name — the corpus's when it has the row, else the key itself */
-  donorName: string
-  /** null when the corpus carries no row for this (key, effect) pair */
-  donor: DonorRow | null
-  /** the merge tier the effect extracts at — known from the SOCKET even without a donor row */
-  tierRequired: ExtractTier
+  /** the wish's `itemKey` — the React key, the remove handle, and the once-only identity */
+  id: string
+  /** the effect this row is wanted for; absent on a gear wish */
+  effect?: string
+  socket?: SocketType
+  itemKey: string
+  /** the display name — the corpus's when an index has the row, else the key itself */
+  name: string
+  /** the merge tier the effect extracts at — known from the SOCKET even without a corpus row */
+  tierRequired?: ExtractTier
+  /** what the era join is asked about: the row that answered, or the bare key when neither did */
+  subject: EraSubject
+  /** normalized classes; `[]` = UNKNOWN (never "nobody") */
+  classes: readonly ClassAbbr[]
+  /** normalized equip slots; `[]` = the page stated none */
+  slots: EquipSlot[]
+  /** the page states this is a quest reward / is player-crafted — from whichever row answered */
+  quest: boolean
+  playerCrafted: boolean
   /** every mob EITHER witness names — the mob catalog first, then page-only mobs (`mergedSources`) */
   sources: readonly PlannerSource[]
   /** distinct zones across every source, catalog order first */
@@ -132,48 +163,19 @@ const TAIL: Exclude<FarmGroupKind, 'zone'>[] = ['quest', 'crafted', 'unstated', 
  * The rule (catalog row wins whole on a case-folded mob match; a page-only mob contributes a bare
  * name) lives in lib/ because the Loot tab's drill-down needs the identical fold for the identical
  * reason. Its header states why. This rollup only decides what to DO with the merged list.
+ *
+ * WHO ASSEMBLES THE NEEDS LIVES WITH THE DOCUMENT, NOT HERE (JOS-326). `collectNeeds(plan, …)`
+ * used to sit at this point in the file and walked an `ExaltPlan`'s cells; the plan board is gone
+ * and the wish list is what produces needs now, so the collection moved to
+ * `features/wishlist/wishFarm.ts collectWishNeeds` and this file kept exactly the part that was
+ * never about either document — the grouping arithmetic below.
  */
-
-/**
- * Every planned socket of a set, resolved. Includes the ones already satisfied — the caller
- * decides what "still needed" means (Farm mode drops `ready`, so a finished set empties out).
- */
-export function collectNeeds(
-  plan: ExaltPlan,
-  index: ReadonlyMap<string, DonorRow[]>,
-  progressOf: (donorKey: string, tierRequired: ExtractTier) => DonorProgress
-): FarmNeed[] {
-  const needs: FarmNeed[] = []
-  for (const [slotName, planSlot] of Object.entries(plan.slots)) {
-    if (!planSlot) continue
-    for (const [socketName, planned] of Object.entries(planSlot.sockets)) {
-      if (!planned) continue
-      const socket = socketName as SocketType
-      const donor = donorFor(index, planned.donorKey, planned.effect)
-      const tierRequired = donor?.tierRequired ?? extractionTier(socket)
-      const sources = mergeItemSources(sourcesFor(planned.donorKey), donor?.wikiSources)
-      needs.push({
-        slot: slotName as PlanSlotId,
-        socket,
-        effect: planned.effect,
-        donorKey: planned.donorKey,
-        donorName: donor?.name ?? planned.donorKey,
-        donor,
-        tierRequired,
-        sources,
-        zones: [...new Set(sources.flatMap((s) => s.zones))],
-        progress: progressOf(planned.donorKey, tierRequired)
-      })
-    }
-  }
-  return needs
-}
 
 /** Which non-zone heading a zoneless need belongs under. Quest wins over crafted when both. */
 function tailKind(need: FarmNeed): Exclude<FarmGroupKind, 'zone'> {
   if (need.sources.length > 0) return 'unstated'
-  if (need.donor?.quest === true) return 'quest'
-  if (need.donor?.playerCrafted === true) return 'crafted'
+  if (need.quest) return 'quest'
+  if (need.playerCrafted) return 'crafted'
   return 'unknown'
 }
 
@@ -254,15 +256,15 @@ export function groupNeeds(needs: readonly FarmNeed[], opts: FarmGrouping): Farm
 export function costText(tierRequired: ExtractTier): string {
   const cost = extractionCost(tierRequired)
   const drops = cost.d4Copies === 1 ? '1 D4 drop' : `${String(cost.d4Copies)} D4 drops`
-  return `needs +${String(cost.tier)} — ≈${String(cost.d0Copies)} D0 merges or ${drops}`
+  return `needs +${String(cost.tier)} - ≈${String(cost.d0Copies)} D0 merges or ${drops}`
 }
 
 /**
- * The camp line for one row: the first mob EITHER witness names for this donor, with its level
+ * The camp line for one row: the first mob EITHER witness names for this item, with its level
  * text VERBATIM (a range as often as a number) when the catalog knew it — a mob only the item page
  * names renders as a bare name, which is exactly what the page stated. Empty when nobody is named.
  */
-export function campText(row: FarmNeed): string {
+export function campText(row: Pick<FarmNeed, 'sources'>): string {
   const first = row.sources[0]
   if (!first) return ''
   const extra = row.sources.length > 1 ? ` +${String(row.sources.length - 1)} more` : ''

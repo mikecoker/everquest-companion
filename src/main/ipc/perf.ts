@@ -17,9 +17,18 @@
 
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { markStartupPhase, startPerfSampler, startupProfile, stopPerfSampler } from '../perf'
+import {
+  markStartupPhase,
+  startPerfSampler,
+  startupPhaseMarked,
+  startupProfile,
+  stopPerfSampler
+} from '../perf'
 import { getPerfHudPrefs, setPerfHudPrefs } from '../store'
+import { getProcessPriorityPrefs, setProcessPriorityPrefs } from '../storeProcessPriority'
+import { setYieldToGame } from '../processPriority'
 import type { PerfHudPrefs } from '../../shared/perf'
+import type { ProcessPriorityPrefs } from '../../shared/processPriority'
 
 /** Persist the switch AND bring this session's sampler into line with it. */
 export function applyPerfHudEnabled(enabled: boolean): PerfHudPrefs {
@@ -29,8 +38,31 @@ export function applyPerfHudEnabled(enabled: boolean): PerfHudPrefs {
   return next
 }
 
+/**
+ * Persist "yield CPU to the game" AND re-apply the priority class to every process this session
+ * owns, in the same call — the same seam `applyPerfHudEnabled` keeps for the sampler, and for the
+ * same reason: a setting that only takes effect at the next launch is a setting a player cannot
+ * A/B against a stutter they are looking at right now.
+ *
+ * `setYieldToGame` is the module's own no-op on any platform but Windows and under EQ_E2E, so the
+ * decision does not have to be restated here (two copies of a platform gate is how one drifts).
+ */
+export function applyYieldToGame(yieldToGame: boolean): ProcessPriorityPrefs {
+  const next = setProcessPriorityPrefs({ yieldToGame })
+  setYieldToGame(next.yieldToGame)
+  return next
+}
+
 export function registerPerfIpc(): void {
   ipcMain.handle(IPC.perfPrefsGet, () => getPerfHudPrefs())
+
+  ipcMain.handle(IPC.processPriorityGet, () => getProcessPriorityPrefs())
+
+  // VALIDATED AT THE HANDLER, never trusted because today's only caller is the app's own UI: a
+  // non-boolean is not a guess, it leaves the pref exactly as it was.
+  ipcMain.handle(IPC.processPrioritySet, (_e, yieldToGame: unknown) =>
+    typeof yieldToGame === 'boolean' ? applyYieldToGame(yieldToGame) : getProcessPriorityPrefs()
+  )
 
   ipcMain.handle(IPC.perfSetEnabled, (_e, enabled: unknown) =>
     typeof enabled === 'boolean' ? applyPerfHudEnabled(enabled) : getPerfHudPrefs()
@@ -39,7 +71,23 @@ export function registerPerfIpc(): void {
   ipcMain.handle(IPC.perfGetStartup, () => startupProfile())
 
   // The one phase main cannot observe: the renderer is the only thing that knows it has mounted.
+  //
+  // A REPEAT SEND IS A RELOAD, NOT A BUG (JOS-99). The renderer's own send-once guard is module
+  // scope, so every reload resets it — and this app reloads windows on purpose: the dev watcher
+  // does it on every renderer edit, `did-fail-load` retries once, and `render-process-gone`
+  // recovers by reloading. Each of those re-mounts the hook and sends this again. Handing that to
+  // `markStartupPhase` produced "startup phase 'rendererHydrated' was marked twice" in errors.log
+  // every single time, which is a large share of the fleet's `mainErrorLogLines` for an event that
+  // means the recovery WORKED.
+  //
+  // So the ignoring happens HERE, at the one channel that can legitimately repeat, and `addMark`
+  // is left exactly as strict as it was: every other phase is marked once from a single main-side
+  // call site, where a duplicate really is a wiring bug and still earns its logged refusal. The
+  // profile keeps the FIRST hydration — the launch's own — because that is the number "how long
+  // did this app take to draw its interface" is asking for; a reload three minutes later is not
+  // part of the launch and must not overwrite it.
   ipcMain.on(IPC.perfRendererHydrated, () => {
+    if (startupPhaseMarked('rendererHydrated')) return
     markStartupPhase('rendererHydrated')
   })
 }

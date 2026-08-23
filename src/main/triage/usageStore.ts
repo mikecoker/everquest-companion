@@ -8,8 +8,11 @@
 // so the split moved code, not import paths.
 //
 // THREE READS, and each is a single indexed statement with a bound:
-//   * `usage_daily` and `usage_funnel_daily` are `day >= :floor` over the PRIMARY KEY's
-//     leading column, so the window bounds the scan.
+//   * `usage_daily_all` and `usage_funnel_daily` are `day >= :floor` over the PRIMARY KEY's
+//     leading column, so the window bounds the scan. (`usage_daily_all` is a VIEW since
+//     JOS-394 — the frozen pre-shard table UNION ALL the 32-way sharded one, summed back to
+//     the old key — and `day` leads the primary key of both legs, so the bound survives the
+//     union. Same for `perf_daily_all`. infra/schema.sql carries the why.)
 //   * `analytics_install` is the whole table, because that is the question — WAU/MAU,
 //     retention cohorts and version spread are all "count rows by a date", and there is no
 //     window that makes them cheaper. It is bounded by a LIMIT anyway: this panel must not
@@ -82,9 +85,21 @@ export function missingColumn(err: unknown): string | null {
 export const USAGE_ROW_LIMIT = 20_000
 export const INSTALL_ROW_LIMIT = 50_000
 
+/**
+ * THE MERGED VIEW, NEVER THE TABLE (JOS-394). `usage_daily_all` is
+ * `usage_daily UNION ALL usage_daily_sharded`, summed back to the old key — the frozen
+ * pre-cutover rows plus the 32-way sharded rows the Lambda writes now, in one projection that
+ * is column-for-column what this function has always returned. Reading `usage_daily` directly
+ * from here would report the fleet as it was on cutover day and nothing since, which is the
+ * kind of wrong that looks like a quiet week.
+ *
+ * The degrade path is UNCHANGED and is the reason the name matters: a cluster that has not run
+ * the JOS-394 migration answers `42P01` naming `usage_daily_all`, which `missingTable` above
+ * hands back and the panel renders as "this cluster is not migrated" rather than as zeros.
+ */
 export function readUsageDaily(c: Clients, sinceDay: string): Promise<Row[]> {
   return c.query(
-    'SELECT day, cohort, metric, dim, n FROM usage_daily WHERE day >= $1 ORDER BY day LIMIT $2',
+    'SELECT day, cohort, metric, dim, n FROM usage_daily_all WHERE day >= $1 ORDER BY day LIMIT $2',
     [sinceDay, USAGE_ROW_LIMIT],
   )
 }
@@ -93,6 +108,81 @@ export function readUsageFunnelDaily(c: Clients, sinceDay: string): Promise<Row[
   return c.query(
     'SELECT day, cohort, funnel, step, outcome, app_version, n FROM usage_funnel_daily' +
       ' WHERE day >= $1 ORDER BY day LIMIT $2',
+    [sinceDay, USAGE_ROW_LIMIT],
+  )
+}
+
+/**
+ * FEEDBACK BUG REPORTS PER BUILD (JOS-96) — the release-health section's fourth source.
+ *
+ * It reads the `report` table rather than a counter table, and it is here rather than in
+ * `store.ts` because it is an ANALYTICS read: it is grouped, it is capped by the analytics
+ * window, and it selects three columns none of which is a person. `report_type` comes back so
+ * the caller can keep bugs apart from feature requests — a wishlist entry is not a defect and
+ * must never be plotted as one.
+ *
+ * NOTHING IDENTIFYING IS SELECTED. No `report_id`, no `install_id`, no `description` — the whole
+ * projection is (build, kind, count), which is the least this question can be answered with. That
+ * matters more here than in the other reads on this page, because `report` is the ONE table in
+ * the cluster that holds human-written text.
+ *
+ * The channel is carried so the caller can derive the cohort the same way the ingest path does
+ * (`cohortForChannel`): a dev-channel report is the author's own, and the user/owner split is not
+ * suspended just because these rows came from a different table.
+ */
+export function readReportVersions(c: Clients, sinceMs: number): Promise<Row[]> {
+  return c.query(
+    'SELECT app_version, report_type, channel, COUNT(*) AS n FROM report' +
+      ' WHERE received_at >= $1 GROUP BY app_version, report_type, channel LIMIT $2',
+    [sinceMs, USAGE_ROW_LIMIT],
+  )
+}
+
+/**
+ * THE ERROR STORE (JOS-100) — the one analytics read that returns something other than a count.
+ *
+ * `usage_daily` can say a build reported 412 errors; only this table can say WHICH, because the
+ * answer needs an EXEMPLAR and a counter has nowhere to put one. What comes back per row is
+ * (day, cohort, version, fingerprint, count, exemplar), and the exemplar is a validated
+ * `errorReport` event — a redacted message, `out/…` frames, parser event KINDS. There is no
+ * `analytics_id` on the table at all, so unlike every other read on this page there is not even
+ * an identifier to decline to select.
+ *
+ * BOUNDED THE SAME WAY the counter reads are, and by the same constant: the row count is
+ * (days × versions × distinct issues), which is small while the app is healthy and is exactly
+ * the number that stops being small on the day it is most worth reading.
+ */
+export function readErrorReports(c: Clients, sinceDay: string): Promise<Row[]> {
+  return c.query(
+    'SELECT day, cohort, version, fingerprint, count, exemplar FROM error_report' +
+      ' WHERE day >= $1 ORDER BY day LIMIT $2',
+    [sinceDay, USAGE_ROW_LIMIT],
+  )
+}
+
+/**
+ * THE PERF CUBE (JOS-372) — the one CROSS-TAB read on this page, and the only one that returns
+ * more than one dimension per row.
+ *
+ * `usage_daily` can say how many session reports saw a bad stall; only this table can say whether
+ * that rate is higher on fullscreen installs, on small boxes, or while an overlay is
+ * locked, because a counter keyed on one `dim` structurally cannot cross two facts.
+ *
+ * BOUNDED EXACTLY LIKE THE COUNTER READS, and by the same constant: it is `day >= :floor` over the
+ * PRIMARY KEY's leading column, and the row count per day is capped by the cube's own cardinality
+ * (every dim is a closed set — infra/schema.sql states the budget), so the window bounds the scan
+ * twice over. There is no id on this table at all, so as with `error_report` there is not even an
+ * identifier to decline to select.
+ *
+ * IT READS `perf_daily_all`, THE MERGED VIEW (JOS-394), for the reason `readUsageDaily` does: the
+ * cube is written 32 ways now and the pre-cutover rows are frozen in `perf_daily`. The view sums
+ * both back to the seven-column key this function has always returned, so the cross-tab the panel
+ * renders is unchanged — one shard's slice of a bucket was never a fact anybody asked for.
+ */
+export function readPerfDaily(c: Clients, sinceDay: string): Promise<Row[]> {
+  return c.query(
+    'SELECT day, cohort, window_mode, machine_class, locked, stall_bucket, tail_bucket, n' +
+      ' FROM perf_daily_all WHERE day >= $1 ORDER BY day LIMIT $2',
     [sinceDay, USAGE_ROW_LIMIT],
   )
 }

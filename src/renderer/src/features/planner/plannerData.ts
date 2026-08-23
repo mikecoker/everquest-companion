@@ -20,11 +20,13 @@ import type { EquipSlot, PlannerDonor, SocketType } from '@shared/planner/types'
 import {
   CURRENT_ERA,
   ERA_LABEL,
+  eraBadgeOverrides,
   eraFromTag,
   eraRank,
   layeredVerdict,
   zoneEra,
   type Era,
+  type EraDerivation,
   type EraVerdict
 } from '../../../../shared/planner/era'
 import { classesMismatch } from './plannerClasses'
@@ -169,8 +171,10 @@ export interface DonorEra {
   verdict: EraVerdict
   /** the era the chip names: the LATEST among its source zones, else the tag's. Null when silent. */
   era: Era | null
-  /** which witness produced `era` — the chip's tooltip must not claim a zone we never saw */
-  by: 'zone' | 'tag' | null
+  /** which witness produced the verdict — the chip's tooltip must not claim a zone we never saw.
+   *  `derived` is LAYER 3 (JOS-333): no witness spoke about this page, and something it stated it
+   *  is MADE of, or awarded by, is itself out of era. It names no expansion on purpose. */
+  by: 'zone' | 'tag' | 'derived' | null
 }
 
 /**
@@ -178,7 +182,20 @@ export interface DonorEra {
  * name a (key, effect) pair the corpus has no row for — Board and Farm pass `{ key }` alone then,
  * and the answer degrades to the catalog's zones, which is exactly the evidence available.
  */
-export type EraSubject = Pick<PlannerDonor, 'key'> & Partial<Pick<PlannerDonor, 'wikiSources' | 'eraTag'>>
+export type EraSubject = Pick<PlannerDonor, 'key'> &
+  Partial<Pick<PlannerDonor, 'wikiSources' | 'eraTag'>> & {
+    /** LAYER 3, built into the GEAR index at corpus-build time (`main/planner/eraDerive.ts`). Donor
+     *  and wishlist subjects simply do not carry it, and absent is exactly "no derivation". */
+    eraDerived?: EraDerivation
+    /**
+     * MORE LAYER-1 ZONES, already extracted (JOS-377). Same witness, second spelling: a mob drop
+     * arrives from main carrying the zones its ITEM PAGE named (`MobDrop.eraZones`) rather than the
+     * `{mob, zone}` rows a `PlannerDonor` carries, because a drop row has no use for the mob half
+     * and shipping it would be IPC weight nothing reads. Folded into the same union below, so this
+     * adds EVIDENCE and no rule: the verdict is still `layeredVerdict`'s, unchanged.
+     */
+    zones?: readonly string[]
+  }
 
 // Release order AND the display spellings come from era.ts (`eraRank`, `ERA_LABEL`) — the planner
 // never re-states which expansion came first, nor how one is spelled.
@@ -205,22 +222,77 @@ function latestZoneEra(zones: readonly string[]): Era | null {
 function eraZones(subject: EraSubject): string[] {
   const catalog = sourcesFor(subject.key).flatMap((s) => s.zones)
   const page = (subject.wikiSources ?? []).flatMap((s) => (s.zone === undefined ? [] : [s.zone]))
-  return [...new Set([...catalog, ...page])]
+  return [...new Set([...catalog, ...page, ...(subject.zones ?? [])])]
+}
+
+/**
+ * THE CACHE KEY — the EVIDENCE, not just the key (the same subject arrives with a corpus row and as
+ * a bare `{ key }`, and those two are entitled to different answers).
+ *
+ * The separator is SPELLED (`\u0000`), never written as a raw byte. It WAS a raw byte from the day this
+ * cache was added until JOS-333: git classified the whole module as binary, so diff, blame and grep
+ * went dark on it — the exact failure AGENTS.md records twice already (JOS-133, JOS-150). Same
+ * runtime value either way, so there was never a reason to emit the byte.
+ */
+function eraCacheKey(subject: EraSubject): string {
+  const derived = subject.eraDerived
+  return [
+    subject.key,
+    subject.eraTag ?? '',
+    String(subject.wikiSources?.length ?? 0),
+    // SPELLED OUT, not counted, unlike the row above it: `zones` is the channel a MOB DROP arrives
+    // on (JOS-377), and the same item key reaches this cache from the planner carrying none, so a
+    // count would let a zone-less subject read a zone-backed answer straight off the cache.
+    (subject.zones ?? []).join(','),
+    derived === undefined ? '' : `${derived.basis}:${derived.target}`
+  ].join('\u0000')
+}
+
+/**
+ * THE LAYER 1-2 ANSWER: zones first, the page's own banner into their silence, and the JOS-298
+ * override on top. Split out from `donorEra` so layer 3 can sit beside it as a peer rather than as
+ * one more branch inside a function that was already at the measured complexity ceiling.
+ *
+ * THE CHIP MUST NAME THE WITNESS THE VERDICT USED (JOS-298). When the page's own `Out of Era` badge
+ * overruled the zones, the zone is no longer the reason for anything, and reporting it would put
+ * "Classic" on a chip whose verdict is out-of-era — the loudest possible version of the bug that
+ * wave fixed. So the tag is both the era and the witness in that case, and the era is frequently
+ * `null` there on purpose: `FearHateRevamp` names no expansion, and the chip's honest reading of
+ * that is "out of era", not a guessed one.
+ */
+function statedEra(subject: EraSubject, zones: readonly string[]): DonorEra {
+  const fromZone = latestZoneEra(zones)
+  const fromTag = subject.eraTag === undefined ? null : eraFromTag(subject.eraTag)
+  const overruled = eraBadgeOverrides(subject.eraTag, CURRENT_ERA)
+  const era = overruled ? fromTag : (fromZone ?? fromTag)
+  return {
+    verdict: layeredVerdict(zones, subject.eraTag),
+    era,
+    by: overruled ? 'tag' : fromZone !== null ? 'zone' : era === null ? null : 'tag'
+  }
 }
 
 export function donorEra(subject: EraSubject): DonorEra {
-  const id = `${subject.key} ${subject.eraTag ?? ''} ${String(subject.wikiSources?.length ?? 0)}`
+  const id = eraCacheKey(subject)
   const hit = ERA_CACHE.get(id)
   if (hit) return hit
-  const zones = eraZones(subject)
-  const fromZone = latestZoneEra(zones)
-  const fromTag = subject.eraTag === undefined ? null : eraFromTag(subject.eraTag)
-  const era = fromZone ?? fromTag
-  const value: DonorEra = {
-    verdict: layeredVerdict(zones, subject.eraTag),
-    era,
-    by: fromZone !== null ? 'zone' : era === null ? null : 'tag'
-  }
+  const stated = statedEra(subject, eraZones(subject))
+  // LAYER 3 SPEAKS INTO SILENCE — and, for exactly one edge, over it.
+  //
+  // JOS-333 shipped this as "unknown is the only verdict layer 3 may touch", which made it a rule
+  // that could only ever HIDE rows. JOS-341 added the two things that break that symmetry, and both
+  // are the wiki's own predicate reaching a page our item corpus does not hold:
+  //   * an edge may now point IN, because an armour-set page filed under `Classic Era` is a claim
+  //     and not an absence — and while `era?` hides (73ad7ec9), refusing to read it is a decision
+  //     to hide gear the wiki says is right here.
+  //   * a DEFINITIVE edge (`drop-mob`) outranks the zones, the way the page's own out-of-era banner
+  //     has since JOS-298: a revamped zone keeps its name while its contents change, so the mob is
+  //     the witness and `Plane of Hate` is not.
+  // The era stays `null` either way: the edge names an expansion often enough, but what we know is
+  // whether the way you GET this thing is open, not which expansion the thing itself belongs to.
+  const derived = subject.eraDerived
+  const speaks = derived !== undefined && (derived.definitive === true || stated.verdict === 'unknown')
+  const value: DonorEra = speaks ? { verdict: derived.verdict, era: null, by: 'derived' } : stated
   ERA_CACHE.set(id, value)
   return value
 }
@@ -248,6 +320,28 @@ export interface EraChipInfo {
 const UNKNOWN_TOOLTIP = 'Nothing in our data states an era for this donor.'
 
 /**
+ * WHY A DERIVED VERDICT SAYS WHAT IT SAYS — one sentence per edge kind, naming the target.
+ *
+ * Each one is written to be checkable against the wiki page in one glance, which is the whole point
+ * of a derived answer: the player can see the pill we are mirroring. The two BADGE edges say "the
+ * wiki marks" because that is literally the wiki's own predicate; the two ZONE edges say where,
+ * because that claim is ours (`shared/zones.ts`) and must not pose as the wiki's.
+ */
+function derivedReason(d: EraDerivation | undefined): string {
+  if (d === undefined) return UNKNOWN_TOOLTIP
+  if (d.basis === 'component') return `Its recipe needs ${d.target}, which the wiki marks out of era (${d.detail}).`
+  if (d.basis === 'yield') return `Its recipe yields ${d.target}, which the wiki marks out of era (${d.detail}).`
+  if (d.basis === 'quest') return `It is only awarded by ${d.target}, a quest that starts in ${d.detail}.`
+  if (d.basis === 'drop-mob') return `Every mob that drops it is out of era on the wiki: ${d.detail}.`
+  if (d.basis === 'page') {
+    return d.verdict === 'in-era'
+      ? `Its notes name ${d.target}, which the wiki files as ${d.detail}, in era.`
+      : `Its notes name ${d.target}, which the wiki marks out of era (${d.detail}).`
+  }
+  return `Its recipe needs ${d.target}, which only drops in ${d.detail}.`
+}
+
+/**
  * The one chip the era join draws.
  *   out-of-era → the expansion's name ("Velious") — shown only while the filter is OFF
  *   unknown    → `era?` — nothing states an era, and we will not guess one
@@ -261,14 +355,37 @@ export function eraChip(subject: EraSubject): EraChipInfo | null {
   return {
     label,
     unknown: false,
+    // The banner tooltip quotes the token VERBATIM rather than the label: half the out-of-era
+    // banners ("FearHateRevamp", "EpicQuests") name no expansion, so the label there is the
+    // generic "out of era" and repeating it would explain nothing. A DERIVED verdict names the
+    // edge instead, because the page itself says nothing and "out of era" with no reason attached
+    // is the one thing this chip must never be.
     tooltip:
-      by === 'tag' ? `Its wiki page is banner-tagged ${label}.` : `This donor's sources are in ${label}.`
+      by === 'derived'
+        ? derivedReason(subject.eraDerived)
+        : by === 'tag'
+          ? `Its wiki page is banner-tagged ${subject.eraTag ?? label}, which the wiki marks out of era.`
+          : `This donor's sources are in ${label}.`
   }
 }
 
-/** Does the current-era filter hide this donor? Only a POSITIVE out-of-era verdict ever does. */
+/**
+ * Does the current-era filter hide this donor?
+ *
+ * TWO VERDICTS HIDE NOW (owner ruling 2026-08-13, the era? escalation): a POSITIVE out-of-era, and
+ * UNCERTAINTY. The old rule — only a positive verdict hides — treated era? as innocent-until-
+ * placed, and the owner's spot checks kept finding that bucket full of gear the wiki itself badges
+ * out of era through pages our corpus does not hold (armor sets, quest hubs — JOS-333's measured
+ * remainder: 824 era? rows pointing at 152 non-item pages). Until the respectful metadata fetch
+ * folds those targets in (the follow-up ticket), a question mark under a filter called "Current
+ * era" is a leak, not a courtesy: the filter's promise is "what you can get", and "we cannot say"
+ * fails that promise the same way "no" does. The chip still says era? on every surface the row IS
+ * shown (filter off), so nothing is dressed up as a verdict — the row is hidden for lacking one.
+ */
 export function eraHides(subject: EraSubject, eraOnly: boolean): boolean {
-  return eraOnly && donorEra(subject).verdict === 'out-of-era'
+  if (!eraOnly) return false
+  const verdict = donorEra(subject).verdict
+  return verdict === 'out-of-era' || verdict === 'unknown'
 }
 
 const ERA_KEY = 'eq.planner.era'

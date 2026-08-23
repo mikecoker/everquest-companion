@@ -39,11 +39,9 @@
 
 | where_to_obtain = 
 
-{{SpellWhereTable|
-{{SpellWhereRowB | [[Greater Faydark]] | [[Serilia Whistlewind]] | Kelethin Bard Guild | (-274,269) }}
-}}
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 
 Note: The scroll for this is "Song: Solon's Bravura" on Serilia Whistlewind.
-| TableLocations = Kelethin
-| TableEra = Classic
 }}

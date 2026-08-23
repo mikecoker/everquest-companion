@@ -31,8 +31,9 @@
 // how "new" is computed, or that anything is stored — the two chips are the whole disclosure.
 
 import { type JSX, useEffect, useMemo } from 'react'
-import { Box, Chip, Divider, Stack, Typography } from '@mui/material'
+import { Box, Chip, Divider, Link, Stack, Typography } from '@mui/material'
 import NewReleasesIcon from '@mui/icons-material/NewReleases'
+import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import {
   RELEASE_NOTES,
   hasReportedEntry,
@@ -45,6 +46,26 @@ import { formatCalendarDate } from '../../lib/formatDate'
 import type { PrefSection } from '../preferences/PreferencesView'
 import { markReleaseNotesSeen, useWhatsNew } from './session'
 import { WhatsNewDevRow } from './WhatsNewDevRow'
+
+/**
+ * The full release history on GitHub — the one link out of this panel (JOS-254).
+ *
+ * WHY A PANEL THAT IS ALREADY THE ANSWER CARRIES A DOOR OUT OF ITSELF. What ships in a build is
+ * every release UP TO that build (the notes are committed source — shared/releaseNotes.ts), so
+ * the one question this panel structurally cannot answer is "what came after the version I am
+ * running". The releases page answers it, and it is where the downloads and the tags live for
+ * anybody who wants them. It opens in the SYSTEM BROWSER: `target="_blank"` is turned into
+ * `shell.openExternal` by main's `setWindowOpenHandler`, which passes only an allowlisted https
+ * URL — and the `github.com` entry on `EXTERNAL_LINK_ALLOWLIST` (src/main/security.ts) is scoped
+ * to THIS repo's subtree (JOS-263), so it opens this link and nothing else on the host. Keep this
+ * constant pointing inside `github.com/jmoyers/everquest-companion/`; anywhere else silently
+ * fails to open.
+ *
+ * It sits BELOW the scroll box rather than inside it: leaving the app is the last thing on offer
+ * here, never the first, and a link that scrolled away with the history would be a door that
+ * moves.
+ */
+const GITHUB_RELEASES_URL = 'https://github.com/jmoyers/everquest-companion/releases'
 
 /** What each `kind` is called in front of a person. Entries with no kind get no sub-header at
  *  all — that is the shape of the backfilled releases, which drew no such distinction. */
@@ -201,7 +222,7 @@ export function WhatsNewPanel(): JSX.Element {
           sx={{ fontStyle: 'italic' }}
           data-testid="whats-new-thanks"
         >
-          Thanks to everyone who filed reports — many of these came from you.
+          Thanks to everyone who filed reports - many of these came from you.
         </Typography>
       )}
       <Box
@@ -223,6 +244,19 @@ export function WhatsNewPanel(): JSX.Element {
           </Box>
         ))}
       </Box>
+      {/* The way OUT, under the history rather than in it (JOS-254 — see GITHUB_RELEASES_URL).
+          One line, no explanation: the label says where it goes and the icon says it leaves. */}
+      <Link
+        href={GITHUB_RELEASES_URL}
+        target="_blank"
+        rel="noreferrer"
+        variant="caption"
+        data-testid="whats-new-github"
+        sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, alignSelf: 'flex-start' }}
+      >
+        All releases on GitHub
+        <OpenInNewIcon sx={{ fontSize: 13 }} />
+      </Link>
       {/* DEV-only, and it lives on THIS card rather than beside the dev restart button for the
           reason that button's own comment gives: a hand-test control belongs on the card holding
           the readout it drives. Clicking a variant here re-derives the panel you are looking at

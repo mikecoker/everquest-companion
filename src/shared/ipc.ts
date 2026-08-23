@@ -19,7 +19,12 @@ export const IPC = {
   // ---- progress / inventory (per-character persisted state) ----
   getProgress: 'progress:get',
   reloadInventory: 'inventory:reload',
-  setQuestComplete: 'progress:setQuestComplete',
+  // renderer -> main: this quest's turn-ins, as the instants they happened at (JOS-131). It
+  // replaced `progress:setQuestComplete` when completion became a COUNT rather than a flag.
+  setQuestTurnIns: 'progress:setQuestTurnIns',
+  // renderer -> main: state (count) or take back (null) ONE item's held count by hand — the
+  // correction for an item the log and the dump cannot see the truth about (JOS-186).
+  setItemOverride: 'progress:setItemOverride',
   // main -> renderer: progress changed (quest completion / inventory), so every
   // view that shows progress stays consistent without re-fetching on a timer.
   onProgress: 'progress:changed',
@@ -80,6 +85,12 @@ export const IPC = {
   // sound packs (discovery + audio bytes)
   listSoundPacks: 'sounds:listPacks',
   getSoundData: 'sounds:getData',
+  // WHICH PACK IS YOURS (JOS-273): the default-pack preference every picker pre-selects, the
+  // suggestion builder authors against and the seeds are written with, plus the tombstones that
+  // stop startup provisioning putting a deleted shipped pack back. The setter takes a pack id or
+  // null ("use whatever the app ships"); both answer the whole normalized blob.
+  getSoundPackPrefs: 'sounds:getPackPrefs',
+  setDefaultSoundPack: 'sounds:setDefaultPack',
   // "bring your own sound" (JOS-68): the user's OWN audio, in the reserved `my-sounds` pack.
   // NO PATH EVER CROSSES THESE. `importUserSounds` opens the OS picker in MAIN and answers
   // with minted soundIds + display labels; `removeUserSound` takes a manifest KEY, never a
@@ -88,6 +99,13 @@ export const IPC = {
   listUserSounds: 'sounds:listUser',
   importUserSounds: 'sounds:importUser',
   removeUserSound: 'sounds:removeUser',
+  // There is NO `audio:session` channel, and that is a ruling rather than an oversight (JOS-443,
+  // owner: "we don't need any special audio debugging tools at all"). JOS-442 added one that read
+  // this app's own WASAPI session over a hand-walked COM vtable so a Preferences card could report
+  // the Windows mixer's per-app mute and volume. The card, the channel and the native reader are
+  // all gone. What survived is the part that needs no surface: a failed sound fetch is never cached
+  // (soundCache.ts) and every audio failure writes one throttled line to errors.log
+  // (alerts/audioHealth.ts).
   // main -> renderer: the set of available sound packs changed (e.g. a shipped
   // default pack was auto-provisioned in the background at startup — Task #39). The
   // renderer re-lists packs + invalidates its sound caches so it becomes usable live.
@@ -95,6 +113,12 @@ export const IPC = {
   // suggested-alerts wizard (Task #38): a slim, searchable spell catalog derived from
   // the scraped spell DB + live per-spell usage from the buffs module's snapshot.
   spellsCatalog: 'spells:catalog',
+  // ONE spell, in full (JOS-293): every field the committed DB states for it, the derived effect
+  // classes, and the ranks of its line that a source names. The catalog above is the SLIM,
+  // whole-list shape the suggestion wizard filters; this is the deep read behind a hover card, and
+  // it is a separate channel rather than another flag because it takes an argument and answers
+  // about one row. Arg: the display name (VALIDATED at the handler). Never rejects.
+  spellsDetail: 'spells:detail',
 
   // ---- voice alerts / TTS (docs/plans/voice-alerts.md §3) ----
   // The 'system' engine tier needs NO channel at all: Chromium's own `speechSynthesis` lives in
@@ -169,6 +193,15 @@ export const IPC = {
   overlaySetIgnoreMouse: 'overlay:setIgnoreMouse',
   // renderer(overlay) -> main: close the overlay from its own close button. Arg: kind.
   overlayClose: 'overlay:close',
+  // renderer(overlay) -> main: "what I drew is this tall - make the window fit it" (JOS-386).
+  // Args: kind, height in DIP (content + the overlay's padding + the drag frame while unlocked).
+  //
+  // ONLY THE HEIGHT MOVES, and only for a kind whose height is the content's rather than the
+  // user's (overlayLayout.ts FIT_HEIGHT_KINDS - today the con card alone). x, y and width are the
+  // user's and are never touched by this, which is what makes "the top edge stays put and the
+  // window shrinks instead" true even for a card dragged to the bottom of the screen. Main clamps
+  // the request to the work area and does NOT persist the result as a chosen size.
+  overlayFitHeight: 'overlay:fitHeight',
   // renderer(overlay) -> main: read a kind's persisted config. Arg: kind. Returns OverlayConfig.
   overlayGetConfig: 'overlay:getConfig',
   // renderer(overlay) -> main: persist a kind's config (partial merge). Args: kind, patch.
@@ -176,6 +209,13 @@ export const IPC = {
   // main -> renderer(overlay): the persisted config changed. Payload: {kind, config}. The overlay
   // ignores pushes that aren't its own kind.
   onOverlayConfig: 'overlay:config',
+  // main -> renderer(overlay): "the cursor is no longer over your window" (JOS-381). Payload: kind.
+  // THE FOURTH LEAVE SIGNAL, and the only one that does not come from the window itself: while the
+  // Windows task switcher (or a UAC prompt, or any other system popup) owns input, a captured
+  // overlay never sees the leave that would give the mouse back, so main watches the cursor for it
+  // — but ONLY while a locked overlay is actually capturing (src/main/pointerWatch.ts states the
+  // whole performance contract). The renderer treats it exactly like a real leave.
+  onOverlayPointerExit: 'overlay:pointerExit',
 
   // ---- GLOBAL FIGHT SELECTION (docs/plans/combat-overlay-parity.md P4/P5/P6) ----
   // ONE fight is selected app-wide: picking one in the Combat tab's picker or in ANY
@@ -199,6 +239,57 @@ export const IPC = {
   // all overlay kinds; a window with no fight-scoped surface simply has no listener.
   onFightSelection: 'fightSelection:changed',
 
+  // ---- THE APP-WIDE SCOPE SELECTION (JOS-332) ----
+  // WHICH TIERS of the current camp count, and WHICH HOUR every rate divides by. One answer for the
+  // main window and the XP overlay together, because they are separate renderer processes showing
+  // the same two words to the same reader — the owner read `elapsed 27m` off the tab with *this
+  // tier* on screen and the two states were simply not the same state (shared/scopeSelection.ts
+  // carries the measured story). Main holds it EPHEMERALLY (src/main/scopeSelection.ts — the
+  // opening at every launch, never stored) and is the only process that can reach every window,
+  // which is the fight-selection argument above, verbatim, for the second fact to need it.
+  //
+  // THE SLICE IS NOT HERE, on purpose: which STRETCH a floating window measures stays its own
+  // persisted `xpSlice` (shared/types.ts states why). These two channels carry the pair that must
+  // agree, and nothing else.
+  //
+  // renderer(any window) -> main: read the current selection, for hydrating a window that mounted
+  // after the last change. Returns a whole `ScopeSelection`.
+  scopeSelectionGet: 'scopeSelection:get',
+  // renderer(any window) -> main, FIRE-AND-FORGET: "the user moved one of these knobs". The payload
+  // is a PARTIAL — each control sets one half and must not restate the other — and is REBUILT AT
+  // THE HANDLER against the shared model (`normalizeScopePatch`): an unknown key, a missing one or
+  // a value this build cannot name is dropped rather than fanned out.
+  scopeSelectionSet: 'scopeSelection:set',
+  // main -> EVERY window: the selection changed. Payload is the whole `ScopeSelection`. Sent to the
+  // main window and all overlay kinds; a window with no scoped surface simply has no listener.
+  onScopeSelection: 'scopeSelection:changed',
+
+  // ---- THE APP-WIDE SESSION MARKS (JOS-436 store, JOS-322 seam) ----
+  // "Start a new session now" is ONE INSTANT, and the segments are the half-open intervals between
+  // the instants (`shared/sessionSegments.ts`). It used to live in a renderer module variable, which
+  // meant every window kept its own copy AND the combat engine — which is in main — could never
+  // hear the click at all. The owner's ruling is that one click splits EVERYTHING: the loot ledger
+  // and the meter's engine records, from the SAME boundary.
+  //
+  // SO MAIN OWNS THE INSTANT, and that is the whole reason these channels exist: main is the only
+  // process that can both reach every window and call `combat.sessionMark(ts)` synchronously with
+  // the very number it just stamped. A renderer stamping its own clock and telling main afterwards
+  // would give the two halves two boundaries a round trip apart.
+  //
+  // EPHEMERAL, like the two selections above: no store key, no migration, empty at every launch
+  // (`shared/sessionSegments.ts` states why a slice is a thing you choose while you are looking).
+  //
+  // renderer(any window) -> main: read the marks, for hydrating a window that mounted after the
+  // last press. Returns `number[]`, ascending.
+  sessionMarksGet: 'sessionMarks:get',
+  // renderer(any window) -> main, INVOKE: "the user pressed New session". It carries NO PAYLOAD on
+  // purpose — main stamps `Date.now()` once and that instant is the boundary for the loot split and
+  // the engine split alike. Resolves to the new mark list so the window that pressed can select the
+  // segment it just opened without waiting for its own broadcast to come back.
+  sessionMarkAdd: 'sessionMarks:add',
+  // main -> EVERY window: the marks changed. Payload is the whole ascending list.
+  onSessionMarks: 'sessionMarks:changed',
+
   // ---- cursor ring + overlay auto-hide (presence-driven settings) ----
   // Both blobs are main-owned (electron-store), so Preferences has no other door. The setters
   // are MERGE-PATCHES and every field is re-validated + clamped AT THE HANDLER through
@@ -210,6 +301,82 @@ export const IPC = {
   // renderer(main app) -> main: read / patch the overlay auto-hide prefs. Returns OverlayAutoHidePrefs.
   overlayAutoHideGet: 'overlayAutoHide:get',
   overlayAutoHideSet: 'overlayAutoHide:set',
+  // ---- overlay snapping (JOS-217; shared/overlaySnap.ts) ----
+  // renderer(main app) -> main: read / patch the snap preference. Returns OverlaySnapPrefs.
+  // The patch is re-validated AT THE HANDLER through the same normalizer the store reader uses,
+  // and it is OFF unless somebody has turned it on — an absent key drags exactly as it always did.
+  overlaySnapGet: 'overlaySnap:get',
+  overlaySnapSet: 'overlaySnap:set',
+  // ---- the overlays' TEXT SIZE (JOS-405; shared/overlayTextScale.ts) ----
+  // renderer(main app OR any overlay window) -> main: read / patch `{ shared, independent }`.
+  // Returns OverlayTextSizePrefs, re-validated at the handler through the same normalizer the
+  // store reader uses. BOTH bridges carry the read, because both surfaces decide the same thing
+  // with it: Preferences paints the shared stepper and the twelve rows, and every overlay window
+  // resolves its own effective scale (`effectiveOverlayTextScale`) before it draws a row.
+  overlayTextSizeGet: 'overlayTextSize:get',
+  overlayTextSizeSet: 'overlayTextSize:set',
+  // main -> renderer(main app AND every open overlay window): the prefs changed somewhere this
+  // window could not see. Payload OverlayTextSizePrefs. It is the whole reason a pinned meter
+  // resizes when Preferences moves the shared size, and the reason the Preferences stepper agrees
+  // with a press made on a meter's own A+ — one value with thirteen controls needs one push.
+  onOverlayTextSize: 'overlayTextSize:changed',
+  // renderer(main app) -> main: every kind's OWN stored `textScale`, in one read. Preferences'
+  // per-overlay list is twelve rows and this is one call rather than twelve; an overlay window
+  // never asks, because the only per-kind value it can draw is its own and that is in its config.
+  overlayTextScalesGet: 'overlayTextSize:kinds',
+  // main -> renderer(main app): a per-kind value moved (a window's own A− / A+ while independent
+  // sizes are on). Payload Record<OverlayKind, number>. Preferences' rows would otherwise seed
+  // from a cache written before the press and state a size that window is not drawing at.
+  onOverlayTextScales: 'overlayTextSize:kindsChanged',
+  // ---- the overlays' BACKGROUND TRANSPARENCY (JOS-407; shared/overlayBgAlpha.ts) ----
+  // FOUR CHANNELS OF ITS OWN, mirroring the four above rather than widening them to carry both
+  // preferences in one message. The two settings are linked and unlinked SEPARATELY by design
+  // (owner: if they are separate in their settings, separate them), so a shared envelope would put
+  // two independent switches on one wire and make every reader unpack a pair it half-cares about;
+  // a window that only redraws its background would re-resolve its text size on every alpha drag.
+  // renderer(main app OR any overlay window) -> main: read / patch `{ shared, independent }`.
+  // Returns OverlayBgAlphaPrefs, re-validated at the handler through the same normalizer the store
+  // reader uses.
+  overlayBgAlphaGet: 'overlayBgAlpha:get',
+  overlayBgAlphaSet: 'overlayBgAlpha:set',
+  // main -> renderer(main app AND every open overlay window): the prefs changed somewhere this
+  // window could not see. Payload OverlayBgAlphaPrefs — one value with fifteen controls (twelve
+  // windows' own `bg` sliders and Preferences' slider, switch and rows) needs one push.
+  onOverlayBgAlpha: 'overlayBgAlpha:changed',
+  // renderer(main app) -> main: every kind's OWN stored `bgAlpha`, in one read, for the twelve-row
+  // list. An overlay window never asks: the only per-kind value it can draw is its own.
+  overlayBgAlphasGet: 'overlayBgAlpha:kinds',
+  // main -> renderer(main app): a per-kind value moved (a window's own `bg` slider while
+  // independent transparency is on). Payload Record<OverlayKind, number>.
+  onOverlayBgAlphas: 'overlayBgAlpha:kindsChanged',
+  // ---- ONE SWITCH OVER BOTH OF THEM (JOS-408; shared/overlayIndependent.ts) ----
+  // renderer(main app) -> main: `independent`, for the text size AND the transparency together.
+  // Resolves to BOTH prefs objects, because both may have moved and the pane draws both.
+  //
+  // A CHANNEL OF ITS OWN rather than two calls from the renderer, and the reason is atomicity a
+  // renderer cannot provide: the two writes must land before either is broadcast, or an overlay
+  // window is told about half a flip and re-resolves its size against a transparency flag that has
+  // not moved yet. It is also where the ONE seed order lives — text first, then transparency —
+  // which is what keeps "opting in changes nothing on screen" true for both features at once.
+  // The eight channels above are untouched: they are still how each value actually travels.
+  overlayIndependentSet: 'overlayIndependent:set',
+  // ---- closing the window keeps the companion running (JOS-139; shared/closeToTray.ts) ----
+  // renderer(main app) -> main: read / patch the close-to-tray preference. Returns
+  // CloseToTrayPrefs, re-validated at the handler through the same normalizer the store uses.
+  closeToTrayGet: 'closeToTray:get',
+  closeToTraySet: 'closeToTray:set',
+  // main -> renderer(main app): the preference changed somewhere the app window could not see —
+  // the tray menu's checkbox, or the popover's `Always quit instead`. Payload CloseToTrayPrefs.
+  // Without it the Preferences switch and the tray checkbox would be two answers to one question.
+  onCloseToTray: 'closeToTray:changed',
+  // ---- the tray popover (JOS-139) ----
+  // renderer(tray notice window ONLY) -> main. Three SENDS and no reads: the card states what
+  // just happened and offers the three ways out of it, and every one of them is a decision main
+  // carries out. `quit` does not touch the preference (they may want to read the card again);
+  // `alwaysQuit` turns it OFF and quits; `acknowledge` is the card saying it has been read.
+  trayNoticeQuit: 'trayNotice:quit',
+  trayNoticeAlwaysQuit: 'trayNotice:alwaysQuit',
+  trayNoticeAcknowledge: 'trayNotice:acknowledge',
   // main -> renderer(ring window ONLY): the ring's size/thickness changed. Payload CursorRingPrefs.
   onCursorRingConfig: 'cursorRing:config',
   // main -> renderer(ring window ONLY): one cursor sample, in the ring window's own CSS px.
@@ -254,6 +421,35 @@ export const IPC = {
   // "Raid target defeated" / "Quest complete" ALERTS speak on the same events, and a second
   // channel could only ever say it twice. Removed with the sound controls it served.)
 
+  // ---- the alert banner (JOS-378, shared/alertBanner.ts) ----
+  // renderer(main app) -> main, FIRE-AND-FORGET: "show this alert on screen" (AlertBannerPayload).
+  // ONE channel for every firing path, because there is one producer: the always-mounted
+  // AlertPlayer, which is where a fired alert already becomes sound and speech. Everything that
+  // decides WHETHER an alert fires (enabled, cooldown, target scope) happened upstream in the
+  // alerts module and is not re-asked here.
+  // VALIDATED AT THE HANDLER (`validateAlertBannerPayload`): the payload is rebuilt field by
+  // field, the colour is checked against a closed union and the text is capped, because it
+  // crosses into a window that draws it.
+  alertsBanner: 'alerts:banner',
+  // main -> renderer(alertBanner overlay): one validated line to render. The overlay queues,
+  // times and dismisses it locally and fetches nothing — the celebration toast's contract, on
+  // the kind that shares its queue.
+  onAlertBanner: 'alerts:banner-card',
+
+  // ---- the con card (JOS-383, shared/conCard.ts) ----
+  // main -> renderer(conCard overlay): one finished card for the creature just `/con`ed. There is
+  // no renderer->main producer on this feature at all, which is what makes it different from the
+  // banner above: the trigger is a LOG LINE, and main owns the log, the resist ledger, the mob
+  // knowledge and the kill counts the card is made of. Nothing is validated on the way out because
+  // nothing untrusted is on the way in — main built it — but it IS capped (shared/conCard.ts), for
+  // the reason every payload that crosses into a window that draws it is.
+  onConCard: 'con:card',
+  // renderer(conCard overlay) -> main, FIRE-AND-FORGET: "I closed the card for this mob."
+  // The overlay dismisses its own card locally; this tells main, whose business the SUPPRESSION is
+  // (`CON_CARD_REOPEN_SUPPRESS_MS` — a re-con inside a minute of a close must not nag). Main
+  // re-validates the key at the handler, because it is a renderer-supplied string.
+  conCardClosed: 'con:card-closed',
+
   // ---- cross-window deep link (Task #64) ----
   // renderer(overlay) -> main: "focus the app on this" (AppFocus). Main shows/restores/focuses
   // the MAIN window and forwards the payload on `onFocusView`. Fire-and-forget; the payload's
@@ -262,6 +458,15 @@ export const IPC = {
   // main -> renderer(main app): a deep link landed. App.tsx switches to the named view and
   // hands the target down (today: the mob to drill into).
   onFocusView: 'app:focusedView',
+
+  // ---- the mouse's Back button (JOS-201) ----
+  // main -> renderer(main app): the user pressed the browser-Back button on their mouse while
+  // THIS window had focus. No payload: the message is the press, and what "back" means is a
+  // question only the renderer can answer (src/renderer/src/appBack.tsx). The event is
+  // WINDOW-SCOPED by construction — it originates in a BrowserWindow `app-command` handler
+  // (src/main/appBack.ts), so a press landing in EverQuest, or in any other app, never reaches
+  // here. There is deliberately no global hook and no forward channel.
+  onAppBack: 'app:back',
 
   // ---- class-combo corrections (docs/plans/class-combo-inference.md § 5.3) ----
   // READS need no channel of their own — the combo module rides the generic module transport
@@ -331,16 +536,65 @@ export const IPC = {
   // typing the command in game fills the tab with no click anywhere.
   plannerInventory: 'planner:inventory',
 
+  // ---- gear planner (JOS-283, phase 2) ----
+  // renderer -> main: the GEAR CANDIDATE INDEX — one row per equippable item (~6,884 of the
+  // corpus's 11,213 pages), carrying slots/classes/races/era/flags/effects, the weapon block and
+  // the NUMERIC BASE stat vector. Returns GearIndexPayload (versioned; see shared/planner/gear.ts).
+  // Built in main for the same reason the donor index is — items.json is already inlined here, so
+  // shipping the corpus to the renderer would double it — LAZILY on first call and memoized for
+  // the process. Fetched ONCE by the renderer: the rows are derived from committed bytes and
+  // cannot change while the app runs, and every plus-state the user asks for is a PURE MAP over
+  // them (shared/planner/gearScale.ts), never another round trip.
+  gearIndex: 'gear:index',
+
+  // ---- gear planner (JOS-285, phase 4) ----
+  // renderer -> main: THE OWNERSHIP INDEX for the active character — every thing their newest
+  // `/outputfile inventory` dump names, filed under the same key the gear index and the loot
+  // history use (shared/planner/ownership.ts), so the Gear tab joins by `row.key` with no
+  // translation. Returns OwnershipPayload; `path: null` means the command has never been run,
+  // which is "there is nothing to read", never "you own nothing".
+  //
+  // MEMOIZED ON THE DUMP'S OWN IDENTITY (path + mtime), not on a signal somebody has to remember
+  // to send: every ask re-stats the file (one readdir + one stat, the registry's own rule) and
+  // re-folds only when it MOVED. So the renderer re-asking on `inventory:autoReloaded` gets the
+  // new dump, and a keystroke that re-renders the table gets the cached fold.
+  gearOwnership: 'gear:ownership',
+
+  // ---- gear planner (JOS-286, phase 5) ----
+  // The active character's saved GEAR SETS — named virtual loadouts, one item per equipment cell,
+  // each assignment carrying its own tracked plus-state (shared/planner/gearSet.ts). Read/write
+  // pair over `ProgressState.gearSets`, exactly the `planner:getPlans` / `planner:setPlans`
+  // arrangement: the renderer is UNTRUSTED, so a written list is re-validated cell by cell against
+  // the closed `PLAN_SLOTS` allowlist and clamped to states the game's item window can be in
+  // (src/main/planner/validate.ts sanitizeGearSets) before a byte of it reaches the store — and
+  // the same validator runs on the way out, so the round trip is a fixed point.
+  gearGetSets: 'gear:getSets',
+  gearSetSets: 'gear:setSets',
+
+  // ---- the flat wish list (JOS-326) ----
+  // The active character's WISH LIST — a flat list of items they have decided they want, with no
+  // cell, socket or host structure at all (shared/planner/wishlist.ts), plus the two facts that
+  // hang off it: the done strip's dismissals and the one-time exaltation-plan seed flag. Read/write
+  // pair over `ProgressState.wishlist`, the same arrangement as the two documents above — the
+  // renderer is UNTRUSTED, so a written list is re-validated entry by entry
+  // (src/main/planner/validate.ts sanitizeWishlist) before a byte of it reaches the store, and the
+  // same validator runs on the way out, so the round trip is a fixed point. WHOLE-DOCUMENT, because
+  // the list and the two facts about it must move together or not at all.
+  wishlistGet: 'wishlist:get',
+  wishlistSet: 'wishlist:set',
+
   // ---- character sheet (JOS-45) ----
   // renderer -> main: the armory grid + the gear sum, built from the active character's newest
   // `/outputfile inventory` dump and joined to the committed item DB in main (where the 8.6 MB
-  // corpus already lives). Returns CharacterSheet | null — null means no dump, which the tab
-  // answers with its instructions card, never an error.
+  // corpus already lives) — and, since JOS-327, the CARRY-ALL ledger off the same parse
+  // (`CharacterSheet.carry`, shared/carryAll.ts): every non-empty row of every table the dump
+  // carries, with its location path and count. Returns CharacterSheet | null — null means no dump,
+  // which the tab answers with its instructions card, never an error.
   //
-  // THIS CHANNEL IS GATED. Its handler is registered only when `UNRELEASED` (src/main/unreleased.ts)
-  // is true — dev builds, or an explicit EQ_UNRELEASED=1 — because the module has not passed the
-  // owner's review gate. In a packaged build there is no handler and the preload method rejects,
-  // which is the designed outcome: the renderer surface is stripped from those bytes entirely.
+  // IT WAS GATED UNTIL JOS-327. The handler was registered only when `UNRELEASED`
+  // (src/main/unreleased.ts) was true, because the surface had not passed the owner's review gate,
+  // and the preload method below still documents the reject that came of it. The owner released the
+  // tab, so this is an ordinary channel now: registered in every build, answering in every build.
   characterSheet: 'character:sheet',
 
   // ---- map viewer (docs/plans/map-viewer.md §4.2) ----
@@ -401,8 +655,17 @@ export const IPC = {
   // renderer -> main: save the FULL slice to disk via the OS save dialog, so a user who
   // wants to read every byte before sending can. Returns {ok, path?, canceled?}.
   feedbackSaveSlice: 'feedback:saveSlice',
-  // renderer -> main: submit. Args (draft, {attachLog, windowMinutes}). Never rejects;
-  // a network failure resolves with {ok:false, queued:true}. Returns SubmitResult.
+  // renderer -> main: package the CURRENT `/outputfile inventory` dump and return its
+  // metadata + a capped preview, or the NAMED reason there is none (JOS-296). No arguments:
+  // which dump belongs to this character is main's answer, never the renderer's. The gz bytes
+  // never cross. Returns FeedbackInventoryPreview.
+  feedbackBuildInventory: 'feedback:buildInventory',
+  // renderer -> main: the same for the CURRENT `/outputfile achievements` dump (JOS-441), on the
+  // identical no-arguments terms. Returns FeedbackAchievementsPreview.
+  feedbackBuildAchievements: 'feedback:buildAchievements',
+  // renderer -> main: submit. Args (draft, {attachLog, windowMinutes, attachInventory,
+  // attachAchievements}). Never rejects; a network failure resolves with {ok:false,
+  // queued:true}. Returns SubmitResult.
   feedbackSubmit: 'feedback:submit',
 
   // ---- usage analytics (docs/plans/usage-analytics.md wave A1) ------------------------
@@ -469,6 +732,13 @@ export const IPC = {
   // startup phase, which only the renderer can observe. Sent once per window lifetime; a
   // repeat is refused by the phase accounting itself (shared/perf.ts `addMark`).
   perfRendererHydrated: 'perf:rendererHydrated',
+  // renderer -> main: the persisted "yield CPU to the game" pref ({yieldToGame}). ON by default.
+  // Returns ProcessPriorityPrefs.
+  processPriorityGet: 'processPriority:get',
+  // renderer -> main: flip it. The priority class of main + every renderer is re-applied in the
+  // SAME call, so the pref and this session's processes can never disagree (the `perf:setEnabled`
+  // discipline). A non-boolean leaves the pref alone. Arg: boolean. Returns ProcessPriorityPrefs.
+  processPrioritySet: 'processPriority:setYield',
 
   // ---- graphics compatibility (JOS-40 — shared/graphicsPrefs.ts) ------------------------
   //
@@ -481,8 +751,132 @@ export const IPC = {
   // renderer -> main: the persisted blob {safeMode, opaqueOverlays}. Returns GraphicsPrefs.
   graphicsPrefsGet: 'graphicsPrefs:get',
   // renderer -> main: merge-patch the blob. VALIDATED AT THE HANDLER through the same
-  // normalizer the store reader and the 9→10 migration use. Returns what was stored.
+  // normalizer the store reader and the 10→11 migration use. Returns what was stored.
   graphicsPrefsSet: 'graphicsPrefs:set',
+  // renderer -> main: what this MACHINE recommends, for a switch left on 'auto' (JOS-31).
+  // Returns a `GraphicsEnvironment` (shared/wineDetect.ts): whether a Wine prefix was detected,
+  // which signals said so, and the two booleans `resolveGraphics` folds against the stored prefs.
+  //
+  // A SEPARATE CHANNEL, not a fatter `graphicsPrefs:get`, because the two answer different
+  // questions with different lifetimes: the prefs change when the user flips a switch, and this is
+  // a fact about the launch that cannot change while the app is running. The renderer hydrates it
+  // once and re-folds locally through the SAME `resolveGraphics` main used, so the card can never
+  // describe a precedence the windows did not use.
+  graphicsEnvGet: 'graphicsPrefs:env',
+
+  // ---- the buff externals allowlist (JOS-140 — shared/buffTrust.ts) ----------------------
+  //
+  // WHOSE spells the buff/debuff model is allowed to track. It ships EMPTY — you and nobody else
+  // — because a landing sentence names no caster, so in a crowded zone the only thing separating
+  // your work from a stranger's is that you have a cast line and they do not. An allowlisted name
+  // gets the IDENTICAL rule, anchored on `<Name> begins casting <Spell>.`; it is never a looser
+  // one, and never something the app infers from proximity or from the group roster.
+  //
+  // renderer -> main: the persisted `{externals: string[]}`. Returns BuffTrustPrefs.
+  buffTrustGet: 'buffTrust:get',
+  // renderer -> main: replace the list. VALIDATED AT THE HANDLER through the same normalizer the
+  // store reader uses (the `graphicsPrefs:set` rule), and applied to the live model on the way
+  // through so a name added mid-session anchors the next cast rather than the next launch.
+  // Returns what was stored.
+  buffTrustSet: 'buffTrust:set',
+
+  // ---- the buff/debuff TRACKING ALLOW-LIST (JOS-168 — shared/buffAllow.ts) ---------------
+  //
+  // WHICH of your spells the two timer OVERLAY windows may draw: a mode switch that lives on the
+  // Buffs tab, and a tri-state verdict per spell line behind it. It is a DISPLAY filter over those
+  // two windows and nothing else — the model, the Buffs tab list and its header count are
+  // untouched (JOS-215's law).
+  //
+  // IT IS IPC RATHER THAN RENDERER STATE FOR ONE REASON: the window that SETS it (the Buffs tab,
+  // in the main window) is not the window that OBEYS it (the buffs/debuffs overlays, separate
+  // BrowserWindows with their own localStorage). Main is the only process that can reach both,
+  // which is the fight-selection/scope-selection argument — except that this one is PERSISTED,
+  // because a choice about which spells you track is not a thing you re-make every launch.
+  //
+  // renderer(any window) -> main: the persisted allow-list, for hydrating a window that mounted
+  // after the last change. Returns BuffAllowPrefs.
+  buffAllowGet: 'buffAllow:get',
+  // renderer(main app) -> main: a PARTIAL — the mode, some verdicts, or both. Each control sets
+  // what it touches and no more, so a checkbox never has to restate the mode. REBUILT AT THE
+  // HANDLER through the same normalizer the store reader uses (`applyBuffAllowPatch`), persisted,
+  // and fanned out. Returns what was stored.
+  buffAllowSet: 'buffAllow:set',
+  // main -> the main window + the two timer overlays: the allow-list changed. Payload is the whole
+  // `BuffAllowPrefs`. This is the half that makes a checkbox reach an ALREADY-OPEN overlay within
+  // one delta rather than at the next launch.
+  onBuffAllow: 'buffAllow:changed',
+
+  // ---- respawn clocks (JOS-194 — shared/respawn.ts) -------------------------------------
+  //
+  // WHICH MOBS GET A CLOCK. The clocks themselves are log-derived and ride the generic module
+  // transport (`respawn`); this pair carries the ONE thing the log cannot state — the mobs you
+  // chose to watch and the respawn you typed for them.
+  //
+  // main -> renderer: the persisted watch list. Returns RespawnPrefs.
+  respawnGet: 'respawn:get',
+  // renderer -> main: replace it. VALIDATED AT THE HANDLER through the same normalizer the store
+  // reader uses, applied to the running module, and PUSHED immediately (`registry.flushNow`) —
+  // the module's own revision counter is what keeps the push from being deduped, because a watch
+  // edit advances no log seq (JOS-87). Returns what was stored.
+  respawnSet: 'respawn:set',
+  // renderer -> main: "that sighting WAS the spawn — start this row's clock from it" (owner
+  // ruling, prototype round 3). The app never does this on its own: a sighting proves the mob is
+  // up and says nothing about when it spawned, so re-basing a clock is a judgement and needs a
+  // click. Payload is the ROW ID the surfaces already draw; main re-checks that the row exists and
+  // is currently seen. Returns whether it took effect. Called from the Timers tab AND from an
+  // INTERACTIVE floating window (a locked one is click-through and has no clicks to give).
+  respawnConfirmSighting: 'respawn:confirmSighting',
+  // renderer -> main: "stop watching this mob" (owner ruling, prototype round 4). The same write
+  // `respawnSet` could express, given its own channel because it is called from surfaces that have
+  // no business holding the whole watch list: a clock row and an INTERACTIVE floating window each
+  // know one mob, and handing either of them the entire list to rewrite would be a second place
+  // that can lose a watch the user did not touch. Payload is the canonical mob KEY the rows
+  // already carry; main removes it through the shared pure helper, persists, applies to the
+  // running module and pushes (`registry.flushNow`) exactly as the setter does. Returns whether
+  // anything was actually watching that name — false is a no-op, not a failure.
+  respawnUnwatch: 'respawn:unwatch',
+
+  // ---- per-mob resist profiles (JOS-382 — docs/plans/resist-mining.md) -------------------
+  //
+  // A PULL, NOT A SUBSCRIPTION, and the reason is the size of the thing being read: the resist
+  // ledger is ~700 kB of pooled observations and the only consumer wants ONE mob out of it at a
+  // time, on a page the user has to navigate to. Mirroring it into the renderer over
+  // `module:delta` would ship the whole ledger to draw five rows. So the module (id `resist`)
+  // pushes no increments, exactly as the combat engine does not, and these two channels answer
+  // the question the screen is actually asking.
+  //
+  // Both DERIVE on every call. Nothing about a resist stat is stored — not R, not the interval,
+  // not "nearly immune" — because a stored verdict is a second opinion waiting to disagree with
+  // the derived one, and because the answer legitimately moves as the user plays.
+  //
+  // renderer -> main: (mobDisplayName) -> MobResistProfile. Five axis rows, always, in one order.
+  resistProfile: 'resist:profile',
+  // renderer -> main: (mobDisplayName, axis) -> the evidence behind one row: the estimate, its
+  // per-spell breakdown, and the rows themselves. Null when the client's spell data is missing.
+  resistCell: 'resist:cell',
+  // Which casters teach the profiles (JOS-385 — shared/resistPrefs.ts). Returns ResistPrefs.
+  //
+  // A PREFERENCE, NOT A RE-FOLD. `includeNpcCasters` is read when a card is DRAWN, so setting it
+  // writes one boolean and returns; the next `resist:profile` pull is already the new answer. No
+  // ledger is touched, nothing is invalidated, and flipping it back costs the same nothing.
+  resistPrefsGet: 'resist:prefs:get',
+  // Arg: Partial<ResistPrefs>. A malformed value leaves the pref alone. Returns ResistPrefs.
+  resistPrefsSet: 'resist:prefs:set',
+
+  // ---- main window text size (JOS-123 — shared/uiScale.ts) ------------------------------
+  //
+  // The main window's zoom factor: the Preferences control a player asked for after reporting
+  // they could barely read the app. The floating overlays are NOT on this channel and never
+  // were — they carry their own `textScale` inside the per-kind overlay config, because an
+  // overlay scales only its reading matter and keeps its chrome laid out against a small window.
+  //
+  // renderer -> main: the persisted factor. Returns a number (1 on every store that predates it).
+  uiScaleGet: 'uiScale:get',
+  // renderer -> main: store a factor and APPLY it to the live window in the same call. Unlike the
+  // graphics switches above this one takes effect immediately, which is not a courtesy: a size
+  // control you have to relaunch to evaluate cannot be evaluated. Returns what was stored, snapped
+  // to the ladder by the same normalizer the store reader and the window factory use.
+  uiScaleSet: 'uiScale:set',
 
   // ---- dev restart (JOS-61, JOS-63 — src/main/devRestart.ts) ----------------------------
   //
@@ -556,6 +950,11 @@ export const IPC = {
   // ---- misc pushes ----
   onLine: 'log:line',
   onCharacter: 'log:character',
+  // main -> renderer: the attached log has been silent for minutes while a SIBLING character log
+  // is growing — offer a one-click switch (JOS-432). Payload: LogSwitchNudge. At most one per
+  // candidate log per app session, by construction (src/main/log/quietSwitch.ts); there is no
+  // re-fire, no stacking and no re-show, so the renderer needs no rate limiting of its own.
+  onLogSwitchNudge: 'log:switchNudge',
 
   // ---- error harness (renderer -> main, fire-and-forget) ----
   // window.onerror / onunhandledrejection / React ErrorBoundary report here so

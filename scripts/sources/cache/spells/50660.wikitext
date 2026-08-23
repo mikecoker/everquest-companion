@@ -36,10 +36,7 @@
 
 | where_to_obtain = 
 
-{{SpellWhereTable|
-{{SpellWhereRowB | [[Greater Faydark]] | [[Astar Leafsinger]] | Kelethin Bard Guild | (-252,293) }}
-{{SpellWhereRow  | [[Qeynos|South Qeynos]] | [[Topala Xenem]] | Bard Guild | (550,-136) }}
-}}
-| TableLocations = Qeynos<br/>Kelethin
-| TableEra = Classic
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 }}

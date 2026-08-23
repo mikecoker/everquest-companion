@@ -1,27 +1,31 @@
 // Presence watcher + the two features it drives (src/main/presence.ts,
 // src/shared/presencePrefs.ts).
 //
-// Everything asserted here is PURE: the stdout line protocol, the "is this window EverQuest"
+// Everything asserted here is PURE: the line protocol, the "is this window EverQuest"
 // predicate, the alt-tab debounce, and the gating matrix that decides whether the overlays hide
-// and whether the 8 ms cursor stream runs. No Electron, no child process, no game — so this
-// suite is as cheap and as unskippable as overlayLayout/storeMigrations.
+// and whether the 8 ms cursor stream runs. No Electron, no thread, no game — so this suite is as
+// cheap and as unskippable as overlayLayout/storeMigrations. (The guard that no shipped code can
+// still spawn PowerShell is the one presence assertion that reads a disk, so it lives in
+// tests/noChildProcess.test.mts rather than here.)
 //
 // THE GATING MATRIX IS THE PERFORMANCE CONTRACT, in test form. "Nothing runs when nothing is
 // on" and "the stream stops when EQ is unfocused" are the owner's explicit requirements; they
 // are decided by two exported predicates, so they are pinned here rather than measured by hand
-// on every change.
+// on every change. The THIRD rule — "with the ring off we never touch the cursor at all"
+// (JOS-193) — spans a predicate, a worker init and three assignments, so it lives together in
+// tests/cursorRingOff.test.mts rather than being scattered through this one. The FOURTH — the
+// asymmetric focus debounce and the transition logging that earns the next fix (JOS-424) — is in
+// tests/presenceRefocusFlicker.test.mts for the same reason: it is one defect's whole story, and
+// this file is a page from its line ceiling.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  FOCUS_DEBOUNCE_MS,
   WATCHER_RESTART_BACKOFF_MS,
   WATCHER_STALE_MS,
   cursorRingActive,
   eqRootPrefix,
-  focusDebounceStep,
   isEqWindow,
-  newFocusDebounce,
   overlaysShouldHide,
   parsePresenceLine,
   watcherIsStale,
@@ -108,7 +112,8 @@ test('the HEARTBEAT is a bare line — the one record the child prints unconditi
 })
 
 test('anything malformed decodes to null and can never move the state', () => {
-  // The stream can also carry a PowerShell warning, a blank line, or a partially-flushed write.
+  // The channel can also carry a blank line, or a message from a build that does not agree
+  // with this one about the protocol.
   for (const junk of [
     '',
     '   ',
@@ -217,71 +222,15 @@ test("this app's own windows never look like EverQuest", () => {
   }
 })
 
-// ------------------------------------------------------------------- the focus debounce
+// The FOUR-WAY split of that same question — which side of "are you in EverQuest?" the foreground
+// window falls on, including the two answers our OWN pid can give — lives in
+// tests/overlayFocusPolicy.test.mts, beside the alt-tab half of the same ticket (JOS-199).
 
-test('a focus change must hold still for the debounce before it is committed', () => {
-  let s = newFocusDebounce(false)
-  const t0 = 1_000_000
+// ------------------------------------------------------------------- no focus debounce
 
-  const early = focusDebounceStep(s, true, t0)
-  assert.equal(early.changed, false, 'the very first observation never commits')
-  assert.equal(early.waitMs, FOCUS_DEBOUNCE_MS)
-  s = early.state
-
-  const midway = focusDebounceStep(s, true, t0 + 200)
-  assert.equal(midway.changed, false)
-  assert.equal(midway.waitMs, 100, 'the wait counts from when the candidate FIRST appeared')
-  s = midway.state
-
-  const done = focusDebounceStep(s, true, t0 + FOCUS_DEBOUNCE_MS)
-  assert.equal(done.changed, true)
-  assert.equal(done.state.committed, true)
-  assert.equal(done.waitMs, null)
-})
-
-test('ALT-TAB FLAP: a value that bounces back never commits, and leaves no residue', () => {
-  // This is the whole reason the debounce exists. Windows makes the task switcher (and
-  // sometimes the shell) foreground on the way between two apps; acting on the raw signal
-  // strobes every overlay off and back on.
-  let s = newFocusDebounce(true)
-  const t0 = 5_000
-
-  s = focusDebounceStep(s, false, t0).state // switcher grabs focus
-  s = focusDebounceStep(s, false, t0 + 80).state
-  const back = focusDebounceStep(s, true, t0 + 140) // …and EQ has it again
-  assert.equal(back.changed, false, 'nothing was ever committed, so nothing changes back')
-  assert.equal(back.state.committed, true)
-  assert.deepEqual(
-    { candidate: back.state.candidate, since: back.state.since },
-    { candidate: null, since: 0 },
-    'the abandoned candidate is forgotten, not left to commit later'
-  )
-
-  // And the very next observation after the flap must not inherit the old clock.
-  const after = focusDebounceStep(back.state, false, t0 + 5_000)
-  assert.equal(after.changed, false)
-  assert.equal(after.waitMs, FOCUS_DEBOUNCE_MS)
-})
-
-test('a repeated steady observation is idempotent — it is called on every watcher line', () => {
-  let s = newFocusDebounce(true)
-  for (const t of [0, 10, 20, 30, 10_000]) {
-    const step = focusDebounceStep(s, true, t)
-    assert.equal(step.changed, false)
-    assert.equal(step.waitMs, null)
-    s = step.state
-  }
-  assert.equal(s.committed, true)
-})
-
-test('a signal that stays flipped commits exactly once, not on every later observation', () => {
-  let s = newFocusDebounce(false)
-  s = focusDebounceStep(s, true, 0).state
-  const commit = focusDebounceStep(s, true, FOCUS_DEBOUNCE_MS)
-  assert.equal(commit.changed, true)
-  const after = focusDebounceStep(commit.state, true, FOCUS_DEBOUNCE_MS + 1)
-  assert.equal(after.changed, false, 'committed is committed; it is not re-announced')
-})
+// JOS-427 removed the debounce outright (owner ruling; the protocol section header carries the
+// story). The fold's remaining focus rules — instant flips, the no-window sample, the raise
+// grace — are pinned in tests/presenceRefocusFlicker.test.mts.
 
 // -------------------------------------------------------------------- the gating matrix
 
@@ -321,10 +270,10 @@ test('each auto-hide switch hides on its own — they are independent, not a mod
 })
 
 test('NOTHING IS HIDDEN BEFORE THE WATCHER HAS REPORTED — never act on a guess', () => {
-  // The child pays a one-time compile before its first line. `eqRunning:false` in that gap means
-  // "we have not looked", and hiding on it would blink every overlay off at launch and back on a
+  // The watcher opens three system libraries before its first line. Nothing in `INITIAL_PRESENCE`
+  // is a fact in that gap, and hiding on it would blink every overlay off at launch and back on a
   // second later on a machine where the game was running the whole time. The same flag resets if
-  // the watcher ever dies, so a dead watcher fails OPEN rather than hiding everything forever.
+  // the watcher dies, so a dead watcher fails OPEN rather than hiding everything.
   const unobserved = INITIAL_PRESENCE
   for (const prefs of [
     DEFAULT_OVERLAY_AUTO_HIDE,
@@ -332,6 +281,10 @@ test('NOTHING IS HIDDEN BEFORE THE WATCHER HAS REPORTED — never act on a guess
   ]) {
     assert.equal(overlaysShouldHide(unobserved, prefs), false)
   }
+  // AND THE FLAG IS ONLY HALF THE PROMISE (JOS-425): it is raised by the first record of ANY kind,
+  // so the birth values have to survive that instant on their own. The seam, and the whole of
+  // JOS-425's fix, is pinned in tests/presenceRefocusFlicker.test.mts.
+  assert.equal(overlaysShouldHide({ ...INITIAL_PRESENCE, observed: true }, DEFAULT_OVERLAY_AUTO_HIDE), false)
 })
 
 test('the DEFAULT auto-hide posture: hidden with no game, visible the moment one exists', () => {
@@ -410,11 +363,16 @@ test('A DEAD OR WEDGED WATCHER PARKS THE RING AND GIVES THE OVERLAYS BACK', () =
   // The watcher dies here. Freezing `live` is the reported bug — `eqFocused`, `cursorVisible`
   // and `eqBounds` all outlive the pipe, so the ring keeps drawing over whatever the user
   // alt-tabs to. Resetting to INITIAL_PRESENCE is what makes that impossible.
+  // NO KNOWN BOUNDS is what does the work here, and since JOS-425 it is the ONLY thing that does:
+  // `eqFocused` is born TRUE (assume EQ-side until observed otherwise), so a reset that relied on
+  // a born-false focus would have quietly stopped parking the ring. It does not — there is nowhere
+  // to put a halo, and inventing a rectangle is exactly the bug this reset exists to prevent.
   assert.equal(
     cursorRingActive(INITIAL_PRESENCE, on),
     false,
-    'no committed focus and no known bounds ⇒ the ring parks and the cursor stream stops'
+    'no known bounds ⇒ the ring parks and the cursor stream stops'
   )
+  assert.equal(INITIAL_PRESENCE.eqBounds, null, 'and that is the field carrying the property')
   for (const prefs of [
     DEFAULT_OVERLAY_AUTO_HIDE,
     { hideWhenNotRunning: true, hideWhenUnfocused: true }
@@ -437,9 +395,9 @@ test('STALENESS: silence past the window is wedged; anything inside it is just q
     [t0, t0 + WATCHER_STALE_MS - 1, false, 'just inside the window is still alive'],
     [t0, t0 + WATCHER_STALE_MS, true, 'the window is inclusive'],
     [t0, t0 + 10 * WATCHER_STALE_MS, true, 'and it stays stale'],
-    // `lastSignalAt` is seeded at SPAWN, so a child that has never spoken gets the same window —
-    // which is what makes the one-time PowerShell compile a non-event.
-    [t0, t0 + 2_000, false, 'the Add-Type compile is inside the first window']
+    // `lastSignalAt` is seeded at START, so a watcher that has never spoken gets the same window
+    // — which is what makes opening three system libraries a non-event.
+    [t0, t0 + 2_000, false, 'the library loading is inside the first window']
   ]
   for (const [last, now, expected, why] of cases) {
     assert.equal(watcherIsStale(last, now), expected, why)
@@ -450,8 +408,8 @@ test('STALENESS: silence past the window is wedged; anything inside it is just q
 })
 
 test('RESTART BACKOFF: fast when it might be a hiccup, CAPPED when it is not', () => {
-  // An uncapped retry against a failure that will never clear on this machine (PowerShell
-  // removed by policy, an execution policy that kills the child on sight) is a spawn storm.
+  // An uncapped retry against a failure that will never clear on this machine (a native surface
+  // that will not load, an EDR product that refuses process enumeration) is a restart storm.
   assert.deepEqual(
     [1, 2, 3, 4, 5].map(watcherRestartDelayMs),
     [...WATCHER_RESTART_BACKOFF_MS],
@@ -471,7 +429,15 @@ test('RESTART BACKOFF: fast when it might be a hiccup, CAPPED when it is not', (
 // ------------------------------------------------------------- prefs: defaults + clamps
 
 test('the shipped defaults are the zero-cost posture', () => {
-  assert.deepEqual(DEFAULT_CURSOR_RING, { enabled: false, sizePx: 44, thicknessPx: 4 })
+  // The colour is part of the posture too: white is what every ring drawn before JOS-125 was, so
+  // the default cannot move without changing a screen somebody already has. The colour rules
+  // themselves live in tests/cursorRingColor.test.mts.
+  assert.deepEqual(DEFAULT_CURSOR_RING, {
+    enabled: false,
+    sizePx: 44,
+    thicknessPx: 4,
+    colorHex: '#ffffff'
+  })
   assert.deepEqual(DEFAULT_OVERLAY_AUTO_HIDE, { hideWhenNotRunning: true, hideWhenUnfocused: false })
 })
 
@@ -480,7 +446,7 @@ test('THE WATCHER IS NEEDED ONLY WHEN A FEATURE ASKS FOR IT', () => {
   assert.equal(
     presenceNeeded(DEFAULT_CURSOR_RING, noHide),
     false,
-    'everything off ⇒ no child process is ever spawned'
+    'everything off ⇒ no watcher thread is ever started'
   )
   assert.equal(presenceNeeded({ ...DEFAULT_CURSOR_RING, enabled: true }, noHide), true)
   assert.equal(presenceNeeded(DEFAULT_CURSOR_RING, { ...noHide, hideWhenNotRunning: true }), true)
@@ -493,7 +459,8 @@ test('ring prefs are clamped, rounded, and never silently re-intended', () => {
   assert.deepEqual(normalizeCursorRing({ enabled: true, sizePx: 43.6, thicknessPx: 3.2 }), {
     enabled: true,
     sizePx: 44,
-    thicknessPx: 3
+    thicknessPx: 3,
+    colorHex: '#ffffff'
   })
   assert.equal(normalizeCursorRing({ sizePx: 5 }).sizePx, 20, 'below the floor clamps up')
   assert.equal(normalizeCursorRing({ sizePx: 5000 }).sizePx, 200, 'above the cap clamps down')

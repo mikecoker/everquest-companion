@@ -13,9 +13,11 @@ import {
   applyEqDirChange,
   buildEqConfig,
   getActiveCharacter,
+  inventoryWrittenAt,
   tailCharacter
 } from '../session'
-import { getProgress, setEqInstallDir, setInventory, setQuestComplete } from '../store'
+import { getProgress, setEqInstallDir, setInventory, setQuestTurnIns } from '../store'
+import { setItemOverride } from '../storeItemOverrides'
 import { getMainWindow, sendToMain } from '../windows'
 
 export function registerCharacterIpc(): void {
@@ -101,19 +103,35 @@ export function registerCharacterIpc(): void {
   ipcMain.handle(IPC.getProgress, () => getProgress(activeCharId()))
   ipcMain.handle(IPC.reloadInventory, () => {
     const active = getActiveCharacter()
-    const res = loadInventory(active?.name, active?.server)
+    const res = loadInventory(active?.name, active?.server, inventoryWrittenAt)
     if (!res) return { ok: false as const, error: 'No *-Inventory.txt found in the EQ folder.' }
-    setInventory(activeCharId(), res.counts, { path: res.path, loadedAt: res.loadedAt })
+    setInventory(activeCharId(), res.counts, res.source)
     const progress = getProgress(activeCharId())
+    // A MANUAL RE-READ IS THE SAME NEWS AS AN AUTOMATIC ONE (JOS-431). This pushed `progress` and
+    // nothing else, so the surfaces that read the FILE's own status — the `/outputfile` freshness
+    // line, which re-asks the registry on `inventory:reload` and on nothing else — kept showing
+    // the age they had before the click. That is the reported symptom (a stale timestamp) wearing
+    // the fix's own clothes, so both pushes go out here exactly as `loadInventoryNow` sends them.
+    sendToMain(IPC.onInventoryReload, { path: res.path, loadedAt: res.loadedAt })
     // Keep other views consistent (Plane of Sky derives held-item counts too).
     sendToMain(IPC.onProgress, progress)
     return { ok: true as const, path: res.path, loadedAt: res.loadedAt, progress }
   })
-  ipcMain.handle(IPC.setQuestComplete, (_e, questKey: string, complete: boolean) => {
-    const progress = setQuestComplete(activeCharId(), questKey, complete)
-    // Push so a completion made in one view (or auto-completed from a turn-in)
-    // reaches every other view without a refetch race.
+  ipcMain.handle(IPC.setQuestTurnIns, (_e, questKey: string, instants: number[]) => {
+    const progress = setQuestTurnIns(activeCharId(), questKey, instants)
+    // Push so a turn-in recorded in one view (or detected from the log) reaches every other
+    // view without a refetch race.
     sendToMain(IPC.onProgress, progress)
     return progress
   })
+  // ONE item's held count, stated (or taken back) by hand — JOS-186. Pushed like every other
+  // progress write, because the Loot ledger and the Sky tab read the same corrected number.
+  ipcMain.handle(
+    IPC.setItemOverride,
+    (_e, key: string, name: string, count: number | null) => {
+      const progress = setItemOverride(activeCharId(), key, name, count)
+      sendToMain(IPC.onProgress, progress)
+      return progress
+    }
+  )
 }

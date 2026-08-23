@@ -51,8 +51,14 @@ import { logError, logInfo } from '../errorLog'
 import { createSpeechEngine } from '../speech/engine'
 import { KOKORO_TOTAL_BYTES } from '../speech/pinned'
 import { listKokoroVoices, provisionKokoro } from '../speech/provision'
+import {
+  ensureVcRuntimePlacement,
+  findOnnxBindingDir,
+  onnxBindingRoots,
+  provisionVcRuntime
+} from '../speech/vcRuntime'
 import { getVoicePrefs, setVoicePrefs } from '../store'
-import { classifyFailure, markFunnelStep, recordFunnelFailure } from '../telemetry'
+import { classifyFailure, markFunnelStep, noteSpeechFailure, recordFunnelFailure } from '../telemetry'
 import { sendToMain } from '../windows'
 import type { SpeechInstallProgress } from '../../shared/alertTypes'
 import type { SpeechEngine } from '../speech/engine'
@@ -92,8 +98,36 @@ function validateSayRequest(raw: unknown): ValidSayRequest | null {
  */
 let engine: SpeechEngine | null = null
 
+/**
+ * Where `onnxruntime_binding.node` is on THIS install — dev checkout, packaged asar, or
+ * unpacked-beside-the-asar. Resolved once: the three inputs cannot change while the app runs,
+ * and every caller of it (placement, provisioning) wants the same answer.
+ */
+let bindingDir: string | null | undefined
+
+function onnxBindingDir(): string | null {
+  // `undefined` means "not asked yet"; `null` is a real answer and must STICK, which `??=`
+  // would not do — it would re-probe the filesystem on every call for the one install that
+  // cannot find its binding.
+  if (bindingDir === undefined) {
+    bindingDir = findOnnxBindingDir(onnxBindingRoots({ appPath: app.getAppPath(), cwd: process.cwd() }))
+  }
+  return bindingDir
+}
+
 function speechEngine(): SpeechEngine {
-  engine ??= createSpeechEngine({
+  const existing = engine
+  if (existing) return existing
+  // ONCE, BEFORE THE FIRST WORKER CAN SPAWN: re-derive the app-local Visual C++ runtime from
+  // the cache if an app update wiped the placement out of the install directory (JOS-274). No
+  // network, and a no-op on every machine that never needed it. Fire-and-forget on purpose —
+  // this is a repair for a fault that has not happened yet, and making the first `speech:say`
+  // wait on a filesystem copy to serve a CACHED wav would be the wrong trade. It sits here
+  // rather than in the engine so that file stays Electron-free.
+  void ensureVcRuntimePlacement(app.getPath('userData'), onnxBindingDir()).catch((err: unknown) => {
+    logError('main:speech', { message: 'vc runtime placement failed', err })
+  })
+  engine = createSpeechEngine({
     userData: app.getPath('userData'),
     // The worker is a SECOND main-process bundle (electron.vite.config.ts emits
     // out/main/speechWorker.js beside out/main/index.js), so it sits next to this code in
@@ -130,13 +164,56 @@ function noteDownloadOutcome(result: SpeechInstallResult): void {
   recordFunnelFailure('voice-install', 'downloadCompleted', classifyFailure(result.message))
 }
 
+/**
+ * THE RUNTIME RIDES THE DOWNLOAD (JOS-274, owner ruling 2026-08-13: a voice that downloads is a
+ * voice that plays).
+ *
+ * It runs FIRST and it is SILENT — 3 MB against the model's 115, so putting it ahead of the long
+ * download costs the progress bar nothing and means a user who abandons the model download still
+ * ends up with a machine that could have run it. Every outcome is non-fatal: `provisionVcRuntime`
+ * never throws, and a failure here is logged and left behind, because the JOS-247 sentence in the
+ * Voice panel is still the honest thing to show a machine we could not repair.
+ *
+ * Placing files is also the ONLY thing that unlatches the engine's fault. That is the
+ * without-a-restart half of the ruling: a user whose first alert failed with ERR_DLOPEN_FAILED
+ * this session gets a live engine on their next alert rather than after a relaunch. `placed === 0`
+ * deliberately does NOT unlatch — nothing about the machine changed, and a speculative respawn of
+ * a known-dead worker is exactly the retry storm the latch exists to prevent.
+ */
+async function installVcRuntime(): Promise<void> {
+  const result = await provisionVcRuntime({
+    userData: app.getPath('userData'),
+    bindingDir: onnxBindingDir()
+  })
+  if (result.message !== undefined) {
+    logError('main:speech', { message: `vc runtime provisioning: ${result.message}` })
+    return
+  }
+  if (result.placed > 0) {
+    logInfo(
+      `[everquest-companion] Speech: installed the Microsoft Visual C++ runtime beside the ` +
+        `engine (${result.placed} files)`
+    )
+    speechEngine().retryAfterRepair()
+  }
+}
+
 function startInstall(): Promise<SpeechInstallResult> {
   markFunnelStep('voice-install', 'engineSelected')
   markFunnelStep('voice-install', 'downloadStarted')
-  const run = provisionKokoro({
-    userData: app.getPath('userData'),
-    onProgress: (progress: SpeechInstallProgress) => sendToMain(IPC.onSpeechInstallProgress, progress)
-  })
+  const run = installVcRuntime()
+    .catch((err: unknown) => {
+      // Belt: provisionVcRuntime is written not to reject, and the model download must not be
+      // cancelled by the runtime step under any circumstances.
+      logError('main:speech', { message: 'vc runtime provisioning threw', err })
+    })
+    .then(() =>
+      provisionKokoro({
+        userData: app.getPath('userData'),
+        onProgress: (progress: SpeechInstallProgress) =>
+          sendToMain(IPC.onSpeechInstallProgress, progress)
+      })
+    )
     .catch((err: unknown): SpeechInstallResult => {
       // provisionKokoro is written not to reject; this is the belt, so one unexpected throw
       // cannot leave the panel's spinner running forever.
@@ -167,6 +244,12 @@ export function registerSpeechIpc(): void {
     // main, which is right: this funnel measures the install flow, and an install that ends in a
     // system-tier utterance has not completed it.
     if (result.ok) markFunnelStep('voice-install', 'firstUtterance')
+    // …and the health counter for the other arm (JOS-96). Every way an utterance can fail — a
+    // worker that would not spawn, a dead thread, a synthesis reply that came back not-ok, a
+    // missing cache file, an engine that is not installed — collapses into this one
+    // `SpeechSayResult`, so this is the single funnel. Counts only: the `reason` is not sent.
+    // Same tier caveat as the funnel above: the system voice never reaches main.
+    else noteSpeechFailure()
     return result
   })
 

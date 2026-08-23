@@ -11,9 +11,29 @@
 // The item name is the hover surface, through `KnownItemTooltip` — the SAME card every other
 // item name in the app opens, which fetches its knowledge only while the tooltip is open. The
 // icon is `eqimg://item/<id>` off the permanent cache and hides itself if the fetch 404s.
+//
+// ---------------------------------------------------------------------------
+// AND SINCE JOS-327 A CELL SHOWS WHAT IS SOCKETED INTO IT
+// ---------------------------------------------------------------------------
+// An exaltation is the whole point of the Exaltations tab, and until now the one place the game
+// states which ones a player has ALREADY SOCKETED — the inventory dump — was parsed for them
+// (`SheetItem.exaltations`) and then not drawn. Each worn item's exaltations render as small chips
+// under its name: no hover, no click, no count line. They are a fact about the item, so they sit on
+// the item.
+//
+// THE CHIPS ARE CONFIDENT HERE, AND THAT IS A PROPERTY OF *WORN* SLOTS. The dump spells bag
+// CONTENTS and exaltation SOCKETS the same way — both are `-Slot<n>` children, and `Slots` is
+// merely how many child slots the parent provides (shared/outputs/inventory.ts, "what the file does
+// NOT say"). The one thing the file volunteers is the child's NAME: `<Item> (Exaltation)`. That
+// suffix is what `exaltationsOf` reads, so a chip here is the client's own word and not an
+// inference — and the ambiguity that would matter, a ten-slot BAG being read as a ten-socket item,
+// cannot arise in a cell of this grid, because a top-level `Location` equipment row is a thing worn
+// on the body and nobody wears a backpack in an ear. The general case is left to
+// `looksLikeContainer()`, which is an opt-in guess with its evidence attached; this surface never
+// needs it. None of that reaches the screen: there is no "probably" chip and no footnote.
 
 import type { JSX } from 'react'
-import { Box, Paper, Stack, Typography } from '@mui/material'
+import { Box, Chip, Paper, Stack, Typography } from '@mui/material'
 import type { SheetCellView, SheetColumn } from '@shared/characterSheet'
 import { EQ_ITEM_COLORS, itemIconUrl } from '../../lib/ItemWindow'
 import { KnownItemTooltip } from '../../lib/KnownItemTooltip'
@@ -53,7 +73,45 @@ function SlotIcon({ cell }: { cell: SheetCellView }): JSX.Element {
   )
 }
 
-/** One cell: icon, slot label, and the item name (hoverable) or a quiet empty line. */
+/**
+ * What is socketed into this cell's item, as the client named it — nothing at all when the item
+ * carries none, which is most of them.
+ *
+ * The names are printed with the ` (Exaltation)` suffix ALREADY REMOVED: `SheetItem.exaltations`
+ * holds `parsedName.base`, so the chip reads `Golden Efreeti Boots` rather than repeating a word
+ * that the row of chips is already saying by existing. The chips wrap; a cell with four of them is
+ * two lines tall, which is fine here because this grid is not windowed and no hook is assuming a
+ * row height.
+ */
+function ExaltationChips({ names }: { names: readonly string[] }): JSX.Element | null {
+  if (names.length === 0) return null
+  return (
+    <Box
+      data-testid="character-exaltations"
+      sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.3, mt: 0.3 }}
+    >
+      {names.map((name, i) => (
+        <Chip
+          // The same exaltation can legitimately be socketed twice into one item, so the name is
+          // not a key — the position is.
+          key={`${name}#${String(i)}`}
+          label={name}
+          size="small"
+          variant="outlined"
+          data-testid="character-exaltation"
+          sx={{
+            height: 16,
+            maxWidth: '100%',
+            borderColor: EQ_ITEM_COLORS.border,
+            '& .MuiChip-label': { px: 0.5, fontSize: 10, lineHeight: 1.6 }
+          }}
+        />
+      ))}
+    </Box>
+  )
+}
+
+/** One cell: icon, slot label, the item name (hoverable) with its exaltations, or a quiet empty line. */
 function SlotCell({ cell }: { cell: SheetCellView }): JSX.Element {
   const item = cell.item
   return (
@@ -68,24 +126,27 @@ function SlotCell({ cell }: { cell: SheetCellView }): JSX.Element {
           {cell.label}
         </Typography>
         {item ? (
-          <KnownItemTooltip name={item.name}>
-            <Box
-              component="span"
-              sx={{
-                display: 'block',
-                color: EQ_ITEM_COLORS.name,
-                fontSize: 12,
-                lineHeight: 1.3,
-                textDecoration: 'underline dotted',
-                textUnderlineOffset: 2,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap'
-              }}
-            >
-              {item.name}
-            </Box>
-          </KnownItemTooltip>
+          <>
+            <KnownItemTooltip name={item.name}>
+              <Box
+                component="span"
+                sx={{
+                  display: 'block',
+                  color: EQ_ITEM_COLORS.name,
+                  fontSize: 12,
+                  lineHeight: 1.3,
+                  textDecoration: 'underline dotted',
+                  textUnderlineOffset: 2,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {item.name}
+              </Box>
+            </KnownItemTooltip>
+            <ExaltationChips names={item.exaltations} />
+          </>
         ) : (
           <Typography variant="caption" color="text.disabled" sx={{ display: 'block', opacity: 0.6 }}>
             empty

@@ -19,9 +19,14 @@ import { pushSample, type PerfHudSample } from '@shared/perf'
 
 /**
  * The `rendererHydrated` startup mark — sent ONCE per window, from module scope of the hook's
- * first mount. A guard here rather than a re-send main quietly ignores: main's phase accounting
- * refuses a duplicate with a logged error (that is what it is FOR), and a React StrictMode
- * double-mount is not a wiring bug worth a line in errors.log.
+ * first mount, so a React StrictMode double-mount costs one IPC message rather than two.
+ *
+ * IT IS MODULE SCOPE, WHICH MEANS A RELOAD RESETS IT, and that is fine now (JOS-99): the send is
+ * idempotent at the far end. Main's IPC handler ignores a repeat because a reloaded window
+ * re-reporting hydration is the expected consequence of a reload — the dev watcher's, the
+ * did-fail-load retry's, or the crash recovery's — and the launch keeps the FIRST mark. Before
+ * that, every reload in the fleet spent a line of errors.log on a refused duplicate. The phase
+ * accounting itself is as strict as it ever was for the phases main marks itself.
  */
 let hydrationReported = false
 

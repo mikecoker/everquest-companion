@@ -16,9 +16,14 @@
 //
 // Everything resolves through `app.getPath('userData')`, so channel.ts's decision redirects it
 // automatically: the dev app, the installed app and an e2e run can never share a ring.
+//
+// THE FILE HALF IS ITSELF SPLIT NOW (JOS-265), for the third time and the same reason: the
+// DURABILITY of the write — temp, flush, rename, clean up, and back off when the volume is full —
+// lives in `./durableWrite.ts`, which imports `node:fs` and nothing else and is therefore
+// node-testable. What is left here is only what needs `app` or the logger.
 
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   TELEMETRY_BUFFER_CAP,
@@ -27,6 +32,10 @@ import {
 } from '../../shared/telemetry'
 import { validateRecord } from '../../shared/telemetryValidate'
 import { logError, logInfo } from '../errorLog'
+// The durability half, in its own Electron-free leaf (JOS-265). Its header carries the whole
+// argument — the error store's ENOSPC exemplars, why there is no writer queue and no lock retry,
+// and what the fsync is for. This file keeps only the decisions that need `app` or a logger.
+import { createWriteGate, tempPathFor, writeFileDurable } from './durableWrite'
 
 /** Bumped only if this file's shape changes. Unreadable/older ⇒ start empty, never migrate. */
 export const TELEMETRY_RING_VERSION = 1
@@ -98,6 +107,12 @@ function ringPath(): string {
 
 let cached: TelemetryRing | null = null
 
+/**
+ * THE ONE WRITER'S FAILURE STATE (JOS-265). Module-level because there is exactly one ring file
+ * and exactly one process writing it — the same reason `cached` is module-level.
+ */
+const writeGate = createWriteGate()
+
 /** Read (and memoize) the ring. Missing or corrupt ⇒ empty, and nothing is written until the
  *  first record arrives — a user who turned analytics off never grows the file at all. */
 export function readRing(): TelemetryRing {
@@ -110,7 +125,7 @@ export function readRing(): TelemetryRing {
         cached = parsed
         return cached
       }
-      logInfo('[everquest-companion] telemetry.json unreadable/foreign — starting from empty')
+      logInfo('[everquest-companion] telemetry.json unreadable/foreign - starting from empty')
     } catch (err) {
       logError('main:telemetryRing', { message: 'telemetry.json parse failed; starting empty', err })
     }
@@ -119,17 +134,38 @@ export function readRing(): TelemetryRing {
   return cached
 }
 
-/** Persist atomically (temp file + rename). Best effort: losing counters is not an app failure. */
-export function writeRing(next: TelemetryRing): void {
+/**
+ * Persist durably (temp file + flush + rename), and STOP TRYING for a while when the disk says no.
+ *
+ * THE CACHE IS SET FIRST, BEFORE THE GATE IS ASKED, and that order is the entire reason a paused
+ * writer costs nothing: memory is this ring's truth (every reader — `pendingBatch`,
+ * `telemetryPayload`, the next `recordEvent` — comes through `readRing`, which returns `cached`),
+ * so a skipped write loses only the crash-safety of a file that was refusing to be written
+ * anyway. NOTHING about what is collected changes; the first write that lands persists the lot.
+ *
+ * `now` is a parameter for the same reason the rest of this app takes one — the pause is a clock
+ * decision and a clock decision should be drivable.
+ */
+export function writeRing(next: TelemetryRing, now = Date.now()): void {
   cached = next
-  const path = ringPath()
-  const tmp = `${path}.tmp`
+  if (!writeGate.ready(now)) return
+  const dir = app.getPath('userData')
   try {
-    mkdirSync(app.getPath('userData'), { recursive: true })
-    writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8')
-    renameSync(tmp, path)
+    writeFileDurable(dir, join(dir, RING_FILE), JSON.stringify(next, null, 2))
+    if (writeGate.succeeded()) {
+      logInfo('[everquest-companion] telemetry.json is writable again; the buffer was persisted')
+    }
   } catch (err) {
+    // THE PAYLOAD IS BYTE-IDENTICAL TO THE ONE 0.18-0.23 FILED, deliberately: the error store's
+    // fingerprint is built from the message and the frames, so keeping this string exact means the
+    // fleet's existing `telemetry.json write failed` families keep aggregating across the fix
+    // instead of splitting in two — and `errorRepeat`'s identical-line cap still recognises the
+    // line. The pause is narrated to the console instead, where a varying number costs nothing.
     logError('main:telemetryRing', { message: 'telemetry.json write failed', err })
+    const { delayMs } = writeGate.failed(now)
+    logInfo(
+      `[everquest-companion] telemetry.json is unwritable; pausing the buffer's writes for ${Math.round(delayMs / 1000)}s`
+    )
   }
 }
 
@@ -139,8 +175,17 @@ export function writeRing(next: TelemetryRing): void {
  */
 export function dropRing(): void {
   cached = emptyRing()
+  // A pause is failure state about the OLD file. Dropping it frees space and gives the next write
+  // a genuinely different situation, so it starts from a clean gate rather than serving out a
+  // fifteen-minute wait the user's switch has just made meaningless.
+  writeGate.reset()
+  const path = ringPath()
   try {
-    rmSync(ringPath(), { force: true })
+    rmSync(path, { force: true })
+    // AND THE SCRATCH FILE (JOS-265). A write that failed part-way leaves `telemetry.json.tmp`
+    // holding up to a full ring of events. Deleting only the live file would leave those events on
+    // disk after "turn it off" — the same lie this function exists to prevent, in another filename.
+    rmSync(tempPathFor(path), { force: true })
   } catch (err) {
     logError('main:telemetryRing', { message: 'telemetry.json delete failed', err })
   }
@@ -149,4 +194,5 @@ export function dropRing(): void {
 /** Test/dev seam: forget the memoized ring so the next read hits disk again. */
 export function resetRingCache(): void {
   cached = null
+  writeGate.reset()
 }

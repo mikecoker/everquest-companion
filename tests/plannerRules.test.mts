@@ -215,6 +215,65 @@ test('the lint runs per CELL, and R2 is still asked about the SLOT (JOS-67)', ()
   assert.ok(warning.message.includes('FINGER 2'), warning.message)
 })
 
+test('an ANY cell lets every SLOT through and still enforces class and haste (JOS-104)', () => {
+  // The two any-slots are places, not slots: `hostSlotsOf('ANY1')` is all eighteen, so the slot
+  // half of R2 cannot fail there. That is the fix — a v0.12.0 player reported the cells missing
+  // entirely, and a cell that then refused the chest piece they are wearing in it would be worse
+  // than no cell at all.
+  const ghoulbane = donor() // PRIMARY only, WAR/PAL/RNG/SHD
+  const anywhere = plan({
+    classes: ['PAL'],
+    slots: {
+      ANY1: { hostKey: 'brigandine tunic', sockets: { proc: { effect: 'Holy Might', donorKey: 'ghoulbane' } } },
+      ANY2: { hostKey: 'midnight clad straps', sockets: { proc: { effect: 'Holy Might', donorKey: 'ghoulbane' } } }
+    }
+  })
+  assert.deepEqual(planWarnings(anywhere, index([ghoulbane])), [], 'a PRIMARY donor is legal in an any-cell')
+  // The same donor in the CHEST cell is not, which is what makes the line above a real difference
+  // rather than the lint having gone quiet everywhere.
+  const chest = plan({
+    classes: ['PAL'],
+    slots: { CHEST: { hostKey: 'brigandine tunic', sockets: { proc: { effect: 'Holy Might', donorKey: 'ghoulbane' } } } }
+  })
+  assert.equal(planWarnings(chest, index([ghoulbane]))[0]?.kind, 'slot')
+
+  // …and "no slot restriction" is not "no restriction". Class overlap and the haste lock are
+  // properties of the donor and the set, and an any-slot is not a permit for either.
+  const wrongClass = plan({
+    classes: ['ENC'],
+    slots: { ANY1: { hostKey: 'robe', sockets: { proc: { effect: 'Holy Might', donorKey: 'ghoulbane' } } } }
+  })
+  assert.equal(planWarnings(wrongClass, index([ghoulbane]))[0]?.kind, 'class')
+
+  const hasted = donor({
+    key: 'flowing black robe',
+    name: 'Flowing Black Robe',
+    effect: 'Haste',
+    socket: 'worn',
+    tierRequired: 3,
+    hasteLocked: true,
+    slots: ['CHEST'],
+    classes: ['ENC']
+  })
+  const hasteInAny = plan({
+    classes: ['ENC'],
+    slots: { ANY2: { hostKey: 'robe', sockets: { worn: { effect: 'Haste', donorKey: hasted.key } } } }
+  })
+  assert.equal(planWarnings(hasteInAny, index([hasted]))[0]?.kind, 'haste')
+
+  // A donor whose page states NO slot still fails everywhere, any-cell included: R2 needs a shared
+  // slot and it shares none (law 1 — an absent fact is not a pass).
+  const slotless = donor({ key: 'potion', name: 'Potion', effect: 'Gate', socket: 'click', tierRequired: 2, slots: [] })
+  const slotlessInAny = plan({
+    classes: [],
+    slots: { ANY1: { hostKey: 'brigandine tunic', sockets: { click: { effect: 'Gate', donorKey: 'potion' } } } }
+  })
+  assert.equal(planWarnings(slotlessInAny, index([slotless]))[0]?.kind, 'slot')
+
+  // The message names the CELL the user is looking at, in the client's own words.
+  assert.ok(planWarnings(slotlessInAny, index([slotless]))[0].message.includes('ANY SLOT 1'))
+})
+
 test('an empty slot with no sockets is quiet, not an error', () => {
   const p = plan({ slots: { HEAD: { sockets: {} }, CHEST: { hostKey: 'robe', sockets: {} } } })
   assert.deepEqual(planWarnings(p, index([])), [])

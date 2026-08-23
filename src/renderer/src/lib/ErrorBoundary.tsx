@@ -1,4 +1,8 @@
 import React from 'react'
+// The ONE app import this file allows itself, and it is import-free itself (see its header).
+// The rule is "no app code, because the app — or the theme — may be the crash source"; a module
+// holding one string and two functions cannot be that.
+import { currentViewId } from './currentView'
 
 /**
  * Last line of defense against a BLANK WINDOW. Wraps <App/> in main.tsx. When any
@@ -95,18 +99,37 @@ export class ErrorBoundary extends React.Component<Props, State> {
     // Report over the same fire-and-forget channel used by window.onerror.
     try {
       window.eq?.reportError({
+        // JOS-100: the NAME is half the error report's grouping key, and the VIEW is state only
+        // this process has.
+        //
+        // THE COMPONENT STACK IS APPENDED TO `stack` BEHIND A LITERAL MARKER, and since JOS-111
+        // that marker is load-bearing rather than decoration: main reads the text after it as the
+        // chain of COMPONENTS the error came through and sends it as `componentPath`, bounded to
+        // eight identifier-shaped names, so a Tooltip warning can name its anchor. React's own
+        // component-stack lines are character-for-character V8 frames, so a marker is the only
+        // way to tell the two apart without guessing — see shared/errorReportLocation.ts, which
+        // holds the other copy of this string and is pinned equal to it by the contract test.
+        name: error?.name,
         message: error?.message ?? String(error),
         stack: `${error?.stack ?? ''}${
           info?.componentStack ? `\n\nComponent stack:${info.componentStack}` : ''
         }`,
-        source: 'ErrorBoundary'
+        source: 'ErrorBoundary',
+        view: currentViewId()
       })
     } catch {
       // Ignore — the visible fallback below is the primary user-facing signal.
     }
-    // Also hit the console so main's console-message forwarder picks it up.
+    // Also hit the console so main's console-message forwarder picks it up. The component stack
+    // carries the SAME marker it carries on the IPC report: the forwarder's payload has no `stack`
+    // field at all, so this string is the only place the component path could be read from on
+    // that path, and an unmarked one is not read at all (JOS-111).
     // eslint-disable-next-line no-console
-    console.error('[everquest-companion] ErrorBoundary caught:', error, info?.componentStack)
+    console.error(
+      '[everquest-companion] ErrorBoundary caught:',
+      error,
+      info?.componentStack ? `\n\nComponent stack:${info.componentStack}` : ''
+    )
   }
 
   render(): React.ReactNode {

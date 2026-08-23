@@ -253,6 +253,76 @@ export function foldBlockSamples(samples: readonly BlockSample[]): StartupBlockS
   }
 }
 
+// ------------------------------------------------------------------- the startup stutter probe
+//
+// THE SECOND CLOCK (JOS-57 scope addition, 2026-08-11). The block probe above answers "how badly
+// was the main loop held", which is a question about a MAXIMUM and therefore about US. This one
+// answers "what did our clock do while the fold ran", which is a question about a DISTRIBUTION and
+// therefore, read beside the first, about the MACHINE: many moderately late ticks while the worst
+// single block stays small is a process behaving itself on a computer that is not.
+//
+// WHY IT IS NOT THE SAME PROBE. Two properties differ and both are load-bearing. It ticks fast
+// enough to have a distribution — a 500 ms probe over a six-second fold holds twelve samples, and
+// a p95 over twelve samples is a rumour — and its interval is chosen against Windows' timer
+// quantum so the BASELINE drift is near zero rather than a constant tax that would eat two buckets
+// before any real stutter arrived (AGENTS.md's measured timer law: a sleep ends at the next tick
+// edge, so 125 ms — exactly eight 15.625 ms quanta — is asked for and is what a healthy machine
+// delivers, while `setInterval(100)` would report ~9 ms of drift on an idle box forever).
+
+/**
+ * The stutter heartbeat's cadence. 125 ms = 8 × Windows' 15.625 ms timer quantum — see above; it
+ * is a measured choice, not a round number, and changing it changes what "drift" means.
+ */
+export const STARTUP_STUTTER_INTERVAL_MS = 125
+
+/**
+ * What counts as a LATE tick. Comfortably past one quantum, so a tick that simply landed on the
+ * next edge is not called a stutter: at this cadence the OS owes us nothing better than ~15.6 ms,
+ * and a rate built on noise would be a number that always looks alarming.
+ */
+export const STARTUP_STUTTER_LATE_MS = 25
+
+/**
+ * Fewest ticks a launch may describe with a percentile. Below this the reading is DROPPED rather
+ * than sent — 2.5 s of fold, which is also the point below which a launch has no replay problem to
+ * discriminate. A p95 over four samples is the largest of four numbers wearing a statistic's name.
+ */
+export const STARTUP_STUTTER_MIN_SAMPLES = 20
+
+/**
+ * The probe's own answer, in MILLISECONDS — the local shape, written to perf-startup.json.
+ * `shared/telemetry.ts StartupStutterStats` is the WIRE shape, where each percentile has already
+ * become a bucket index; the two are deliberately different types so nothing can send this one.
+ */
+export interface StartupStutterProbe {
+  /** Heartbeat ticks observed. Stated for the same reason `StartupBlockStats.samples` is. */
+  samples: number
+  p50Ms: number
+  p95Ms: number
+  /** The worst single tick, ms — the local file's own read, never sent. */
+  maxMs: number
+  /** Ticks at least `STARTUP_STUTTER_LATE_MS` late. */
+  lateTicks: number
+  /** `lateTicks` as a whole percent of `samples`, 0..100 — the summable form. */
+  latePct: number
+}
+
+/** Drift samples → the probe's answer. Pure, so the arithmetic is pinned by tests rather than
+ *  inferred from a boot. An empty window reports zeros beside `samples: 0`, which is what an
+ *  unmeasured window honestly is — never a smooth one. */
+export function foldStutterSamples(drifts: readonly number[]): StartupStutterProbe {
+  const clean = drifts.filter((d) => Number.isFinite(d)).map((d) => Math.max(0, d))
+  const lateTicks = clean.filter((d) => d >= STARTUP_STUTTER_LATE_MS).length
+  return {
+    samples: clean.length,
+    p50Ms: round(percentile(clean, 50), 0),
+    p95Ms: round(percentile(clean, 95), 0),
+    maxMs: round(clean.length ? Math.max(...clean) : 0, 0),
+    lateTicks,
+    latePct: clean.length ? Math.round((lateTicks / clean.length) * 100) : 0
+  }
+}
+
 /**
  * WHAT THE DUTY-CYCLED REPLAY ACTUALLY SPENT (JOS-50, `main/log/replaySlicer.ts`).
  *
@@ -437,6 +507,23 @@ export interface StartupProfile {
    * launch with no log to replay, never a fabricated zero.
    */
   replay?: ReplayDutyStats
+  /**
+   * What our own clock did across the same window (JOS-57 scope addition) — the system-stutter
+   * proxy, in milliseconds. Absent on a launch whose heartbeat never ticked.
+   */
+  stutter?: StartupStutterProbe
+  /**
+   * Bytes the log grew by since this app last shut down cleanly. RAW here and bucketed before it
+   * can leave the machine: this file describes the user's own launch to the user (and to a support
+   * answer they choose to paste), where an exact number is the useful one.
+   *
+   * Absent means UNKNOWN — no mark from a previous clean shutdown, or a log that had shrunk under
+   * one — and never zero, which would claim the launch had nothing new to read.
+   */
+  newBytes?: number
+  /** How long the first megabyte of the historical read took, ms — the cold-disk hint. Absent when
+   *  the log is smaller than a megabyte. */
+  firstMbMs?: number
   /** Did every phase land? False for a launch that quit early (or crashed) mid-boot. */
   complete: boolean
 }
@@ -456,6 +543,23 @@ export type StartupMarkResult =
   | { ok: false; error: StartupMarkError; marks: StartupMark[] }
 
 const phaseIndex = (phase: StartupPhase): number => STARTUP_PHASES.indexOf(phase)
+
+/**
+ * Has `phase` already landed? The question `addMark` asks itself before refusing a duplicate —
+ * exported so a caller that has a LEGITIMATE reason to expect a repeat can ASK instead of marking
+ * and being refused (JOS-99).
+ *
+ * There is exactly one such caller today, and it is a fact about the app rather than a loophole:
+ * `rendererHydrated` is sent by the renderer, and a renderer can RELOAD (the dev watcher, the
+ * did-fail-load retry, the render-process-gone recovery). Every one of those re-mounts the hook
+ * that sends it, so the second send is the expected consequence of a reload — not a wiring bug,
+ * and not something errors.log should carry. The refusal itself is untouched and stays LOUD for
+ * every other phase, all of which are marked once from a single main-side call site where a
+ * duplicate really would mean the wiring is wrong.
+ */
+export function phaseMarked(marks: readonly StartupMark[], phase: StartupPhase): boolean {
+  return marks.some((m) => m.phase === phase)
+}
 
 /** Are these two phases allowed to arrive in either order? (See CONCURRENT_PHASES.) */
 const race = (a: StartupPhase, b: StartupPhase): boolean =>
@@ -483,7 +587,7 @@ export function addMark(
   atMs: number
 ): StartupMarkResult {
   const kept = [...marks]
-  if (kept.some((m) => m.phase === phase)) {
+  if (phaseMarked(kept, phase)) {
     return { ok: false, error: { code: 'duplicate', phase }, marks: kept }
   }
   const last = kept[kept.length - 1]
@@ -518,6 +622,9 @@ export interface StartupProfileMeta {
   eventsReplayed?: number
   block?: StartupBlockStats
   replay?: ReplayDutyStats
+  stutter?: StartupStutterProbe
+  newBytes?: number
+  firstMbMs?: number
 }
 
 /**
@@ -552,6 +659,11 @@ export function buildProfile(
       restMs: round(Math.max(0, finite(meta.replay.restMs)), 1)
     }
   }
+  // JOS-57's scope addition. The probe folded its own numbers (`foldStutterSamples`), so this
+  // copies rather than re-rounds; the other two are single values and are cleaned here.
+  if (meta.stutter !== undefined) profile.stutter = meta.stutter
+  if (meta.newBytes !== undefined) profile.newBytes = Math.max(0, Math.round(finite(meta.newBytes)))
+  if (meta.firstMbMs !== undefined) profile.firstMbMs = round(Math.max(0, finite(meta.firstMbMs)), 1)
   return profile
 }
 
@@ -585,6 +697,23 @@ function parseReplayStats(raw: unknown): ReplayDutyStats | null {
   }
 }
 
+/** Shape check for the stutter probe read back off disk. All six fields or none, the same rule
+ *  its two neighbours follow — and absent from every profile written before JOS-57's scope
+ *  addition, which is exactly what "that launch measured no drift" means. */
+function parseStutterProbe(raw: unknown): StartupStutterProbe | null {
+  if (!isPlainObject(raw)) return null
+  const keys = ['samples', 'p50Ms', 'p95Ms', 'maxMs', 'lateTicks', 'latePct'] as const
+  if (keys.some((k) => typeof raw[k] !== 'number')) return null
+  return {
+    samples: Math.max(0, finite(raw.samples)),
+    p50Ms: Math.max(0, finite(raw.p50Ms)),
+    p95Ms: Math.max(0, finite(raw.p95Ms)),
+    maxMs: Math.max(0, finite(raw.maxMs)),
+    lateTicks: Math.max(0, finite(raw.lateTicks)),
+    latePct: Math.max(0, finite(raw.latePct))
+  }
+}
+
 /** Shape check for a profile read back off disk — the file half's parser (never a migration:
  *  a profile is disposable by design, so anything unexpected simply means "no last startup"). */
 export function parseStartupProfile(raw: unknown): StartupProfile | null {
@@ -601,16 +730,30 @@ export function parseStartupProfile(raw: unknown): StartupProfile | null {
   if (timings.length === 0) return null
   const block = parseBlockStats(raw.block)
   const replay = parseReplayStats(raw.replay)
+  const stutter = parseStutterProbe(raw.stutter)
   return {
     startedAt: finite(raw.startedAt),
     version: typeof raw.version === 'string' ? raw.version : '',
     phases: timings,
     totalMs: finite(raw.totalMs),
-    ...(typeof raw.eventsReplayed === 'number' ? { eventsReplayed: finite(raw.eventsReplayed) } : {}),
+    ...optionalCount(raw.eventsReplayed, 'eventsReplayed'),
     ...(block === null ? {} : { block }),
     ...(replay === null ? {} : { replay }),
+    ...(stutter === null ? {} : { stutter }),
+    ...optionalCount(raw.newBytes, 'newBytes'),
+    ...optionalCount(raw.firstMbMs, 'firstMbMs'),
     complete: raw.complete === true
   }
+}
+
+/**
+ * One optional number off the file, under `key`, or nothing at all. Three fields read exactly this
+ * way (a count and the two JOS-57 measurements), and folding them into one helper keeps the parser
+ * inside the repo's complexity ceiling — a number that is simply not there stays not there, which
+ * is the whole distinction these fields carry.
+ */
+function optionalCount(raw: unknown, key: string): Record<string, number> {
+  return typeof raw === 'number' ? { [key]: Math.max(0, finite(raw)) } : {}
 }
 
 // -------------------------------------------------------------------------------- the pref

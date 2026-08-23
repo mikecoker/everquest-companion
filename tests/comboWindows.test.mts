@@ -15,6 +15,10 @@
 //   * CW5 pins the JOS-79 pair: a worn FOCUS effect is not an item casting a spell (the rule
 //     that read it as one was discarding 44% of all cast evidence and 100% of WIZ), and two
 //     real swaps 43.9 h apart no longer arrive as one boundary.
+//   * CW6 lives in comboWhoBoundary.test.mts (this file is at its ceiling): a `/who` row states
+//     the loadout AT ITS OWN TIMESTAMP, so a row the evidence in front of it contradicts CUTS a
+//     boundary there instead of relabelling the whole slice it happens to land in. That rule is
+//     why CW1 reads five intervals rather than four — see its own note.
 //   * The full-log replay asserts INVARIANTS ONLY (the log grows by append — frozen numbers
 //     rot), and it drives the epoch exactly as the app does so the wiped beta character is
 //     excluded the same way.
@@ -124,30 +128,57 @@ function sustainedExclusive(observations: readonly ClassObservation[]): Set<Clas
 test('CW1: the four /who anchors each get their own interval, stated not inferred', () => {
   // Jul 28 14:00–20:45. Seven self rows, four distinct combos, and the tertiary slot unlocking
   // at level 10 (a 2-class row becomes a 3-class row) — the design's whole cardinality claim.
+  //
+  // THE FIFTH INTERVAL IS JOS-192's, AND IT IS A CORRECTION RATHER THAN A DRIFT. This expectation
+  // used to read four entries, with `ENC/MNK` absent and the excursion span carrying the
+  // `PAL/ROG/ENC` the 17:25:15 row states. That was the ticket's defect in miniature: the row is
+  // 39 minutes AFTER the ding that opened the span, the first 24 of those minutes carry monk
+  // evidence the row names no monk for (MEASURED inside 16:46:22–17:25:15: Tiger Claw ×5, Round
+  // Kick ×5, Mend ×2 — 12 MNK-exclusive observations across two hourly buckets, the last at
+  // 17:00:36), and the old model stated `ROG` over all of it because a `/who` anywhere in a slice
+  // relabelled the whole slice. The row now cuts at itself, the span in front of it keeps what the
+  // log actually showed, and the four ANCHORED intervals below are unchanged in every respect.
+  //
+  // AND THE EXCURSION HOLDS THREE SLOTS, NOT TWO (JOS-239). `levelAt` used to let ANY earlier
+  // `/who` row overwrite every level ding after it — the two loops ran one after the other with the
+  // row pass writing unconditionally — so the level in force when this span opened was read off the
+  // `[7 PAL/ENC]` row at 14:14:48 rather than off the `Welcome to level 11!` ding at 16:46:22 that
+  // OPENS it, 2.5 hours and four dings later. Level 7 is below the tertiary unlock, so the span was
+  // given two slots. The game settles it 39 minutes later: `[10 PAL/ROG/ENC]` at 17:25:15 names
+  // THREE classes, which a two-slot span cannot hold. The third slot is honestly unresolved
+  // (`BRD|ROG` — the model knows the set and not the member, and ROG is in it), which is the state
+  // the design calls "2 of 3 known" and not a regression from naming two.
   const snap = replay(readFixture('cw1-who-anchored.log'))
   assert.deepEqual(
     snap.intervals.map(combo),
-    ['CLR/BER', 'PAL/ENC', 'PAL/ROG/ENC', 'PAL/MNK/ENC'],
+    ['CLR/BER', 'PAL/ENC', 'ENC/MNK/BRD|ROG', 'PAL/ROG/ENC', 'PAL/MNK/ENC'],
     'each stated loadout owns exactly one interval, in order'
   )
-  for (const interval of snap.intervals) {
+  // The four /who-anchored ones. `ENC/MNK` is the inferred span between the ding and the row and
+  // is checked by CW6; everything the game itself named is STATED, resolved and certain.
+  const anchored = snap.intervals.filter((_, i) => i !== 2)
+  for (const interval of anchored) {
     for (const slot of interval.slots) {
       assert.equal(slot.provenance, 'who', `${interval.id} must be STATED, never inferred`)
       assert.equal(slot.confidence, 1, `${interval.id} slot confidence`)
       assert.equal(slot.candidates.length, 1, `${interval.id} slot must be resolved`)
     }
+  }
+  for (const interval of snap.intervals) {
     // Arity IS the cardinality statement: 2 slots below level 10, 3 at/after it.
     assert.equal(interval.slots.length, interval.expectedSlots)
   }
   assert.deepEqual(
     snap.intervals.map((i) => i.expectedSlots),
-    [2, 2, 3, 3],
+    [2, 2, 3, 3, 3],
     'the tertiary slot unlocks once and never closes again'
   )
   // The Jul 28 rogue excursion is dated by the REPEAT level ding (11 → 11, which a
   // strict-descent predicate misses) rather than by the three-hour /who gap around it.
   const excursion = snap.intervals[2]
   assert.equal(excursion.startReason, 'levelDrop')
+  // The ding that opens it is what states the level, not the row two and a half hours behind it.
+  assert.equal(excursion.levelLo, 11, 'the level in force here is the ding at 16:46:22')
   assert.equal(excursion.startLo, at('Tue Jul 28 15:51:40 2026'))
   assert.equal(excursion.startHi, at('Tue Jul 28 16:46:22 2026'))
 })
@@ -380,7 +411,6 @@ test('CW5: WIZ is named 28.6 minutes after the first wizard cast', () => {
   assert.equal(names(named), true, 'and at the second bucket the model says WIZ')
   assert.ok(named - firstCast <= 30 * 60_000, 'named within half an hour of the first cast')
 })
-
 test('a skill-up and a spell that SHARE a name resolve to different classes', () => {
   // classes.json's disputed[] rows, made executable. Frenzy is a BERSERKER skill and a
   // SHM/BST spell; Feign Death is a MONK skill and a NEC/SHD spell. Unioning the tables would

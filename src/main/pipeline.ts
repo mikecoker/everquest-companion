@@ -22,16 +22,26 @@ import { logInfo } from './errorLog'
 import { LogBus } from './log/bus'
 import { EpochDetector } from './log/epochDetector'
 import { SessionDetector } from './log/sessionDetector'
-import { baselineOverlay, loadUserOverlay } from './data/overlayPersistence'
+import { baselineOverlay, loadUserSources } from './data/overlayPersistence'
+import { BASELINE_SOURCE } from './data/messageOverlay'
+import { spellCorrectionsReport, spellPlaceholdersReport, spellRemovalsReport } from './data/spellDb'
+// The registry VALIDATOR (JOS-412). It is not one of the load passes and reports from here rather
+// than from the loader on purpose — see `spellSubjectAudit.ts`'s header for the one-way edge.
+import { auditSpellSubjects } from './data/spellSubjectAudit'
+// The era join's own census (JOS-393). It reports from `spellEra.ts` rather than from the loader
+// beside its three siblings because the pass has two callers over one catalog — see that file.
+import { spellEraReport } from './data/spellEra'
 import { CombatEngine } from './combat/engine'
 import { ModuleRegistry } from './modules/registry'
 import { createModules } from './modules/wiring'
+import { resistLedgerSeam } from './resist/store'
 import type { ModuleDelta } from './modules/types'
-import { lookupItem } from './itemLookup'
+import { heldClickySpells, lookupItem } from './itemLookup'
 import { MOB_CATALOG_SIZE, lookupMob, ownLoot } from './mobLookup'
-import { getAlerts } from './store'
+import { getAlerts, getBuffTrustPrefs } from './store'
+import { getRespawnPrefs } from './storeRespawn'
 import { getOverlayWindow, sendToMain } from './windows'
-import type { AlertsDelta } from '../shared/types'
+import type { AlertsDelta, CharacterRef, HeldCounts, OverlayKind } from '../shared/types'
 
 /**
  * Log-derived state for the active character, rebuilt on launch + appended live.
@@ -107,8 +117,20 @@ export const registry = new ModuleRegistry({
  */
 const modules = createModules({
   alertDefs: getAlerts(),
-  // The committed baseline first, then what this user's own log has taught since install.
-  overlays: [baselineOverlay(), loadUserOverlay()],
+  // The one Electron-touching half of the resist module (src/main/resist/module.ts states why).
+  resistLedger: resistLedgerSeam(),
+  // WHOSE casts may anchor a landing besides your own (JOS-140). Empty unless the user named
+  // somebody in Preferences; ipc/buffTrust.ts keeps it in sync while the app runs.
+  buffTrust: getBuffTrustPrefs(),
+  // Which mobs get a respawn clock (JOS-194). ipc/respawn.ts keeps it in sync while the app runs.
+  respawnPrefs: getRespawnPrefs(),
+  // The committed baseline first, then what this user's own logs have taught since install — each
+  // under the SOURCE KEY that produced it (JOS-231), so the fold about to re-mine a character's
+  // log replaces that character's bucket rather than piling onto it.
+  overlays: [
+    { key: BASELINE_SOURCE, counts: baselineOverlay() },
+    ...loadUserSources().map((s) => ({ key: s.key, counts: s }))
+  ],
   lookupItem,
   lookupMob,
   ownLoot,
@@ -123,18 +145,83 @@ export const rosterModule = modules.roster
 export const lootModule = modules.loot
 export const turnInsModule = modules.turnIns
 export const killsModule = modules.kills
+export const respawnModule = modules.respawn
 export const progressionModule = modules.progression
 export const levelingModule = modules.leveling
 export const characterModule = modules.character
+export const outputFilesModule = modules.outputFiles
 export const itemTiersModule = modules.itemTiers
 export const alertsModule = modules.alerts
 export const buffsModule = modules.buffs
 export const considerModule = modules.consider
 export const eventFeedModule = modules.eventFeed
+export const resistModule = modules.resist
 
 logInfo(
   `[everquest-companion] Message overlay: applied ${modules.overlayCorrections} cast-message corrections over the wiki DB.`
 )
+// The COMMITTED half of the same idea (JOS-150): our corrections to the scrape, applied at load.
+// `stale` is the one number worth watching in a boot log — it means a re-scrape moved a message
+// out from under a correction, and the correction now describes nothing.
+{
+  const c = spellCorrectionsReport()
+  if (c) {
+    logInfo(
+      `[everquest-companion] Spell corrections: ${c.applied} applied, ${c.satisfied} already correct upstream, ${c.stale.length} stale.`
+    )
+  }
+}
+// The REMOVALS layer (JOS-337), counted on its own line rather than folded into the corrections
+// numbers — the two answer different questions and adding them would misreport both. `removed`
+// counts DB rows dropped for spells EQ Legends does not have; a `satisfied` entry is a TOMBSTONE,
+// an entry whose page a re-scrape already dropped, and it is NAMED rather than counted so a dead
+// entry is visible in a boot log instead of merely cheap.
+{
+  const r = spellRemovalsReport()
+  if (r) {
+    const tombstones = r.satisfied.length > 0 ? ` Tombstones: ${r.satisfied.join(', ')}.` : ''
+    logInfo(
+      `[everquest-companion] Spell removals: ${r.removed} row${r.removed === 1 ? '' : 's'} dropped (absent from EQ Legends), ${r.satisfied.length} already absent upstream.${tombstones}`
+    )
+  }
+}
+// The PLACEHOLDER pass (JOS-342) — the scrape's stub messages (`You .`, `Someone .`, `N/A`) blanked
+// so the absent-field rules downstream read them as the nothing they are. NAMED rather than
+// counted, like the tombstones above: this pass DELETES text, so a boot log that only said "10"
+// would give a reader no way to notice it had started deleting something else.
+{
+  const p = spellPlaceholdersReport()
+  if (p) {
+    const which = p.rows.map((r) => `${r.spell}/${r.field}`).join(', ')
+    logInfo(
+      `[everquest-companion] Spell placeholders: ${p.nulled} stub message${p.nulled === 1 ? '' : 's'} read as absent${which ? ` (${which})` : ''}.`
+    )
+  }
+}
+// The ERA JOIN (JOS-393) — the wiki's own out-of-era verdict for each spell's page, joined from the
+// era sidecar at load. `silent` is the number worth watching: it counts rows the sidecar has NO
+// answer for, so a re-scrape of spells.json that outran the page-era scrape shows up here as a jump
+// rather than as spells quietly reappearing on level rows.
+{
+  const e = spellEraReport()
+  if (e) {
+    logInfo(
+      `[everquest-companion] Spell era: ${e.marked} row${e.marked === 1 ? '' : 's'} the wiki badges out of era, ${e.silent} with no verdict (of ${e.table} in the sidecar).`
+    )
+  }
+}
+// THE SUBJECT VALIDATOR (JOS-412) — the only line here that reports on the registry AS SHIPPED
+// rather than on a pass we ran over it. It answers "which spells can never be resolved to their own
+// landing sentence", which is the question `Odium` and then `Curse` had to be reported for. Run
+// here, over `spellDb.spells` (the effective list), because the edge to spellDb.ts is one-way at
+// runtime — see that module's header. `unreachable` is the number worth watching: the other two
+// count ROWS, and a duplicate era row's wrong subject costs a user nothing.
+{
+  const a = auditSpellSubjects(spellDb.spells)
+  logInfo(
+    `[everquest-companion] Spell subjects: ${a.unreachable.length} spell${a.unreachable.length === 1 ? '' : 's'} unreachable by their landing sentence (${a.wrongSubject} rows with the wrong subject placeholder, ${a.noSubject} with none, ${a.firstPerson.length} first-person fields naming a third party).`
+  )
+}
 logInfo(`[everquest-companion] Spell DB: ${spellDb.spells.length} spells (${spellDb.castOnYou.size} unique cast-on-you msgs).`)
 logInfo(
   `[everquest-companion] Mob catalog: ${MOB_CATALOG_SIZE} mobs (scraped drop tables; the live wiki lookup is the fallback).`
@@ -168,6 +255,14 @@ registry.attach(bus)
 // already consumed the event the engine is about to. A pull rather than a copy, because a user
 // edit made between two log lines must be visible to the very next one.
 combat.setRoster(rosterModule)
+// THE CLASS-COMBO SEAM (JOS-305), installed on the same principle and in the same place: the
+// combo module is FIRST in the registration order above, so by the time the engine folds a line
+// the combo model has already consumed it. Its one consumer is the blade-coat clear — a character
+// who stopped being a rogue keeps no poison on their blades, and the log prints nothing when that
+// happens. A pull, so a `/who` row typed between two log lines reaches the very next one; the
+// engine gates HOW OFTEN it pulls (combat/coatClass.ts), because unlike the roster this answer
+// costs a rebuild.
+combat.setCombo(comboModule)
 bus.subscribe((ev, live) => combat.ingestEvent(ev, live))
 // Item-knowledge prefetch (Task #53): when a LIVE loot event arrives, warm the
 // "what's this for" cache in the background (throttled by itemLookup's serialized queue
@@ -196,3 +291,24 @@ bus.subscribe((ev, live) => combat.ingestEvent(ev, live))
  * does the marking.
  */
 export const DATA_READY_MS = performance.now()
+
+/**
+ * THE HELD-CLICKY SEAM (JOS-438): install the spells this character owns an instant item click
+ * for, derived from their `/outputfile inventory` counts.
+ *
+ * A FUNCTION rather than a module-scope call like the two seams above, because unlike the roster
+ * and the combo this one has no live source to pull from — a dump is a snapshot the player writes
+ * by hand, so session.ts re-installs it whenever one is read.
+ *
+ * IT LIVES HERE, and that is the whole point of the indirection: this module already imports
+ * itemLookup (`lookupItem`, above) and session.ts already imports this one, so the feature adds no
+ * module edge to the main bundle anywhere. Reaching the catalog through a NEW edge instead — from
+ * session.ts, then from here — was measured to break JOS-431's delete-and-recreate inventory
+ * watcher with the derivation never even called (main/itemClickies.ts carries the bisect).
+ *
+ * It TAKES the counts rather than reading the store, so session.ts stays the only module that
+ * knows which character is active.
+ */
+export function installHeldClickies(counts: HeldCounts): void {
+  combat.setHeldClickies(heldClickySpells(counts))
+}

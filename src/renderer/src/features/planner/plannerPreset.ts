@@ -1,63 +1,113 @@
-// planner/plannerPreset.ts — BROWSING ONE SOCKET OF ONE ITEM (V8, docs/plans/planner-v2.md).
+// planner/plannerPreset.ts — WHICH ITEM IS THE BROWSER NARROWED TO.
 //
 // The planner had one way in: pick an effect, then say which slot it lands in. The owner asked for
-// the other one, which is how the game itself presents the decision — you open an item, you see
-// its sockets, and you fill one. That is what the Inventory tab's cells are now: the host, then
-// its four sockets with their unlock tiers, and clicking a socket takes you to the effect browser
-// ALREADY NARROWED to what can legally go there.
+// the other one, which is how the game itself presents the decision — you name an item and you see
+// what can legally go in it. JOS-210 opened two doors onto that one narrowing, and JOS-326 closed
+// the first of them:
 //
-// IT IS A FILTER PRESET OVER THE EXISTING BROWSER, not a second browser. Three facts travel:
-// the socket (which of the four), the slot (where the host is worn), and the host itself — and
-// the host's own class list, looked up once, because R2 only lets an exaltation into an item that
-// shares a class with it.
+//   * THE INVENTORY TAB'S `BrowsePreset` — a cell, one of its four sockets, and the host that cell
+//     was wearing — IS GONE with the plan board it was a message from. Its whole apparatus went
+//     with it: the exact-key lookup that turned a dump-filled host name into slots and classes, the
+//     merge that let a preset outrank a hand-picked item, and the cell the focus used to carry.
+//   * THE FILTER BAR'S OWN ITEM PICKER remains, and it was always the wider of the two: it reaches
+//     ANY item the committed DB carries rather than only the ones a set already hosted, which was
+//     the whole of the owner's ask. It is now the only way a focus is set, so an `ItemFocus` is
+//     simply what the user picked.
 //
-// THE HOST'S CLASSES ARE LOOKED UP, NOT ASSUMED. An auto-filled host comes from an inventory dump,
-// which states no classes at all, and a hand-picked one was chosen before this preset existed. So
-// the lookup goes through main's item index by EXACT KEY (`plannerSearchItems` ranks the typed
-// name first, and the answer is taken only when the key matches — a name match alone would be the
-// fuzzy join law 12 forbids). An item the index does not carry, or one whose page stated no class
-// list, yields `[]` — which is UNKNOWN and therefore filters nothing (law 1).
+// AND THE FOCUS SURVIVES A KIND SWITCH (JOS-210, the bug half), now by construction rather than by
+// arrangement: the picked item is its own state in EffectBrowser and no filter-bar write touches
+// it, so "show me this item's worn effects instead of its procs" cannot throw the item away.
 
 import { useEffect, useState } from 'react'
 import type { ClassAbbr } from '@shared/classCombo'
-import type { PlanSlotId, SocketType } from '@shared/planner/types'
+// RELATIVE value imports (the mobSearch house law): `itemFits` is reached under the node runner by
+// tests/plannerItemFilter.test.mts, where the vite-only `@shared` alias does not resolve.
+import { socketCompatibility } from '../../../../shared/planner/rules'
+import {
+  EQUIP_SLOTS,
+  type EquipSlot,
+  type PlannerDonor,
+  type PlannerItemHit
+} from '../../../../shared/planner/types'
+import { classesMismatch } from './plannerClasses'
 
-/** Which socket of which host the browser is currently filtered to. */
-export interface BrowsePreset {
-  /** the CELL you clicked — the browser filters by `equipSlotOf(slot)` and WRITES to this (JOS-67) */
-  slot: PlanSlotId
-  socket: SocketType
-  /** `itemKey(name)` of the host — the identity the class lookup matches on */
-  hostKey: string
-  hostName: string
+/**
+ * THE ITEM THE BROWSER IS FILTERING BY.
+ *
+ * `slots` and `classes` are R2's two halves as facts about the ITEM, and both are empty when
+ * nothing states them: an empty list is UNKNOWN and narrows nothing (law 1), never "nowhere" or
+ * "nobody".
+ */
+export interface ItemFocus {
+  /** `itemKey(name)` */
+  key: string
+  name: string
+  /** where it is worn. `[]` = unknown, which filters nothing. */
+  slots: readonly EquipSlot[]
+  /** who can use it. `[]` = unknown, which filters nothing. */
+  classes: readonly ClassAbbr[]
 }
 
 /**
- * The host's usable classes, or `[]` while unknown (still loading, not in the index, or the page
- * stated none). Re-runs when the preset changes; an answer for a stale preset is dropped.
+ * CAN THIS DONOR'S EFFECT MOVE INTO THIS ITEM? — R2 and R3, asked as a FILTER.
+ *
+ * The rule itself is `socketCompatibility` (shared/planner/rules.ts) and is not restated here: it
+ * owns R3's flat no on haste and R2's slot half, and passing it an EMPTY class list is how this
+ * file asks for those two alone. The class half is then `classesMismatch`, which is the one rule
+ * the browser filter and the Board's mismatch chip already share.
+ *
+ * WHY THE CLASS HALF IS ASKED SEPARATELY: `socketCompatibility` answers for a PLANNED socket, where
+ * an unknown must be reported rather than passed ("this page states no class list"). A browser
+ * filter has the opposite obligation — hiding every donor whose page stayed silent would assert a
+ * fact the wiki declined to state (law 1) — so an unknown on either side passes here and the row is
+ * chipped instead.
+ *
+ * An item with NO STATED SLOTS narrows nothing rather than matching nothing: the filter bar's
+ * picker only ever offers items that state one, so this arm is unreachable from the UI and exists
+ * so a gap in our own data can never blank the browser.
  */
-export function useHostClasses(preset: BrowsePreset | null): ClassAbbr[] {
-  const [classes, setClasses] = useState<ClassAbbr[]>([])
-  const key = preset?.hostKey ?? null
-  const name = preset?.hostName ?? null
+export function itemFits(donor: PlannerDonor, item: ItemFocus): boolean {
+  const slots = item.slots.length === 0 ? EQUIP_SLOTS : item.slots
+  if (!socketCompatibility(donor, slots, []).ok) return false
+  return !classesMismatch(donor.classes, item.classes)
+}
 
+// ---- the item index, as the two pickers ask it ----------------------------------------
+
+/** Shortest query worth a round trip — one letter matches thousands of items and says nothing. */
+export const MIN_QUERY = 2
+
+export interface ItemHitsState {
+  hits: PlannerItemHit[]
+  loading: boolean
+}
+
+/**
+ * One search per settled query, shared by the host picker and the filter bar's item picker. An
+ * in-flight answer for an older query is dropped, not shown; `enabled` is the popover's own open
+ * state, because a closed picker must not keep asking.
+ */
+export function useItemSearch(query: string, enabled: boolean): ItemHitsState {
+  const [state, setState] = useState<ItemHitsState>({ hits: [], loading: false })
   useEffect(() => {
-    setClasses([])
-    if (key === null || name === null) return
+    if (!enabled || query.trim().length < MIN_QUERY) {
+      setState({ hits: [], loading: false })
+      return
+    }
     let alive = true
+    setState((prev) => ({ hits: prev.hits, loading: true }))
     void window.eq
-      .plannerSearchItems(name)
+      .plannerSearchItems(query.trim())
       .then((hits) => {
-        if (!alive) return
-        setClasses(hits.find((h) => h.key === key)?.classes ?? [])
+        if (alive) setState({ hits, loading: false })
       })
       .catch(() => {
-        /* main never rejects; an unknown class list filters nothing */
+        /* main never rejects; an empty list is the honest answer */
+        if (alive) setState({ hits: [], loading: false })
       })
     return () => {
       alive = false
     }
-  }, [key, name])
-
-  return classes
+  }, [query, enabled])
+  return state
 }

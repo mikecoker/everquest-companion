@@ -37,8 +37,11 @@ import { saveUserOverlay } from './data/overlayPersistence'
 import { startQueueFlush, stopQueueFlush } from './feedback'
 import { startTelemetry, stopTelemetry } from './telemetry'
 import { registerAppSchemes } from './appSchemes'
-import { applyGraphicsSafeMode } from './graphics'
+import { applyGraphicsCompatibilityFlags, applyGraphicsSafeMode } from './graphics'
 import { installImageCacheProtocol } from './imageCache'
+// The wiki art this build SHIPS (JOS-198). Pure path probing — Electron's three path facts are
+// passed in below, so the module itself imports nothing from electron.
+import { bundledImageRoots, findBundledImagesDir } from './bundledImages'
 import { installSpeechCacheProtocol } from './speech/cache'
 import { registerIpc } from './ipc'
 import {
@@ -56,6 +59,8 @@ import {
   setCloudSyncStateObserver
 } from './pipeline'
 import { markStartupPhase, startPerfSampler, stopPerf } from './perf'
+import { initProcessPriority } from './processPriority'
+import { getProcessPriorityPrefs } from './storeProcessPriority'
 import { initPresenceEffects, stopPresenceEffects } from './presenceEffects'
 import { provisionDefaultPacks } from './provisionPacks'
 import { activeCharId, getActiveCharacter, startTailing, stopSession } from './session'
@@ -67,15 +72,26 @@ import {
 } from './cloudSync/runtime'
 import { runSmokeFeedback } from './smokeFeedback'
 import { STORE_READY_MS, getOverlayConfig, getPerfHudPrefs } from './store'
+// The z-order guard's tally, read once at quit (JOS-368; see `logTopmostSavings`).
+import { topmostStats } from './topmost'
+// The notification-area icon and the close interceptor (JOS-139). Its own module beside windows.ts
+// for the reason stated in its header; the composition root only decides WHEN it is armed.
+import { installCloseToTray } from './tray'
+// The overlays' two independent-mode flags, made to agree before any window can read either of
+// them (JOS-408). See storeOverlayIndependent.ts for why it runs here and nowhere else.
+import { reconcileOverlayIndependentOnce } from './storeOverlayIndependent'
 import { initUpdater } from './updater'
 import {
   createMainWindow,
   createOverlayWindow,
+  flushMainWindowState,
   getMainWindow,
   hardenSession,
   hardenWebContents,
+  reconcileOverlayDisplays,
   sendToMain
 } from './windows'
+import { watchDisplays } from './windowPlacement'
 import { OVERLAY_KINDS } from '../shared/types'
 
 // --- custom schemes: the permanent image cache (eqimg://) and the speech cache (eqspeech://) ---
@@ -93,6 +109,13 @@ registerAppSchemes(protocol)
 // without any UI, which is the case it exists for: you cannot open Preferences in a window you
 // cannot see. All of the reasoning lives in graphics.ts.
 applyGraphicsSafeMode()
+
+// …and the flags this MACHINE needs, on the same before-`ready` law (JOS-352). `appendSwitch` is
+// read while Electron assembles the GPU process and ignored afterwards, so it belongs in this
+// statement and not in `whenReady`. On real Windows the list is EMPTY and this is a no-op; under a
+// detected Wine prefix it is the two flags that let the app keep the GPU instead of white-screening
+// on a software renderer Wine does not implement (shared/wineDetect.ts WINE_CHROMIUM_FLAGS).
+applyGraphicsCompatibilityFlags()
 
 // Cold-start stopwatch: module scope is the earliest this process can measure from, and the
 // number is bucketed (never sent raw) into `sessionStart` when the window exists. See
@@ -137,7 +160,10 @@ bus.subscribe((ev, live) => {
     // derived epoch event finishes draining to the modules (they reset) BEFORE the renderer
     // re-fetches their snapshots. During a rescan (live:false) the post-scan onCharacter send
     // in tailCharacter already covers this, so we only do it live.
-    if (live) queueMicrotask(() => sendToMain(IPC.onCharacter, getActiveCharacter()))
+    // …and to the module-reading OVERLAYS as well as the main window (JOS-172): they fold the
+    // same modules and have the same nothing-but-deltas problem, so one signal, one list
+    // (pipeline.ts `sendWorldRebuilt`).
+    if (live) queueMicrotask(() => { sendWorldRebuilt(getActiveCharacter()) })
   }
 })
 
@@ -237,9 +263,20 @@ const gotSingleInstanceLock = E2E || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
+  // …AND THE SAME THREE LINES ALREADY COVER A WINDOW THAT IS HIDDEN IN THE TRAY (JOS-139).
+  // Re-launching the app is one of the ways a player asks for the window back, and since close-
+  // to-tray the window they are asking for may be hidden rather than minimized. `show()` is
+  // unconditional here, and on a hidden window that IS the restore — so this handler needed no
+  // change; the brief's suggested `if (!w.isVisible()) w.show()` would have been the same call
+  // behind a guard. Not something the harness can drive (a second instance is a second launch,
+  // and E2E skips the lock outright), so it is on the hands-on list for the packaged build.
   app.on('second-instance', () => {
     const mainWindow = getMainWindow()
     if (!mainWindow) return
+    // The OTHER deliberate foreground move (JOS-427; its twin is windowControls.ts `focusView`).
+    // Narrated so a foreground steal in dev.log always has an author. No raise grace here: a
+    // second launch is the user asking for the APP, so the overlays parking is correct.
+    logInfo('[everquest-companion] presence: second-instance raise (app relaunched)')
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
@@ -248,7 +285,7 @@ if (!gotSingleInstanceLock) {
   void app.whenReady().then(() => {
     markStartupPhase('appReady')
     logInfo(
-      `[everquest-companion] Channel '${CHANNEL}' — userData ${USER_DATA}, error log ${errorLogPath()}`
+      `[everquest-companion] Channel '${CHANNEL}' - userData ${USER_DATA}, error log ${errorLogPath()}`
     )
     registerIpc()
     registerDevTriageIpc()
@@ -256,14 +293,45 @@ if (!gotSingleInstanceLock) {
     // webContents this process will ever create (main window, each overlay, anything a future
     // feature adds), which is the only placement that can't be forgotten later.
     app.on('web-contents-created', (_e, wc) => hardenWebContents(wc))
+    // The companion yields the CPU to the game (JOS-366). Wired HERE, before the first window
+    // exists, for the same reason the line above is: both subscriptions must catch every
+    // webContents this process will ever create. Everything about WHICH processes and WHY the GPU
+    // is not one of them lives in ./processPriority.ts; this is the composition root handing that
+    // mechanism its three Electron facts and the policy (the stored switch). A no-op on any
+    // platform but Windows and under EQ_E2E, decided inside the module.
+    initProcessPriority({
+      mainPid: process.pid,
+      enabled: getProcessPriorityPrefs().yieldToGame,
+      onWebContentsCreated: (cb) => app.on('web-contents-created', (_e, wc) => cb(wc)),
+      onWindowCreated: (cb) => app.on('browser-window-created', (_e, win) => cb(win)),
+      // The read-back line is DEV-ONLY: it is one line per window load, and its whole job is to
+      // make a silent re-raise by Chromium's priority manager visible while someone is watching.
+      debug: app.isPackaged ? undefined : (line) => logInfo(`[everquest-companion] ${line}`),
+      onError: (err: unknown) => logError('main:processPriority', err)
+    })
     // Permissions are a SESSION property; every window here uses the default session (no
     // custom `partition` anywhere — the same fact that lets one eqimg:// handler serve them all).
     hardenSession(session.defaultSession)
-    // Serve `eqimg://item/<id>` from <userData>/image-cache BEFORE any window loads a page
-    // that can reference an item icon. One handler on the default session covers the main
-    // window and every overlay (none of them use a custom partition).
+    // Serve `eqimg://item/<id>` BEFORE any window loads a page that can reference an item icon.
+    // One handler on the default session covers the main window and every overlay (none of them
+    // use a custom partition). Since JOS-198 the FIRST place it looks is the art this build
+    // ships — `resources/wiki-images/`, whose three possible addresses (project root in dev and
+    // e2e, inside the asar, beside it once unpacked) are probed here rather than guessed at in
+    // the cache. A build without it resolves to null and falls back to the runtime cache,
+    // exactly as before.
+    const bundledDir = findBundledImagesDir(
+      bundledImageRoots({
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath ?? '',
+        cwd: process.cwd()
+      })
+    )
+    logInfo(
+      `[everquest-companion] Bundled wiki images: ${bundledDir ?? 'none (falling back to the runtime cache)'}`
+    )
     installImageCacheProtocol(protocol, {
       userData: USER_DATA,
+      bundledDir,
       onError: (msg, err) => logError('main:imageCache', { message: msg, err })
     })
     // …and `eqspeech://<hash>` from <userData>/speech-cache, beside it and for the same
@@ -275,8 +343,21 @@ if (!gotSingleInstanceLock) {
       onError: (msg, err) => logError('main:speechCache', { message: msg, err })
     })
     markStartupPhase('protocols')
+    // ONE SWITCH NOW GOVERNS BOTH OVERLAY APPEARANCE FLAGS (JOS-408), so the two of them have to
+    // agree before anything reads either. BEFORE the first window, deliberately: the reconcile
+    // writes the store and broadcasts nothing, which is only safe while there is nobody to tell.
+    // It changes nothing on screen by construction — the direction it resolves in seeds the twelve
+    // per-kind sizes from what every window is already drawing (shared/overlayIndependent.ts).
+    if (reconcileOverlayIndependentOnce()) {
+      logInfo('[everquest-companion] Overlay appearance: the two independent flags disagreed and are now both on')
+    }
     createMainWindow()
     markStartupPhase('windowCreated')
+    // THE TRAY, AND WHAT THE X MEANS (JOS-139). Straight after the window exists, because the
+    // icon's whole job is to bring that window back — and because the quitting latch it arms has
+    // to be in place before anything can ask this process to quit. It creates no icon under
+    // EQ_E2E, where a close still closes; everything else about the app is unchanged either way.
+    installCloseToTray()
     // `replayDone` is the LONG one on a real log (a full historical scan), so it is marked when
     // the session's promise settles — with the event count, because "6 s" means something very
     // different for 40k events than for 1.1M. `tailAttached` is marked immediately after the
@@ -290,7 +371,13 @@ if (!gotSingleInstanceLock) {
           // …and what the fold's duty cycle actually cost (JOS-50), plus how many bytes it read
           // (JOS-57, the fleet reading's size bucket). Both absent on a machine with no log to
           // replay, where there was no fold to have a duty and no bytes to have a size.
-          ...(res ? { replay: res.replay, bytesReplayed: res.logBytes } : {})
+          ...(res ? { replay: res.replay, bytesReplayed: res.logBytes } : {}),
+          // JOS-57's two discriminators, each forwarded ONLY when the session actually measured
+          // it: how much of that read was bytes appended since our last clean exit, and how long
+          // the first megabyte took to arrive. `TailResult` leaves both absent rather than zero
+          // when there was nothing to compare against, and that distinction has to survive here.
+          ...(res?.newBytes === undefined ? {} : { newBytes: res.newBytes }),
+          ...(res?.firstMbMs === undefined ? {} : { firstMbMs: res.firstMbMs })
         })
       })
       .catch((err: unknown) => {
@@ -329,8 +416,9 @@ if (!gotSingleInstanceLock) {
     // inside `startTelemetry` rather than restated here.
     //
     // WHAT THIS STARTS: an analytics id if the user's switch is on, a `sessionStart` record, a
-    // 5-minute heartbeat into the ring at <userData>/telemetry.json — and, ONLY once every gate
-    // is open, the 60 s flush loop that POSTs to the compiled-in endpoint. The flush timer is
+    // 10-minute heartbeat into the ring at <userData>/telemetry.json — and, ONLY once every gate
+    // is open, the 5-minute flush loop that POSTs to the compiled-in endpoint (JOS-269 stretched
+    // both; flush.ts holds the cost ruling and what it does and does not cost). The flush timer is
     // not created at all under `EQ_E2E=1`, with the switch off, or before the first-run notice
     // has rendered (`telemetryFlushEnabled`, telemetry/net.ts); when the notice is answered
     // mid-session the loop starts then, not next launch. Same predicate discipline as
@@ -343,8 +431,10 @@ if (!gotSingleInstanceLock) {
     // next launch). On success, tell the renderer the pack set changed so it re-lists +
     // invalidates its sound caches and the sound becomes usable live.
     // E2E: skip (fresh temp userData ⇒ it would re-download every pack, off-network noise).
+    // …and NEVER a pack the user deleted (JOS-273): the uninstall handler tombstones shipped ids,
+    // and the set is read here rather than inside provisionPacks so that module stays node-loadable.
     if (!E2E) {
-      void provisionDefaultPacks()
+      void provisionDefaultPacks({ removedIds: removedPackIds() })
         .then((n) => {
           if (n > 0) sendToMain(IPC.onSoundPacksChanged)
         })
@@ -352,7 +442,10 @@ if (!gotSingleInstanceLock) {
     }
     // Auto-update (Task #27): checks GitHub Releases on the selected channel;
     // no-ops in dev. getMainWindow is lazy so status pushes hit the live window.
-    initUpdater(getMainWindow)
+    // …and the settle callback (JOS-272): the updater runs the store's outstanding writes BEFORE it
+    // hands the process to the installer, instead of leaving them to race the installer's taskkill.
+    // See `flushStoreForQuit` below for why that one second is where a torn store comes from.
+    initUpdater(getMainWindow, flushStoreForQuit)
 
     // Restore any floating overlay (Task #52; per-kind in Task #54) that was open when the app
     // last quit. Deferred so the main window's did-finish-load sends its initial state first.
@@ -360,9 +453,16 @@ if (!gotSingleInstanceLock) {
       if (getOverlayConfig(kind).open) createOverlayWindow(kind)
     }
 
+    // …and keep them on a display that exists (JOS-187). The line above places them against the
+    // monitors present at launch; this one re-places them when that changes under a running app —
+    // the moment the player unplugs the widescreen their meters are parked on. Registered after
+    // the restore for the obvious reason (there is nothing to reconcile before it) and never
+    // removed: it is app-lifetime, like the security catch-alls above.
+    watchDisplays(reconcileOverlayDisplays)
+
     // Presence-driven features (overlay auto-hide + the cursor ring). LAST, because both act on
     // windows that must already exist. Costs one store read when both are off — which is the
-    // default install: `presenceNeeded()` decides whether the watcher child is spawned at all.
+    // default install: `presenceNeeded()` decides whether the watcher thread is started at all.
     initPresenceEffects()
 
     // The performance HUD (docs/plans/perf-profiling.md P1). Costs one store read when it is
@@ -379,14 +479,18 @@ if (!gotSingleInstanceLock) {
 }
 
 /**
- * REAPING THE WATCHER, BELT AND BRACES. `window-all-closed` below is the ordinary teardown, but
- * it is not the only way this process ends: an auto-updater `quitAndInstall`, a `app.quit()`
+ * STOPPING THE WATCHER, BELT AND BRACES. `window-all-closed` below is the ordinary teardown, but
+ * it is not the only way this process ends: an auto-updater `quitAndInstall`, an `app.quit()`
  * from anywhere, or an OS session logoff can reach `before-quit` on a path that never lands
- * there. The presence watcher is a CHILD PROCESS, and Windows does not kill children with their
- * parent — one missed teardown is a PowerShell loop polling user32 forever with nobody reading
- * the pipe. `stopPresenceEffects()` is idempotent, so running it on both events costs nothing.
- * (The child also self-reaps when this pid disappears — see presence.ts — which is what covers
- * the kill -9 case that no in-process handler can.)
+ * there. The presence watcher is a WORKER THREAD, and a live thread is one more thing holding a
+ * quitting process open. `stopPresenceEffects()` is idempotent, so running it on both events
+ * costs nothing.
+ *
+ * THE HARD CASE STOPPED EXISTING IN JOS-182, which is worth recording rather than quietly
+ * deleting: the watcher used to be a `powershell.exe` CHILD, Windows does not kill children with
+ * their parent, and one missed teardown left a PowerShell loop polling user32 forever with nobody
+ * reading the pipe. It carried a self-reap for exactly the kill -9 case no in-process handler can
+ * cover. A thread cannot outlive its process, so both the hazard and its workaround are gone.
  */
 app.on('before-quit', () => {
   teardownStep('main:stopCloudSync', stopCloudSyncRuntime)
@@ -431,7 +535,7 @@ app.on('window-all-closed', () => {
   teardownStep('main:stopPerf', stopPerf)
   // Flush the learned message overlay one last time so the final session's observations
   // aren't lost between debounced saves (Task #36).
-  teardownStep('main:saveOverlay', () => saveUserOverlay(buffsModule.overlaySnapshot()))
+  teardownStep('main:saveOverlay', () => saveUserOverlay(buffsModule.overlayRegister()))
   // Dev only, and null in every other build: a live DSQL socket is not a timer and would hold
   // the process open long past the last window.
   teardownStep('main:triage', () => {

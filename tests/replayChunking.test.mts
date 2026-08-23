@@ -456,11 +456,15 @@ test('an empty or missing log yields nothing and hands the tailer offset 0', asy
     const bus = new LogBus()
     let count = 0
     bus.subscribe(() => (count += 1))
+    // `size` is the frozen EOF the scan bounded itself by (JOS-57's scope addition uses it as the
+    // cold-read delta's "how big is it now"). An empty file and a missing one are both 0 — and no
+    // `firstMbMs`, because a megabyte was never read.
     assert.deepEqual(await scanLog(empty, bus, 0, { slicer: createSlicer({ budgetMs: 0, duty: 1 }) }), {
       endOffset: 0,
-      seq: 0
+      seq: 0,
+      size: 0
     })
-    assert.deepEqual(await scanLog(join(dir, 'nope.txt'), bus, 7), { endOffset: 0, seq: 7 })
+    assert.deepEqual(await scanLog(join(dir, 'nope.txt'), bus, 7), { endOffset: 0, seq: 7, size: 0 })
     assert.equal(count, 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })

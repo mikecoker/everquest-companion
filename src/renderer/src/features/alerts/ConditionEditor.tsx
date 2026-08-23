@@ -9,7 +9,12 @@ import type { JSX } from 'react'
 import { Box, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
 import type { AlertTriggerPrimitive, AppSignal, LogEventKind } from '@shared/types'
 import { ALL_LOG_EVENT_KINDS } from '@shared/logEventKinds'
-import { type ConditionDraft, conditionFieldValErr, conditionRawErr } from './conditionDraft'
+import {
+  type ConditionDraft,
+  conditionFieldKeyErr,
+  conditionFieldValErr,
+  conditionRawErr
+} from './conditionDraft'
 
 // The LogEvent kinds an 'event' trigger can select. Derived from the LogEventKind union
 // (ALL_LOG_EVENT_KINDS is exhaustiveness-checked) so the picker can NEVER drift from the real
@@ -33,6 +38,10 @@ function EventConditionFields({ draft, onChange }: ConditionFieldProps): JSX.Ele
   if (draft.ttype !== 'event') return null
   const set = (patch: Partial<ConditionDraft>): void => onChange({ ...draft, ...patch })
   const fieldValErr = conditionFieldValErr(draft)
+  // "(optional)" is true of the PAIR, not of this box once the other one has been typed into
+  // (JOS-348) — so the label follows the state rather than standing as a permanent invitation to
+  // lose a pattern.
+  const fieldKeyErr = conditionFieldKeyErr(draft)
   return (
     <>
       <Box>
@@ -55,15 +64,19 @@ function EventConditionFields({ draft, onChange }: ConditionFieldProps): JSX.Ele
       <Stack direction="row" spacing={1}>
         <TextField
           size="small"
-          label="Field (optional)"
-          placeholder="e.g. spell, target"
+          label={fieldKeyErr ? 'Field' : 'Field (optional)'}
+          placeholder="e.g. item, spell, target"
+          data-testid="alert-field-key"
           value={draft.fieldKey}
           onChange={(e) => set({ fieldKey: e.target.value })}
+          error={fieldKeyErr != null}
+          helperText={fieldKeyErr ?? ' '}
           fullWidth
         />
         <TextField
           size="small"
           label="Equals or /regex/"
+          data-testid="alert-field-val"
           value={draft.fieldVal}
           onChange={(e) => set({ fieldVal: e.target.value })}
           error={fieldValErr != null}
@@ -72,8 +85,12 @@ function EventConditionFields({ draft, onChange }: ConditionFieldProps): JSX.Ele
         />
       </Stack>
       <Typography variant="caption" color="text.secondary">
-        Leave the field blank to fire on every {draft.kind} event. A value in /slashes/ is a
-        case-insensitive regex. For <code>buffExpired</code>, use <code>target</code>=
+        Leave BOTH boxes blank to fire on every {draft.kind} event. A value needs a field to match
+        against, so name one: a dropped item is <code>item</code>, and <code>loot</code> also
+        carries <code>source</code>. A value in /slashes/ is a
+        case-insensitive regex. A plain <code>spell</code> name matches EVERY RANK of that spell
+        (&ldquo;Mesmerization&rdquo; hears Mesmerization III too) - write a /regex/ if you mean one
+        rank only. For <code>buffExpired</code>, use <code>target</code>=
         <code>self</code> for your own buffs, or omit <code>target</code> to match a buff
         wearing off you OR your pet/target.
       </Typography>

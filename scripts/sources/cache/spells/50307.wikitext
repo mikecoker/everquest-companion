@@ -11,18 +11,18 @@
 
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Vigilant_Spirit_Summon|Vigilant Spirit]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 29 [[Vigilant_Spirit_Summon|Spirit Wolf]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 400
 | range =  
 | casting_time = 11.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 22.00
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | msg_cast_on_you = You summon a vigilant spirit.

@@ -20,6 +20,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildItemDbIndex, itemKey, knowledgeFromDb, type ItemDbFile } from '../src/main/itemsDb'
+// The rename overlay's own audit is tests/itemRenames.test.mts; this suite only needs to know
+// which keys it speaks for, so the key-derivation identity below stays exact.
+import { isRenamedItem, renameItemName } from '../src/shared/itemRenames'
 import itemsJson from '../src/main/data/items.json'
 import poskyJson from '../src/renderer/src/data/eqlegends/posky.json'
 import type { PoskyData } from '../src/shared/types'
@@ -56,7 +59,14 @@ test('every key is canonical, and derived from the record it points at', () => {
     assert.ok(entry.page.length > 0, `entry under ${key} has no page title`)
     const fromTitle = itemKey(entry.page) === key
     const fromName = entry.name != null && itemKey(entry.name) === key
-    assert.ok(fromTitle || fromName, `key ${key} matches neither page ${entry.page} nor name ${entry.name}`)
+    // THE ONE STATED EXCEPTION (JOS-415): the rename overlay keeps a renamed item's OLD key
+    // addressable, pointing at the record under its CURRENT name — a log line or a share bundle
+    // predating the rename must still resolve. Only a key the table names may miss the derivation.
+    const fromRename = isRenamedItem(key) && itemKey(renameItemName(key)) === itemKey(entry.page)
+    assert.ok(
+      fromTitle || fromName || fromRename,
+      `key ${key} matches neither page ${entry.page} nor name ${entry.name}`
+    )
   }
 })
 
@@ -118,15 +128,23 @@ test('known Sky items resolve to the knowledge the wiki states', () => {
   // Stable, load-bearing Sky items: a class-Test turn-in and an efreeti drop. Both are
   // asserted on PROPERTIES the page states (LORE/QUEST flags, an icon, a stats block), not
   // on exact text that a wiki edit would churn.
+  //
+  // Nebulous Sapphire lost its LORE flag upstream (wiki edit 2026-08-21, landed with the
+  // 2026-08-22 rescrape — the page now states "No Trade, Quest"), so LORE is asserted only
+  // for Sphinx Claw.
   for (const name of ['Nebulous Sapphire', 'Sphinx Claw']) {
     const entry = index.get(itemKey(name))
     assert.ok(entry, `${name} missing from items.json`)
     assert.equal(entry.page, name)
-    assert.equal(entry.lore, true, `${name} should carry the LORE ITEM flag`)
     assert.equal(entry.quest, true, `${name} should carry the QUEST ITEM flag`)
     assert.ok(typeof entry.iconId === 'number' && entry.iconId > 0, `${name} should carry an icon id`)
-    assert.match(entry.statsBlock ?? '', /LORE ITEM/)
   }
+  const claw = index.get(itemKey('Sphinx Claw'))
+  assert.ok(claw)
+  assert.equal(claw.lore, true, 'Sphinx Claw should carry a lore flag')
+  // The page respelled its flags line "Lore Equipped, No Trade, Quest, Placeable" in the
+  // 2026-08-22 rescrape — Lore Equipped counts as the LORE flag (the Skycleaver rule).
+  assert.match(claw.statsBlock ?? '', /LORE ITEM|Lore Equipped/)
 })
 
 test('the `+N` item level never reaches the database', () => {

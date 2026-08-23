@@ -16,6 +16,7 @@
 //      by construction: it is evidence about one mob on one server, not the drop table.
 //   3. QUESTS that name this mob, from the local catalog.
 //   4. KILLS — what the kills module knows, when the caller has it.
+//   5. RESISTS — what it shrugs off, mined from your logs over the shipped baseline (JOS-382).
 //
 // HONESTY (law 1) — every section states which of those three things happened: a source said
 // something, a source said nothing, or we could not ask. "No wiki page for this mob" and "the
@@ -24,24 +25,39 @@
 // ITEM NAMES ARE LIVE — hover for the EQ-style item window, click to drill into the item's own
 // loot history. That half lives in MobDropRow.tsx (`DropRow` / `ItemDrillDown`), which explains
 // why the loot module is subscribed only once an item is actually clicked.
+//
+// AND THE TABLE IS READ AGAINST THE ERA THE SERVER IS ON (JOS-377). The wiki's own mob page draws
+// an OUT OF ERA pill on each row whose item page is out of era; this page listed them plainly, so
+// Cazic Thule offered the seven-item Fear revamp table as loot you could go and get. Out-of-era
+// rows now sit behind a "+N out of era" disclosure, in-era and UNKNOWN rows render plainly, and
+// nothing is deleted — "the wiki lists it" and "it is not in era" are two facts and both stay
+// sayable (law 1). The verdict is the app's ONE era verdict, asked through `./dropEra.ts`.
+//
+// AN ITEM IS ONE LINE, WHATEVER `+N` IT CAME AS (JOS-196). Both drop sections read ONE fold —
+// `seenVariants.foldSeenVariants`, over JOS-66's `itemCountKey` — so your three `1×` rows for a
+// base, a `+1` and a `+2` are one `3×` line carrying a perceived rate over YOUR kills, with the
+// breakdown one click away. The same key decides section membership: an upgrade of a listed item
+// annotates that item's wiki row rather than reappearing under "also looted by you" as a find the
+// page failed to mention.
 
 import { type JSX, useEffect, useState } from 'react'
-import {
-  Box,
-  Chip,
-  CircularProgress,
-  Divider,
-  Paper,
-  Stack,
-  Typography
-} from '@mui/material'
-import type { MobDrop, MobEntry, MobKnowledge, MobQuestUse, MobSeenDrop } from '@shared/types'
+import { Chip, Divider, Paper, Stack, Typography } from '@mui/material'
+import type { KillMap, MobEntry, MobKnowledge, MobQuestUse } from '@shared/types'
+import { killsFor } from '@shared/kills'
 import { CONSIDER_FACTION_COLOR, CONSIDER_FACTION_LABEL, considerDifficultyShort } from '@shared/logEvents'
 import { wikiPageUrl } from '@shared/wiki'
 import { formatDate, formatDateTime } from '../../lib/formatDate'
 import { tierStyle } from '../../lib/tierChip'
-import { DropRow, ItemDrillDown } from './MobDropRow'
+import { outOfEraLabel } from './dropEra'
+import { ItemDrillDown, type OpenItem } from './MobDropRow'
+// The two DROP BLOCKS and the derivation behind them, split out at the 400-line ceiling when the
+// era fold landed (JOS-377). `Quiet` comes with them: the honest-empty-state vocabulary belongs to
+// the sections that had to invent it, and the quest/kill sections below borrow the one definition.
+import { AlsoLootedSection, DropsSection, dropSections, Quiet } from './MobDropsSection'
 import { knowledgeFromEntry } from './mobSearch'
+// The Resists card (JOS-382). Its own feature directory, not this one, because the con-tooltip
+// overlay mounts the very same component - see features/resists/ResistProfile.tsx.
+import { ResistProfile } from '../resists/ResistProfile'
 import type { MobConsiderContext, MobTarget } from './mobTarget'
 
 /** What the calling surface knew about your kills on this mob, when it knew anything. */
@@ -88,14 +104,46 @@ function useMobKnowledge(
   if (!entry) return { data: fetched, loading }
   const pinned = knowledgeFromEntry(entry)
   const data: MobKnowledge = fetched
-    ? { ...fetched, ...pinned, notFound: undefined }
+    ? pinIdentity(fetched, pinned)
     : { ...pinned, name: mob }
   return { data, loading }
 }
 
-function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }): JSX.Element {
+/**
+ * The pin, applied — and the ONE field the pin gives back (JOS-377).
+ *
+ * `knowledgeFromEntry` is the renderer's mirror of main's `knowledgeFromCatalog` over the identical
+ * JSON, and it cannot annotate a drop with its item's era: the 11k-item corpus that states one is
+ * main-only (`main/mobDropEra.ts`). So a pinned drop list would overwrite the annotated one with
+ * the same names carrying no evidence, and the era fold would answer off the catalog zones alone —
+ * which is exactly the witness a REVAMP defeats, i.e. the whole bug.
+ *
+ * When the lookup resolved THE SAME PAGE the pin names, the two lists are the same list and the
+ * fetched one is strictly better informed, so it wins. A different page means the pin is doing its
+ * real job (an EQ name can name nine creatures) and the catalog's list is the one asked for.
+ */
+function pinIdentity(fetched: MobKnowledge, pinned: MobKnowledge): MobKnowledge {
+  const data: MobKnowledge = { ...fetched, ...pinned, notFound: undefined }
+  if (fetched.page !== undefined && fetched.page === pinned.page && fetched.dropsWiki?.length) {
+    data.dropsWiki = fetched.dropsWiki
+  }
+  return data
+}
+
+function StatCard({
+  label,
+  value,
+  hint,
+  testId
+}: {
+  label: string
+  value: string
+  hint?: string
+  /** The two cards a spec reads: Kills (the number JOS-350 was about) and Known drops (JOS-377). */
+  testId?: string
+}): JSX.Element {
   return (
-    <Paper variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 110 }}>
+    <Paper variant="outlined" data-testid={testId} sx={{ p: 1.5, flex: 1, minWidth: 110 }}>
       <Typography variant="h5" sx={{ color: 'primary.main', lineHeight: 1.1 }}>
         {value}
       </Typography>
@@ -108,15 +156,6 @@ function StatCard({ label, value, hint }: { label: string; value: string; hint?:
         </Typography>
       )}
     </Paper>
-  )
-}
-
-/** A quiet, honest empty note — never a claim that a source said "nothing". */
-function Quiet({ children }: { children: React.ReactNode }): JSX.Element {
-  return (
-    <Typography variant="caption" color="text.disabled" display="block">
-      {children}
-    </Typography>
   )
 }
 
@@ -166,21 +205,38 @@ function MobConsiderLine({ con }: { con?: MobConsiderContext }): JSX.Element | n
   return (
     <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25, mb: 1.5 }}>
       {considerDifficultyShort(con.difficulty) ?? con.difficulty}
-      {con.difficulty && ` — “${con.difficulty}”`}
+      {con.difficulty && ` - “${con.difficulty}”`}
       {con.zone && ` · ${con.zone}`}
     </Typography>
   )
 }
 
+/**
+ * The tally the "Known drops" card states (JOS-377).
+ *
+ * THE HEADLINE NUMBER IS WHAT YOU CAN GO AND GET, because that is the question a drop count is
+ * asked. The other number is not deleted, it is stated beside it: 18 was never wrong about the
+ * wiki page, it was wrong about this server, and a card that silently said 11 would have replaced
+ * one bad answer with a quieter one.
+ */
+function dropCountHint(outCount: number, page?: string): string | undefined {
+  const source = page ? 'from the wiki page' : undefined
+  if (outCount === 0) return source
+  const era = `${outOfEraLabel(outCount)}, folded`
+  return source ? `${source} · ${era}` : era
+}
+
 /** The four-up tally strip: what the page lists, what you've seen, kills, considers. */
 function MobStats({
   wikiCount,
+  outCount,
   seenCount,
   page,
   con,
   kill
 }: {
   wikiCount: number
+  outCount: number
   seenCount: number
   page?: string
   con?: MobConsiderContext
@@ -188,10 +244,16 @@ function MobStats({
 }): JSX.Element {
   return (
     <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap sx={{ mb: 2, mt: con ? 0 : 1.5 }}>
-      <StatCard label="Known drops" value={String(wikiCount)} hint={page ? 'from the wiki page' : undefined} />
+      <StatCard
+        label="Known drops"
+        testId="mob-stat-drops"
+        value={String(wikiCount)}
+        hint={dropCountHint(outCount, page)}
+      />
       <StatCard label="Looted by you" value={String(seenCount)} hint="distinct items" />
       <StatCard
         label="Kills"
+        testId="mob-stat-kills"
         value={String(kill?.count ?? 0)}
         hint={kill?.lastTs ? `last ${formatDate(kill.lastTs)}` : undefined}
       />
@@ -211,103 +273,6 @@ function WikiLevelZone({ zone, levelText }: { zone?: string; levelText?: string 
       {zone && levelText && ' · '}
       {levelText && `level ${levelText}`}
     </Typography>
-  )
-}
-
-/**
- * What we say when the drop table is empty. Three DIFFERENT facts, never collapsed into one:
- * the lookup is still running, the wiki has no page, we could not reach the wiki, or the page
- * exists and genuinely lists no loot.
- */
-function DropsEmptyState({
-  data,
-  loading
-}: {
-  data: MobKnowledge | null
-  loading: boolean
-}): JSX.Element {
-  return (
-    <Box sx={{ mb: 2 }}>
-      {loading && !data && (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ color: 'text.secondary' }}>
-          <CircularProgress size={14} />
-          <Typography variant="caption">Looking up this mob…</Typography>
-        </Stack>
-      )}
-      {data?.notFound && <Quiet>No wiki page for this mob.</Quiet>}
-      {data?.offline && <Quiet>Offline — showing only what&apos;s known locally.</Quiet>}
-      {data && !data.notFound && !data.offline && data.page && (
-        <Quiet>The wiki page for this mob lists no loot.</Quiet>
-      )}
-    </Box>
-  )
-}
-
-/** ---- 1. DROPS (definitive) ---- */
-function DropsSection({
-  wiki,
-  seenByKey,
-  data,
-  loading,
-  onOpenItem
-}: {
-  wiki: MobDrop[]
-  seenByKey: Map<string, MobSeenDrop>
-  data: MobKnowledge | null
-  loading: boolean
-  onOpenItem: (item: string) => void
-}): JSX.Element {
-  return (
-    <>
-      <Typography variant="subtitle2" gutterBottom>
-        Drops{' '}
-        <Typography component="span" variant="caption" color="text.secondary">
-          (wiki drop table){wiki.length > 0 && ` · ${wiki.length}`}
-        </Typography>
-      </Typography>
-      {wiki.length > 0 ? (
-        <Box sx={{ mb: 2 }}>
-          {wiki.map((d) => (
-            <DropRow
-              key={d.item}
-              item={d.item}
-              rarity={d.rarity}
-              seen={seenByKey.get(d.item.toLowerCase())}
-              onOpenItem={onOpenItem}
-            />
-          ))}
-        </Box>
-      ) : (
-        <DropsEmptyState data={data} loading={loading} />
-      )}
-    </>
-  )
-}
-
-/** ---- 2. ALSO LOOTED BY YOU (corroboration the page doesn't list) ---- */
-function AlsoLootedSection({
-  extraSeen,
-  onOpenItem
-}: {
-  extraSeen: MobSeenDrop[]
-  onOpenItem: (item: string) => void
-}): JSX.Element | null {
-  if (extraSeen.length === 0) return null
-  return (
-    <>
-      <Divider sx={{ my: 1.5 }} />
-      <Typography variant="subtitle2" gutterBottom>
-        Also looted by you{' '}
-        <Typography component="span" variant="caption" color="text.secondary">
-          (not listed on the wiki page)
-        </Typography>
-      </Typography>
-      <Box sx={{ mb: 2 }}>
-        {extraSeen.map((d) => (
-          <DropRow key={d.item} item={d.item} seen={d} onOpenItem={onOpenItem} />
-        ))}
-      </Box>
-    </>
   )
 }
 
@@ -372,20 +337,32 @@ function WikiSourceLine({ wikiUrl }: { wikiUrl?: string }): JSX.Element | null {
   )
 }
 
-/** The mob page. `target` carries everything the calling surface already knew. */
-export function MobPage({ target }: { target: MobTarget }): JSX.Element {
-  const { mob, seed, entry, con, kill } = target
+/**
+ * The mob page. `target` carries everything the calling surface already knew; `kills` is the
+ * kills module's join index (`shared/kills.killIndex`), which the page reads for ITSELF.
+ *
+ * THE KILL COUNT IS THE PAGE'S OWN JOIN NOW (JOS-350). It used to be `target.kill` and nothing
+ * else, so a surface that forgot to attach one — the Overview's Target card, its Recent-kills
+ * rows, the Sky droppers, the events overlay's deep link — opened this page reading `Kills 0`
+ * for a mob the Mobs tab counted correctly. That is a join every caller had to remember, keyed
+ * four different inline ways; now there is one, and `killsFor` folds the spawn-generation
+ * ` (N)` suffix that the combat-fed names carry and no kill record ever has.
+ *
+ * `target.kill` SURVIVES as an explicit OVERRIDE, for the one caller that resolves a DIFFERENT
+ * identity than this page's name would: the raid roster matches its targets article-insensitively
+ * (bossStatus.ts), so it pins the record it matched, exactly as `entry` pins the identity half.
+ */
+export function MobPage({ target, kills }: { target: MobTarget; kills: KillMap }): JSX.Element {
+  const { mob, seed, entry, con } = target
+  const kill = target.kill ?? killsFor(kills, mob)
   const { data, loading } = useMobKnowledge(mob, seed, entry)
-  const [drillItem, setDrillItem] = useState<string | null>(null)
+  const [drill, setDrill] = useState<{ item: string; family: boolean } | null>(null)
+  const openItem: OpenItem = (item, family) => {
+    setDrill({ item, family: family === true })
+  }
 
-  const wiki = data?.dropsWiki ?? []
-  const seen = data?.dropsSeen ?? []
+  const { wiki, outOfEra, lines, byKey, extra } = dropSections(data)
   const quests = data?.quests ?? []
-  const seenByKey = new Map(seen.map((d) => [d.item.toLowerCase(), d]))
-  // Observed items the wiki page does NOT list. Kept separate and second: it is evidence, not
-  // the drop table, and silently merging it would let one lucky drop read as documented loot.
-  const wikiKeys = new Set(wiki.map((d) => d.item.toLowerCase()))
-  const extraSeen = seen.filter((d) => !wikiKeys.has(d.item.toLowerCase()))
   const wikiUrl = wikiPageUrl(data?.page)
 
   return (
@@ -394,7 +371,8 @@ export function MobPage({ target }: { target: MobTarget }): JSX.Element {
       <MobConsiderLine con={con} />
       <MobStats
         wikiCount={wiki.length}
-        seenCount={seen.length}
+        outCount={outOfEra.length}
+        seenCount={lines.length}
         page={data?.page}
         con={con}
         kill={kill}
@@ -402,18 +380,24 @@ export function MobPage({ target }: { target: MobTarget }): JSX.Element {
       <WikiLevelZone zone={data?.zone} levelText={data?.levelText} />
       <DropsSection
         wiki={wiki}
-        seenByKey={seenByKey}
+        outOfEra={outOfEra}
+        seenByKey={byKey}
+        kills={kill?.count}
         data={data}
         loading={loading}
-        onOpenItem={setDrillItem}
+        onOpenItem={openItem}
       />
-      <AlsoLootedSection extraSeen={extraSeen} onOpenItem={setDrillItem} />
+      <AlsoLootedSection extraSeen={extra} kills={kill?.count} onOpenItem={openItem} />
       <QuestsSection quests={quests} />
       <KillsSection kill={kill} />
+      {/* ---- 5. RESISTS ---- what it shrugs off and what it does not, mined from the logs. */}
+      <ResistProfile mob={mob} />
       <WikiSourceLine wikiUrl={wikiUrl} />
 
       {/* One hop deep: the item's own dialog. Mounted only on demand (see ItemDrillDown). */}
-      {drillItem && <ItemDrillDown item={drillItem} onClose={() => setDrillItem(null)} />}
+      {drill && (
+        <ItemDrillDown item={drill.item} family={drill.family} onClose={() => setDrill(null)} />
+      )}
     </>
   )
 }

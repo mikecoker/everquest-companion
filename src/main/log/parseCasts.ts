@@ -4,8 +4,9 @@
 // DB-gated message-driven buff events, and — matched LAST of all — spell-landing emotes.
 // Every regex, table and comment here is verbatim from the single-pass parser.
 
-import type { LogEvent, PetSayKind } from '../../shared/logEvents'
+import type { CcVerb, LogEvent, PetSayKind } from '../../shared/logEvents'
 import { PET_LEADER_RE, PET_SAY_LINES, PET_SAY_RE } from '../../shared/logScrub'
+import { isPlayerShapedName } from '../../shared/playerShape'
 import type { PoisonProcDef } from '../../shared/poisons'
 import { POISON_BY_COAT_MSG, POISON_DRY_MSG, POISON_PROCS } from '../../shared/poisons'
 import { matchCastOnOtherSuffix } from '../data/spellDb'
@@ -18,7 +19,16 @@ const UNCHARM_RE = /^Your (.+?) spell has worn off of (.+?)\.$/
 // siblings. Charm is handled separately (CHARM_RE); the DoT-application shapes
 // (poisoned/diseased) and unrelated spell notices (smitten/overwritten) are NOT CC
 // and are excluded. `ensnared` is a root (a hold), so it counts.
-const CC_APPLY_RE = /^(.+?) has been (?:mesmerized|enthralled|entranced|ensnared)\.$/
+// The verb is CAPTURED since JOS-228: three of these four sentences describe a hold that damage
+// breaks and one does not, and the model needs the word to tell a corpse it can explain from one
+// it cannot (`CcEvent.verb` states the whole argument).
+const CC_APPLY_RE = /^(.+?) has been (mesmerized|enthralled|entranced|ensnared)\.$/
+// The CC BREAK ANNOTATION (JOS-180): "<mob> has been awakened by <name>." — one shape, measured
+// over the whole log (1,518 occurrences, zero variants; `by` is the player 1,364 times, a group
+// member or a mob for the rest). It was `{kind:'unknown'}` before this rule existed, so it can
+// neither shadow nor be shadowed. Anchored end-to-end so the zone name `The Plane of Fear - Solo 1
+// (Awakened)` and the mob tier suffix `(Awakened)` cannot reach it.
+const CC_WAKE_RE = /^(.+?) has been awakened by (.+?)\.$/
 // Pet-ownership claim (direct tell). Two phrasings, both pet-only in the real log:
 //   "<Name> told you, 'Attacking <target> Master.'"
 //   "<Name> told you, 'I am unable to wake <mob>, Master.'"
@@ -45,11 +55,24 @@ const SAY_KIND_BY_TEXT = new Map<string, PetSayKind>(PET_SAY_LINES.map(([k, s]) 
 //   "Your pet's <Spell> spell has worn off."  (buff the player cast on their pet expired)
 // The worn-off-OF-<mob> shape (charm/mez) is handled earlier by uncharm/cc; these
 // TARGETLESS forms are never charm/cc, so buffFade is a pure fallthrough with no
-// overlap. "You regain your concentration…" is a recovered cast — deliberately NOT
-// treated as an interrupt.
-const CAST_BEGIN_RE = /^You begin (?:casting|singing) (.+?)\.$/
+// overlap. "You regain your concentration…" is a recovered cast — never treated as an
+// interrupt; it is its own `castResumed` kind (JOS-167), because a cast that recovers still
+// lands and the proc detector has to be able to put back the record the interrupt took away.
+// The verb is CAPTURED, not discarded (JOS-382): "singing" is the only statement anywhere in this
+// app's inputs that a spell is a bard song, and a song re-rolls resistance every 6-second pulse
+// where a cast rolls once. See CastBeginEvent.sung.
+const CAST_BEGIN_RE = /^You begin (casting|singing) (.+?)\.$/
+// THIRD-PERSON cast (JOS-140): "<Name> begins casting <Spell>." — the only line that says who else
+// is casting what, and therefore the only thing that can ANCHOR a landing sentence to an
+// allowlisted external caster. The subject is a name-shaped token (EQ names carry spaces,
+// apostrophes and backticks: "Lord Nagafen", "Innoruuk`s Chosen"); the verb is third-person so
+// "You begin casting" cannot reach it, and the first-person branch above runs first anyway.
+const OTHER_CAST_BEGIN_RE = /^(.+?) begins (?:casting|singing) (.+?)\.$/
 const CAST_FIZZLE_RE = /^Your (.+?) spell fizzles!$/
 const CAST_INTERRUPT_RE = /^Your (.+?) spell is interrupted\.$/
+// The interrupt's counterpart (JOS-167): the cast recovered and WILL land. One exact sentence in
+// the whole log — matched as an equality, never as a /concentration/ pattern.
+const CAST_RESUMED_LINE = 'You regain your concentration and continue your casting.'
 // Targetless worn-off (no " of <mob>"): self-cast or pet-cast buff expiry.
 const BUFF_FADE_PET_RE = /^Your pet's (.+?) spell has worn off\.$/
 const BUFF_FADE_SELF_RE = /^Your (.+?) spell has worn off\.$/
@@ -74,6 +97,22 @@ const AA_ACTIVATE_RE = /^You activate (.+?)\.$/
 // The article ("a"/"an") is dropped from the stance name; names are lowercased.
 const STANCE_RE = /^You assume an? (.+?) stance\.$/
 const INVOCATION_RE = /^You begin reciting the (.+?) invocation\.$/
+
+// ----- WHAT IS IN YOUR GEMS (JOS-391) -----
+// Four shapes, all four MEASURED `{kind:'unknown'}` over the owner's 2,048,450-line log before
+// this existed (4,321 / 4,285 / 4,232 / 474), so this family can neither shadow nor be shadowed:
+//   `Beginning to memorize Heat Blood...`         the gem is being loaded
+//   `You have finished memorizing Heat Blood.`    the gem IS loaded
+//   `You forget Symbol of Transal.`               the gem is empty
+//   `Spell set primary loaded.`  / `saved.` / `deleted.`
+// Each regex is anchored at both ends and the name capture is permissive, because spell names
+// carry apostrophes and commas (`Denon's Disruptive Discord`) and SET names carry spaces and
+// digits (`sham rang buff 2`). The three verbs are an alternation rather than a `(.+?)` so an
+// unknown fifth verb stays `unknown` instead of arriving as a mystery action.
+const MEMORIZE_BEGIN_RE = /^Beginning to memorize (.+?)\.\.\.$/
+const MEMORIZE_DONE_RE = /^You have finished memorizing (.+?)\.$/
+const FORGET_RE = /^You forget (.+?)\.$/
+const SPELL_SET_RE = /^Spell set (.+?) (saved|loaded|deleted)\.$/
 
 // ----- spell-landing emotes (Task #33): the cast-target discriminator -----
 // EQ prints a short flavor line the instant a buff lands. Two forms:
@@ -153,11 +192,37 @@ const POISON_PROC_BY_LAST_WORD = ((): ReadonlyMap<string, PoisonProcDef[]> => {
   return m
 })()
 
+/**
+ * `You begin casting|singing <Spell>.` — the player's own cast, with the VERB kept (JOS-382).
+ * Its own function because the sung/cast branch is one decision too many for the cascade arm it
+ * used to live in, and because "which verb did the log print" is a question worth a name.
+ */
+function ownCastBegin(c: ClassifyCtx): LogEvent | null {
+  const { text, ts, seq, raw } = c
+  const m = CAST_BEGIN_RE.exec(text)
+  if (!m) return null
+  const spell = m[2].trim()
+  // Absent rather than false for a cast: an optional present only when it says something keeps
+  // every existing golden and every existing consumer byte-identical.
+  return m[1] === 'singing'
+    ? { kind: 'castBegin', seq, ts, raw, spell, sung: true }
+    : { kind: 'castBegin', seq, ts, raw, spell }
+}
+
 /** Cast lifecycle (Task #19): begin / fizzle / interrupt (player's own casts). */
-export function classifyCastLifecycle({ text, ts, seq, raw }: ClassifyCtx): LogEvent | null {
+export function classifyCastLifecycle(c: ClassifyCtx): LogEvent | null {
+  const { text, ts, seq, raw } = c
   if (text.startsWith('You begin ')) {
-    const m = CAST_BEGIN_RE.exec(text)
-    if (m) return { kind: 'castBegin', seq, ts, raw, spell: m[1].trim() }
+    const own = ownCastBegin(c)
+    if (own) return own
+  }
+  if (text.includes(' begins casting ') || text.includes(' begins singing ')) {
+    const m = OTHER_CAST_BEGIN_RE.exec(text)
+    // `idKey(m[1]) !== 'you'` mirrors classifySpellEmote's guard: the first-person branch above
+    // owns every line about the player, and a subject that folds to "you" is never somebody else.
+    if (m && idKey(m[1]) !== 'you') {
+      return { kind: 'otherCastBegin', seq, ts, raw, caster: norm(m[1]), spell: m[2].trim() }
+    }
   }
   if (text.includes('spell fizzles!')) {
     const m = CAST_FIZZLE_RE.exec(text)
@@ -169,16 +234,85 @@ export function classifyCastLifecycle({ text, ts, seq, raw }: ClassifyCtx): LogE
     const m = CAST_INTERRUPT_RE.exec(text)
     if (m) return { kind: 'castInterrupted', seq, ts, raw, spell: m[1].trim() }
   }
+  // The RECOVERY (JOS-167). Exact sentence, no capture: it names no spell, and casting is
+  // serial, so the only cast it can be about is the one just interrupted. See CastResumedEvent
+  // for the measurement that made it load-bearing.
+  if (text === CAST_RESUMED_LINE) return { kind: 'castResumed', seq, ts, raw }
   return null
 }
 
-/** Charm application — the first half of the charm lifecycle. */
-export function classifyCharm({ text, ts, seq, raw }: ClassifyCtx): LogEvent | null {
+/**
+ * Charm application — the first half of the charm lifecycle.
+ *
+ * THE CANDIDATE LIST (JOS-140), on exactly the argument `classifyCcApply` below already makes:
+ * charm is a detrimental HOLD, the owner wants its countdown, and `<mob> has been charmed.` is
+ * seven spells in the committed DB with durations from 48 s to 19 minutes. Purely additive — the
+ * branch is gated on a spell DB being installed, so with no DB the event is byte-identical to what
+ * it was, and `mob` is untouched either way.
+ */
+export function classifyCharm({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEvent | null {
   if (text.includes('has been charmed')) {
     const m = CHARM_RE.exec(text)
-    if (m) return { kind: 'charm', seq, ts, raw, mob: norm(m[1]) }
+    if (!m) return null
+    const db = cfg.spellDb
+    const cands = db ? matchCastOnOtherSuffix(text, db)?.entry.cands : undefined
+    return {
+      kind: 'charm',
+      seq,
+      ts,
+      raw,
+      mob: norm(m[1]),
+      ...(cands ? { candidates: cands.map((s) => ({ name: s.name, durationMs: s.durationMs })) } : {})
+    }
   }
-  return null
+  return classifyNonEnchanterCharm({ text, ts, seq, raw, cfg })
+}
+
+/**
+ * THE OTHER TWO CHARM LANDINGS (JOS-250 charm roster research 2026-08-12) —
+ * `<mob> blinks.` (Druid/Shaman) and `<mob> moans.` (Necromancer charm-undead).
+ *
+ * `<mob> has been charmed.` is the ENCHANTER family and nothing else, which quietly made every
+ * charm inference in this app enchanter-only: the charm hold (JOS-140), the ownership model
+ * (Task #65) and the ally attribution (JOS-250) all key off the `charm` EVENT, and a druid's
+ * charm never produced one. A druid charming for your group contributed exactly as much as they
+ * did before any of that work existed.
+ *
+ * THE ADMISSION TEST IS THE FAMILY'S PURITY, NOT THE SENTENCE. These two lines are far more
+ * generic than "has been charmed", so the rule refuses unless the DB's own candidate list for the
+ * matched suffix is entirely charm-family (`cfg.charmSpell`, the audited roster). Measured in the
+ * committed spells.json: `Someone blinks.` is 7/7 castable charms (Befriend Animal 13 → Tunare`s
+ * Request 55) and `Someone moans.` is 5/5 (Dominate Undead 18 → Enslave Death 60). If a future
+ * scrape puts a non-charm under either sentence, the purity test fails and the line falls through
+ * to `classifyDbBuff` exactly as it does today — the rule shrinks itself rather than misfiling.
+ *
+ * DB-GATED, so with no spell DB installed this branch cannot fire and the parser is byte-identical
+ * to what it was — the same construction `classifyCcApply`'s and `classifyCharm`'s candidate lists
+ * already use.
+ *
+ * IT SHADOWS `classifyDbBuff` FOR THESE LINES, on purpose: they used to parse as `buffApply` with
+ * the same candidate list, which no consumer routed anywhere (none is in DISPEL_FAMILY,
+ * PROC_BUFF_CATALOG, SELF_LANDING_PROCS or PET_TARGET_SPELLS). MEASURED before making the swap:
+ * the owner's whole log holds ZERO lines ending ` blinks.` or ` moans.`, and so does every
+ * committed fixture — so this rule is STRUCTURALLY covered, changes not one number in any golden,
+ * and is the awaiting-sample law's "say which" rather than a claim of verification.
+ */
+function classifyNonEnchanterCharm({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEvent | null {
+  if (!text.endsWith(' blinks.') && !text.endsWith(' moans.')) return null
+  const db = cfg.spellDb
+  if (!db) return null
+  const hit = matchCastOnOtherSuffix(text, db)
+  if (!hit) return null
+  const cands = hit.entry.cands
+  if (cands.length === 0 || !cands.every((s) => cfg.charmSpell.test(s.name))) return null
+  return {
+    kind: 'charm',
+    seq,
+    ts,
+    raw,
+    mob: norm(hit.target),
+    candidates: cands.map((s) => ({ name: s.name, durationMs: s.durationMs }))
+  }
 }
 
 /**
@@ -192,7 +326,11 @@ export function classifyWornOff({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEv
       // A charm spell wearing off retires the pet (uncharm). A MEZ/ROOT spell wearing
       // off is instead a CC keep-alive refresh — the mob was held right up to now.
       // Charm/cc precedence is UNCHANGED (regression-gated).
-      if (cfg.charmSpell.test(m[1])) return { kind: 'uncharm', seq, ts, raw, mob: norm(m[2]) }
+      // `spell` is carried since JOS-140: the charm hold it ends is keyed by LINE, and this is the
+      // line that names it. (The capture is unchanged — it was simply discarded before.)
+      if (cfg.charmSpell.test(m[1])) {
+        return { kind: 'uncharm', seq, ts, raw, mob: norm(m[2]), spell: m[1].trim() }
+      }
       if (cfg.ccSpell.test(m[1])) return { kind: 'cc', seq, ts, raw, mob: norm(m[2]), spell: m[1].trim(), refresh: true }
       // NAMED-TARGET buff fade (Task #30): a NON-charm, NON-cc spell wearing off OF a
       // named target is a real buff the player cast on that target (e.g. a pet buff
@@ -215,13 +353,62 @@ export function classifyWornOff({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEv
   return null
 }
 
-/** Crowd-control application (mez/root, not charm). */
-export function classifyCcApply({ text, ts, seq, raw }: ClassifyCtx): LogEvent | null {
+/**
+ * Crowd-control application (mez/root, not charm).
+ *
+ * THE CANDIDATE LIST (JOS-89). This classifier sits ABOVE `classifyDbBuff` in the cascade, so
+ * for the four sentences it claims the DB matcher never runs and the candidate list a `buffApply`
+ * would have carried was lost entirely — leaving `cc` naming a mob and nothing else, which is why
+ * no consumer could ever put a spell (or a duration) on a mez. It now runs the SAME cast-on-other
+ * suffix lookup `classifyDbBuff` uses and carries what it finds. Purely additive: the branch is
+ * gated on a spell DB being installed (`cfg.spellDb`), so with no DB the event is byte-identical
+ * to what it was, and `mob` — the only field anything depended on — is untouched either way.
+ *
+ * It is a LIST and never a name: `has been mesmerized.` is four spells with three different
+ * stated durations. Narrowing it is the model's job (world-model law 3).
+ */
+export function classifyCcApply({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEvent | null {
   if (text.includes('has been ')) {
     const m = CC_APPLY_RE.exec(text)
-    if (m) return { kind: 'cc', seq, ts, raw, mob: norm(m[1]) }
+    if (!m) return null
+    const db = cfg.spellDb
+    const cands = db ? matchCastOnOtherSuffix(text, db)?.entry.cands : undefined
+    return {
+      kind: 'cc',
+      seq,
+      ts,
+      raw,
+      mob: norm(m[1]),
+      verb: m[2] as CcVerb,
+      ...(cands ? { candidates: cands.map((s) => ({ name: s.name, durationMs: s.durationMs })) } : {})
+    }
   }
   return null
+}
+
+/**
+ * The CROWD-CONTROL BREAK (JOS-180) — `<mob> has been awakened by <name>.`
+ *
+ * WHY THE PARSER CARRIES IT. `Your <S> spell has worn off of <mob>.` is the same sentence whether
+ * the mez ran its course or a nuke ended it two seconds in, and the duration learner cannot tell
+ * those apart from the wear-off alone — which is the whole of JOS-180's trap (a learner fed break
+ * spans settles below the real duration, culls every full-length hold before its wear-off arrives,
+ * and can never climb back out). This line is the only thing in the log that names the difference.
+ *
+ * IT CLOSES NOTHING, AND THE MEASUREMENT IS WHY (see CcWakeEvent for the full tally): the wear-off
+ * line always comes FIRST and in the same second, so by the time this arrives the hold is already
+ * closed and its sample already minted. The consumer's job is to go back and mark that sample
+ * CENSORED, never to end a second thing.
+ *
+ * It sits directly beneath `classifyCcApply` — the same family, the other end of the hold — and
+ * beneath rather than above so the four APPLICATION sentences are always offered to the
+ * application rule first. Neither can shadow the other (`awakened` is in neither pattern).
+ */
+export function classifyCcWake({ text, ts, seq, raw }: ClassifyCtx): LogEvent | null {
+  if (!text.includes(' has been awakened by ')) return null
+  const m = CC_WAKE_RE.exec(text)
+  if (!m) return null
+  return { kind: 'ccWake', seq, ts, raw, mob: norm(m[1]), by: norm(m[2]) }
 }
 
 /** Pet-ownership claim (direct tell ⇒ the named entity is your pet). */
@@ -281,6 +468,46 @@ export function classifyPetLeader({ text, ts, seq, raw, cfg }: ClassifyCtx): Log
 }
 
 /**
+ * THE SAME ANSWER, ABOUT SOMEBODY ELSE (JOS-250) — `<PetName> says, 'My leader is <Player>.'`
+ * where `<Player>` is NOT the tailed character.
+ *
+ * `classifyPetLeader` above declines these, on purpose and correctly: nothing in this app used to
+ * have a use for a stranger's pet, and a `petClaim` naming one would have been bound to YOU by
+ * five different models. JOS-250 gives it a use — the ally-charm attribution model, which credits
+ * a third party's charm pet to that third party and never to you — so the line gets its OWN kind
+ * (`allyPetLeader`) rather than a flag on the one everything else reads.
+ *
+ * IT MUST RUN AFTER `classifyPetLeader`, which is why it sits directly beneath it in the cascade:
+ * the two are the same sentence and are separated only by WHOSE name is in the second capture, so
+ * the self rule has to be offered the line first or your own pet would arrive as a stranger's.
+ *
+ * THE CHARACTER NAME IS STILL LOAD-BEARING even though this rule refuses it. With no character
+ * installed, `classifyPetLeader` declines EVERY line (its own safe default), so without this guard
+ * this rule would claim the user's own `/pet who leader` answer and file the user's own pet as an
+ * ally's. Declining while the name is unknown keeps the pair's precedence honest in both states.
+ *
+ * THE LEADER MUST BE PLAYER-SHAPED (shared/playerShape.ts). `says` is a broadcast channel and the
+ * whole log's mob speech goes through it; a leader capture that admitted `a fire giant warrior`
+ * would invent a charmer out of a growl.
+ *
+ * NO REAL THIRD-PARTY OCCURRENCE EXISTS IN THE OWNER'S LOG (whole-log sweep, 1,608,483 lines,
+ * 2026-08-12: one `says, 'My leader is …'` line in total, and it names the owner). See
+ * `AllyPetLeaderEvent` for what that means for the evidence standing behind this rule.
+ */
+export function classifyAllyPetLeader({ text, ts, seq, raw, cfg }: ClassifyCtx): LogEvent | null {
+  const self = cfg.characterName
+  if (self === undefined || self === '' || !text.includes(" says, 'My leader is ")) return null
+  const m = PET_LEADER_RE.exec(text)
+  if (!m) return null
+  const owner = m[2]
+  // The self form belongs to classifyPetLeader (which ran first); restated here so the two rules
+  // cannot both claim a line if the cascade is ever reordered.
+  if (owner.toLowerCase() === self.trim().toLowerCase()) return null
+  if (!isPlayerShapedName(owner)) return null
+  return { kind: 'allyPetLeader', seq, ts, raw, pet: norm(m[1]), owner: norm(owner) }
+}
+
+/**
  * A pet's PUBLIC response (JOS-47) — `<Name> says, '<one of six>'`.
  *
  * NOT a claim, and the two classifiers sit next to each other so that stays obvious: `told you`
@@ -320,6 +547,40 @@ export function classifyStance({ text, ts, seq, raw }: ClassifyCtx): LogEvent | 
   if (text.startsWith('You begin reciting ')) {
     const m = INVOCATION_RE.exec(text)
     if (m) return { kind: 'invocationChange', seq, ts, raw, invocation: m[1].trim().toLowerCase() }
+  }
+  return null
+}
+
+/**
+ * WHAT IS IN YOUR GEMS (JOS-391) — the memorize / forget / spell-set family.
+ *
+ * ONE CLASSIFIER FOR FOUR SHAPES because they are one subject and one consumer
+ * (`src/main/modules/spellSets.ts`), and because the three cheap prefix probes below run on
+ * every line of a two-million-line replay: the regexes only execute for a line that already
+ * starts with the right words.
+ *
+ * THE MEMORIZE LINES STAY SUPPRESSED WHERE THEY WERE SUPPRESSED (buffsShapes.ts
+ * `CASTING_SYSTEM_RE`). That module is the landing-message MINER and these lines are not spell
+ * landings — a coincidental burst pairing on `You forget Center.` would teach the overlay a
+ * message for a spell that just left the bar. Parsing them into events here and refusing them
+ * there are the same decision from two sides: the miner is not the consumer.
+ */
+export function classifySpellGems({ text, ts, seq, raw }: ClassifyCtx): LogEvent | null {
+  if (text.startsWith('You forget ')) {
+    const m = FORGET_RE.exec(text)
+    return m ? { kind: 'spellForget', seq, ts, raw, spell: m[1].trim() } : null
+  }
+  if (text.startsWith('You have finished memorizing ')) {
+    const m = MEMORIZE_DONE_RE.exec(text)
+    return m ? { kind: 'spellMemorize', seq, ts, raw, spell: m[1].trim(), done: true } : null
+  }
+  if (text.startsWith('Beginning to memorize ')) {
+    const m = MEMORIZE_BEGIN_RE.exec(text)
+    return m ? { kind: 'spellMemorize', seq, ts, raw, spell: m[1].trim(), done: false } : null
+  }
+  if (text.startsWith('Spell set ')) {
+    const m = SPELL_SET_RE.exec(text)
+    if (m) return { kind: 'spellSet', seq, ts, raw, set: m[1].trim(), action: m[2] as 'saved' | 'loaded' | 'deleted' }
   }
   return null
 }

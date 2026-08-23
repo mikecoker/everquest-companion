@@ -6,8 +6,20 @@
 // one: the contract plus its validators is past the repo's 400-code-line factoring ceiling, and
 // the answer to that here is a split, not a widened threshold (the same call
 // `storeMigrationsPresence.test.mts` and `appHarness.mts` made). Nothing else changes — this is
-// still ONE definition of what an event may be, spelled across two files that only ever move
-// together.
+// still ONE definition of what an event may be, spelled across FIVE files that only ever move
+// together:
+//
+//   telemetry.ts                 the contract: the union, the enums, the buckets, the patterns
+//   telemetryValidate.ts         THIS FILE — the dispatch table and eight of the eleven validators
+//   telemetryValidateBase.ts     the seven primitives every validator is built from
+//   telemetryValidateError.ts    `errorReport`, the one event whose strings are pattern-bound
+//                                rather than enum-bound (JOS-100)
+//   telemetryValidateSession.ts  the three SESSION reports — the events that carry OPTIONAL
+//                                RIDERS, which is a rule of its own (JOS-208 phase 3)
+//
+// The last three were split out as `errorReport`, and then the checkpoint counters, pushed this
+// file past the same ceiling; all three are re-exported or re-imported from here so no importer
+// anywhere had to change.
 //
 // WHO RUNS THESE, AND WHY ALL THREE:
 //   * the renderer's `track()` shim — so a mistake is caught where it was made;
@@ -21,30 +33,36 @@
 // property simply never appears in the value that comes back. `tests/telemetryContract.test.mts`
 // pins exactly that.
 //
-// PURE, like the contract: zero imports beyond `./telemetry`, total (every failure is a typed
-// value), and side-effect free (nothing throws, and the same input always gives the same
-// answer).
+// PURE, like the contract: total (every failure is a typed value) and side-effect free (nothing
+// throws, and the same input always gives the same answer). The deepest import chain in the set
+// reaches `./errorReport` → `./sanitizeText`, and both are import-free-or-nearly-so on purpose:
+// this module bundles into the ingest Lambda, and the server's defense-in-depth check IS
+// re-running the client's redactor, which means the redactor has to be reachable from here.
 
 import {
   ALERT_COUNT_EDGES,
   APP_VERSION_RE,
   CHAR_COUNT_EDGES,
-  COLD_START_MS_EDGES,
+  CPU_COUNT_EDGES,
+  DISPLAY_COUNT_EDGES,
   isTelemetryObject,
   LOG_SIZE_BYTES_EDGES,
   MAX_BATCH_EVENTS,
   MAX_COUNT,
   MAX_DURATION_MS,
-  MAX_REPLAY_EVENTS,
   MAX_TZ_OFFSET_HOURS,
   MIN_TZ_OFFSET_HOURS,
+  PRIMARY_SCALE_EDGES,
   TELEMETRY_API_VERSION,
   TELEMETRY_CHANNELS,
   TELEMETRY_EVENT_KINDS,
+  TELEMETRY_EQ_WINDOW_MODES,
   TELEMETRY_FAILURE_CLASSES,
   TELEMETRY_FEATURES,
   TELEMETRY_FUNNELS,
   TELEMETRY_FUNNEL_STEPS,
+  TELEMETRY_GPU_COMPOSITING,
+  TELEMETRY_GPU_VENDORS,
   TELEMETRY_OUTCOMES,
   TELEMETRY_OVERLAY_KINDS,
   TELEMETRY_PLATFORMS,
@@ -52,168 +70,51 @@ import {
   TELEMETRY_UPDATE_STEPS,
   TELEMETRY_VIEWS,
   TELEMETRY_VOICE_ENGINES,
+  TOTAL_MEM_GB_EDGES,
   UUID_V4_RE,
   type EvFunnelStep,
-  type EvSessionEnd,
-  type EvSessionHeartbeat,
+  type EvHealthCounters,
+  type EvSetupSnapshot,
   type EvUpdateOutcome,
-  type StartupReplayStats,
   type TelemetryBatch,
   type TelemetryEnvelope,
+  type TelemetryEqWindowMode,
   type TelemetryEvent,
   type TelemetryEventKind,
+  type TelemetryGpuCompositing,
+  type TelemetryGpuVendor,
   type TelemetryOverlayKind,
   type TelemetryRecord
 } from './telemetry'
+// THE PRIMITIVES live in `./telemetryValidateBase.ts` and the ERROR REPORT's validator in
+// `./telemetryValidateError.ts` — both split out of this file when JOS-100 pushed it past the
+// repo's 400-code-line ceiling, and both re-exported below so every existing importer of this
+// module keeps working unchanged. `Validated` and `TelemetryValidationFailure` are named by
+// callers across main, the renderer, the CLI and the Lambda; moving them behind a new import
+// path would have been a rename dressed up as a factoring.
+import {
+  bucket,
+  fail,
+  flag,
+  matching,
+  oneOf,
+  signedInt,
+  whole,
+  type TelemetryValidationFailure,
+  type Validated
+} from './telemetryValidateBase'
+import { validateErrorReport } from './telemetryValidateError'
+// …and the three SESSION reports in `./telemetryValidateSession.ts`, split out when JOS-208
+// phase 3's checkpoint counters pushed this file past the same ceiling. The cut is by subject: they
+// are the events that carry OPTIONAL RIDERS, which is a rule of its own and now has a file to state
+// it in. Same re-export discipline as the other two, so nothing that imports this module changed.
+import { vSessionEnd, vSessionHeartbeat, vSessionStart } from './telemetryValidateSession'
 
-export interface TelemetryValidationFailure {
-  ok: false
-  error: 'invalid_event'
-  /** Safe to render verbatim: it names the field and the legal values, nothing internal. */
-  message: string
-  /** Dotted path of the offending field. */
-  field: string
-}
-
-export type Validated<T> = { ok: true; value: T } | TelemetryValidationFailure
-
-const fail = (field: string, message: string): TelemetryValidationFailure => ({
-  ok: false,
-  error: 'invalid_event',
-  message,
-  field
-})
-
-function oneOf<T extends string>(
-  raw: unknown,
-  field: string,
-  allowed: readonly T[]
-): Validated<T> {
-  if (typeof raw === 'string' && (allowed as readonly string[]).includes(raw)) {
-    return { ok: true, value: raw as T }
-  }
-  return fail(field, `${field} must be one of: ${allowed.join(', ')}.`)
-}
-
-/** A whole number in `[0, max]`. Every count and every duration in the schema goes through it. */
-function whole(raw: unknown, field: string, max: number): Validated<number> {
-  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0 || raw > max) {
-    return fail(field, `${field} must be a whole number between 0 and ${max}.`)
-  }
-  return { ok: true, value: raw }
-}
-
-/** A bucket INDEX for `edges` — `0 .. edges.length`. */
-function bucket(raw: unknown, field: string, edges: readonly number[]): Validated<number> {
-  return whole(raw, field, edges.length)
-}
-
-function flag(raw: unknown, field: string): Validated<boolean> {
-  if (typeof raw !== 'boolean') return fail(field, `${field} must be true or false.`)
-  return { ok: true, value: raw }
-}
-
-function matching(raw: unknown, field: string, re: RegExp, what: string): Validated<string> {
-  if (typeof raw === 'string' && re.test(raw)) return { ok: true, value: raw }
-  return fail(field, `${field} must be ${what}.`)
-}
-
-/** An integer in `[min, max]` (the one signed field: the timezone bucket). */
-function signedInt(raw: unknown, field: string, min: number, max: number): Validated<number> {
-  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < min || raw > max) {
-    return fail(field, `${field} must be a whole number between ${min} and ${max}.`)
-  }
-  return { ok: true, value: raw }
-}
+export type { TelemetryValidationFailure, Validated }
 
 // --- one validator per event kind. Small on purpose: the dispatch table below is the only
 // --- place that knows which is which, so adding an event is one interface + one entry + one
 // --- doc row (and the doc-parity test fails until the row exists).
-
-function vSessionStart(o: Record<string, unknown>): Validated<TelemetryEvent> {
-  const b = bucket(o.coldStartMsBucket, 'coldStartMsBucket', COLD_START_MS_EDGES)
-  return b.ok ? { ok: true, value: { t: 'sessionStart', coldStartMsBucket: b.value } } : b
-}
-
-/**
- * `linesParsed`, which both session-report events carry OPTIONALLY (the additive-field rule in
- * `./telemetry.ts`). Absent and null both mean "nothing to add", exactly as they do for
- * `failureClass` — an older client, or one whose parser never ran, simply does not send it.
- */
-function optionalLines(o: Record<string, unknown>): Validated<number | undefined> {
-  if (o.linesParsed === undefined || o.linesParsed === null) return { ok: true, value: undefined }
-  return whole(o.linesParsed, 'linesParsed', MAX_COUNT)
-}
-
-/**
- * The startup replay reading (JOS-57), which both session reports carry OPTIONALLY under the same
- * additive-field rule as `linesParsed` — absent and null both mean "no reading in this one".
- *
- * ALL SIX FIELDS OR NONE. A partial reading is refused rather than repaired, because every number
- * in it describes the SAME seconds and a duty with no wall clock beside it (or a block count with
- * no worst block) is not a smaller measurement, it is an uninterpretable one. Constructed field by
- * field like every other validator here, so nothing that is not in the schema survives the trip.
- */
-function optionalStartup(o: Record<string, unknown>): Validated<StartupReplayStats | undefined> {
-  const raw = o.startup
-  if (raw === undefined || raw === null) return { ok: true, value: undefined }
-  if (!isTelemetryObject(raw)) return fail('startup', 'startup must be an object.')
-  const replayMs = whole(raw.replayMs, 'startup.replayMs', MAX_DURATION_MS)
-  if (!replayMs.ok) return replayMs
-  const events = whole(raw.eventsReplayed, 'startup.eventsReplayed', MAX_REPLAY_EVENTS)
-  if (!events.ok) return events
-  const duty = whole(raw.dutyPct, 'startup.dutyPct', 100)
-  if (!duty.ok) return duty
-  const maxBlock = whole(raw.maxBlockMs, 'startup.maxBlockMs', MAX_DURATION_MS)
-  if (!maxBlock.ok) return maxBlock
-  const blocks = whole(raw.blocksOver50, 'startup.blocksOver50', MAX_COUNT)
-  if (!blocks.ok) return blocks
-  const logSize = bucket(raw.logSizeBucket, 'startup.logSizeBucket', LOG_SIZE_BYTES_EDGES)
-  if (!logSize.ok) return logSize
-  return {
-    ok: true,
-    value: {
-      replayMs: replayMs.value,
-      eventsReplayed: events.value,
-      dutyPct: duty.value,
-      maxBlockMs: maxBlock.value,
-      blocksOver50: blocks.value,
-      logSizeBucket: logSize.value
-    }
-  }
-}
-
-function vSessionHeartbeat(o: Record<string, unknown>): Validated<TelemetryEvent> {
-  const ms = whole(o.uptimeMs, 'uptimeMs', MAX_DURATION_MS)
-  if (!ms.ok) return ms
-  const lines = optionalLines(o)
-  if (!lines.ok) return lines
-  const startup = optionalStartup(o)
-  if (!startup.ok) return startup
-  const value: EvSessionHeartbeat = { t: 'sessionHeartbeat', uptimeMs: ms.value }
-  if (lines.value !== undefined) value.linesParsed = lines.value
-  if (startup.value !== undefined) value.startup = startup.value
-  return { ok: true, value }
-}
-
-function vSessionEnd(o: Record<string, unknown>): Validated<TelemetryEvent> {
-  const ms = whole(o.durationMs, 'durationMs', MAX_DURATION_MS)
-  if (!ms.ok) return ms
-  const views = whole(o.viewsVisited, 'viewsVisited', TELEMETRY_VIEWS.length)
-  if (!views.ok) return views
-  const lines = optionalLines(o)
-  if (!lines.ok) return lines
-  const startup = optionalStartup(o)
-  if (!startup.ok) return startup
-  const value: EvSessionEnd = {
-    t: 'sessionEnd',
-    durationMs: ms.value,
-    viewsVisited: views.value
-  }
-  if (lines.value !== undefined) value.linesParsed = lines.value
-  if (startup.value !== undefined) value.startup = startup.value
-  return { ok: true, value }
-}
 
 function vViewDwell(o: Record<string, unknown>): Validated<TelemetryEvent> {
   const view = oneOf(o.view, 'view', TELEMETRY_VIEWS)
@@ -278,21 +179,90 @@ function vSetupSnapshot(o: Record<string, unknown>): Validated<TelemetryEvent> {
   if (!packs.ok) return packs
   const channel = oneOf(o.updateChannel, 'updateChannel', TELEMETRY_UPDATE_CHANNELS)
   if (!channel.ok) return channel
-  return {
-    ok: true,
-    value: {
-      t: 'setupSnapshot',
-      charCountBucket: chars.value,
-      logSizeBucket: logSize.value,
-      alertCountBucket: alerts.value,
-      overlaysEnabled: overlays.value,
-      cursorRing: ring.value,
-      autoHide: autoHide.value,
-      voiceEngine: engine.value,
-      soundPackCount: packs.value,
-      updateChannel: channel.value
-    }
+  const value: EvSetupSnapshot = {
+    t: 'setupSnapshot',
+    charCountBucket: chars.value,
+    logSizeBucket: logSize.value,
+    alertCountBucket: alerts.value,
+    overlaysEnabled: overlays.value,
+    cursorRing: ring.value,
+    autoHide: autoHide.value,
+    voiceEngine: engine.value,
+    soundPackCount: packs.value,
+    updateChannel: channel.value
   }
+  return machineClass(o, value)
+}
+
+/**
+ * THE MACHINE CLASS (JOS-364), checked the way every optional rider in this file is: absent and
+ * null both mean "this client does not measure it", and the field is then NOT copied across
+ * rather than defaulted — which is what keeps `tests/telemetryContract.test.mts`'s round-trip
+ * assertion meaningful and what makes an older ingest reading a newer client harmless.
+ *
+ * A PRESENT FIELD IS STILL FULLY CHECKED. Optional means "may be absent", never "may be
+ * anything": a bucket index outside its ladder or a string outside its enum fails the whole
+ * event here exactly as `charCountBucket` does, which is the property the ladders exist for.
+ *
+ * It is a separate function only because the two together are past the repo's per-function
+ * ceiling; the split is by subject (what the install is configured like / what the machine is).
+ */
+function machineClass(
+  o: Record<string, unknown>,
+  value: EvSetupSnapshot
+): Validated<TelemetryEvent> {
+  const ladders = machineBuckets(o, value)
+  if (!ladders.ok) return ladders
+  const enums = machineEnums(o, value)
+  if (!enums.ok) return enums
+  if (o.safeMode !== undefined && o.safeMode !== null) {
+    const safe = flag(o.safeMode, 'safeMode')
+    if (!safe.ok) return safe
+    value.safeMode = safe.value
+  }
+  return { ok: true, value }
+}
+
+/** The four ladders. Split from its caller purely to stay under the repo's complexity ceiling —
+ *  a loop with an optional-field guard and a failure return costs three branches per axis. */
+function machineBuckets(
+  o: Record<string, unknown>,
+  value: EvSetupSnapshot
+): Validated<true> {
+  const buckets = [
+    ['cpuCountBucket', CPU_COUNT_EDGES],
+    ['totalMemBucket', TOTAL_MEM_GB_EDGES],
+    ['displayCountBucket', DISPLAY_COUNT_EDGES],
+    ['primaryScaleBucket', PRIMARY_SCALE_EDGES]
+  ] as const
+  for (const [field, edges] of buckets) {
+    if (o[field] === undefined || o[field] === null) continue
+    const b = bucket(o[field], field, edges)
+    if (!b.ok) return b
+    value[field] = b.value
+  }
+  return { ok: true, value: true }
+}
+
+/** The three enums, same split for the same reason. */
+function machineEnums(o: Record<string, unknown>, value: EvSetupSnapshot): Validated<true> {
+  const enums = [
+    ['gpuVendor', TELEMETRY_GPU_VENDORS],
+    ['gpuCompositing', TELEMETRY_GPU_COMPOSITING],
+    ['eqWindowMode', TELEMETRY_EQ_WINDOW_MODES]
+  ] as const
+  for (const [field, allowed] of enums) {
+    if (o[field] === undefined || o[field] === null) continue
+    const e = oneOf(o[field], field, allowed)
+    if (!e.ok) return e
+    // The three enums have disjoint member types, so the assignment is spelled per field rather
+    // than through the loop's union — a `oneOf` over `gpuVendor`'s list cannot produce a value
+    // `eqWindowMode` would accept, and the compiler is the one saying so.
+    if (field === 'gpuVendor') value.gpuVendor = e.value as TelemetryGpuVendor
+    else if (field === 'gpuCompositing') value.gpuCompositing = e.value as TelemetryGpuCompositing
+    else value.eqWindowMode = e.value as TelemetryEqWindowMode
+  }
+  return { ok: true, value: true }
 }
 
 function vFunnelStep(o: Record<string, unknown>): Validated<TelemetryEvent> {
@@ -323,6 +293,30 @@ const HEALTH_FIELDS = [
   'speechFailures'
 ] as const
 
+/**
+ * The fields JOS-133 added, which are OPTIONAL for the additive-field rule's reason (see
+ * `EvHealthCounters`): this validator also runs in the ingest Lambda, which is deployed by hand
+ * and therefore reads events from clients both newer AND older than itself. Required here, a
+ * client predating the field would fail the whole batch and be told 400 — which
+ * `telemetryPermanentRefusal` classes as permanent, so it would DROP every counter it holds.
+ *
+ * Absent and null both mean "this client does not measure it", exactly as they do for
+ * `linesParsed`. The field is then not copied across at all rather than defaulted to 0, which is
+ * what keeps `tests/telemetryContract.test.mts`'s round-trip assertion meaningful.
+ */
+const HEALTH_OPTIONAL_FIELDS = [
+  'imageFetchFailures',
+  'suppressedErrorLines',
+  // JOS-266's, optional for exactly the same reason and added the same way — which is what the
+  // rule is FOR: a third additive field costs one line here and nothing at either end of a skew.
+  'imageCacheReadFailures',
+  // JOS-364's two lost-child counters, added the same way for the fourth and fifth time. The GPU
+  // one is an ERROR (it is `rendererCrashes` with a different process); the utility one is not —
+  // `HEALTH_NON_ERROR_FIELDS` (./telemetryRollup.ts) is where that distinction is kept.
+  'gpuProcessGone',
+  'utilityProcessGone'
+] as const
+
 function vHealthCounters(o: Record<string, unknown>): Validated<TelemetryEvent> {
   const counts: number[] = []
   for (const field of HEALTH_FIELDS) {
@@ -330,17 +324,22 @@ function vHealthCounters(o: Record<string, unknown>): Validated<TelemetryEvent> 
     if (!n.ok) return n
     counts.push(n.value)
   }
-  return {
-    ok: true,
-    value: {
-      t: 'healthCounters',
-      rendererCrashes: counts[0],
-      mainErrorLogLines: counts[1],
-      parserStalls: counts[2],
-      presenceRestarts: counts[3],
-      speechFailures: counts[4]
-    }
+  const value: EvHealthCounters = {
+    t: 'healthCounters',
+    rendererCrashes: counts[0],
+    mainErrorLogLines: counts[1],
+    parserStalls: counts[2],
+    presenceRestarts: counts[3],
+    speechFailures: counts[4]
   }
+  for (const field of HEALTH_OPTIONAL_FIELDS) {
+    const raw = o[field]
+    if (raw === undefined || raw === null) continue
+    const n = whole(raw, field, MAX_COUNT)
+    if (!n.ok) return n
+    value[field] = n.value
+  }
+  return { ok: true, value }
 }
 
 function vUpdateOutcome(o: Record<string, unknown>): Validated<TelemetryEvent> {
@@ -357,6 +356,33 @@ function vUpdateOutcome(o: Record<string, unknown>): Validated<TelemetryEvent> {
   return { ok: true, value }
 }
 
+/**
+ * THE TWO SWITCH-FLIP EVENTS (JOS-109), and their validator is the shortest one in the file
+ * because the schema gave them nothing to check: a flip is the ENVELOPE plus the fact that it
+ * happened.
+ *
+ * "REFUSES PAYLOADS" IS SPELLED AS CONSTRUCTION, NOT AS REJECTION, and that is the same decision
+ * every other validator here makes for the same reason (`validateTelemetryEvent`'s note, and the
+ * pin in `tests/telemetryContract.test.mts`). These functions return a literal — so a client that
+ * bolted a character name, a session length or anything else onto an `optOut` does not get it
+ * stripped by a rule somebody has to remember; the property simply never appears in the value
+ * that comes back, on the client and again on the server.
+ *
+ * A HARD REJECTION WOULD BE THE WORSE ANSWER, and it is worth saying why rather than leaving it as
+ * a style choice. `validateTelemetryBatch` fails the WHOLE batch on one bad event and the endpoint
+ * answers 400, which `telemetryPermanentRefusal` classes as "these bytes will never be accepted" —
+ * so a future client that adds an optional field to a flip event would black out every counter in
+ * the fleet until the Lambda caught up. Dropping is what makes THE ADDITIVE-FIELD RULE work; the
+ * privacy property is the construction, not the refusal.
+ */
+function vOptOut(): Validated<TelemetryEvent> {
+  return { ok: true, value: { t: 'optOut' } }
+}
+
+function vOptIn(): Validated<TelemetryEvent> {
+  return { ok: true, value: { t: 'optIn' } }
+}
+
 const EVENT_VALIDATORS: Record<
   TelemetryEventKind,
   (o: Record<string, unknown>) => Validated<TelemetryEvent>
@@ -371,7 +397,10 @@ const EVENT_VALIDATORS: Record<
   setupSnapshot: vSetupSnapshot,
   funnelStep: vFunnelStep,
   healthCounters: vHealthCounters,
-  updateOutcome: vUpdateOutcome
+  updateOutcome: vUpdateOutcome,
+  errorReport: validateErrorReport,
+  optOut: vOptOut,
+  optIn: vOptIn
 }
 
 /**

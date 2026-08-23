@@ -22,6 +22,8 @@ import type {
   SpeechMode
 } from './types'
 import { ALERT_AUDIO_ACTIONS, MAX_SPEECH_CHARS, SPEECH_MODES } from './speechText'
+import { normalizeEarlyWarnSec } from './earlyWarning'
+import { MAX_BANNER_CHARS, normalizeBannerColor } from './alertBanner'
 
 /** Human-readable prefix + format generation. Bump the digit only for a BREAKING format. */
 export const SHARE_PREFIX = 'EQC1-'
@@ -58,11 +60,27 @@ export interface ExportableOverlayConfig {
   bgAlpha: number
 }
 
+/**
+ * The overlays' shared TRANSPARENCY preference (JOS-407) — the pair, not the per-kind values.
+ *
+ * IT RIDES ALONGSIDE `overlays`, never instead of it. A bundle keeps carrying per-kind `bgAlpha`
+ * exactly as it always has, so a machine running an older build reads a new bundle and finds
+ * everything it knows how to apply; this key is simply one it ignores. `seeded` is deliberately
+ * absent from the wire: it is bookkeeping about THIS install's history with the switch, and a
+ * stranger's answer to it would suppress the seed that keeps opting in from repainting anything.
+ */
+export interface ExportableBgAlphaPrefs {
+  shared: number
+  independent: boolean
+}
+
 /** Body of a `kind:'settings'` envelope. Every field is optional so a bundle can be partial. */
 export interface SettingsBundleBody {
   alerts?: AlertDef[]
   alertPrefs?: AlertPrefs
   overlays?: Partial<Record<OverlayKind, ExportableOverlayConfig>>
+  /** the shared transparency and whether it is in force (JOS-407) */
+  overlayBgAlpha?: ExportableBgAlphaPrefs
   /** whitelisted renderer prefs, raw localStorage values keyed by UI_PREF_SPECS[].key */
   ui?: Record<string, string>
 }
@@ -110,6 +128,12 @@ export const UI_PREF_SPECS: readonly UiPrefSpec[] = [
   { key: 'eq.countSource', label: 'Item count source', merge: 'replace' },
   { key: 'eq.profile', label: 'Game profile (server ruleset)', merge: 'replace' },
   { key: 'eq.selectedClasses', label: 'Plane of Sky class filter', merge: 'union' },
+  // ITEM favorites. The loot ledger stopped drawing them in JOS-345 (the owner ruled the star
+  // column out of that window), but the Plane of Sky tab still stars items and still reads this
+  // key, so the pref is a LIVE feature and keeps riding bundles in both directions. Even if the
+  // last surface ever went away, this row would STAY: a bundle written by another install carries
+  // whatever that install's UI knew about, and the parser's job is to accept and preserve the
+  // field, never to strip it because this build has nothing to render it with.
   { key: 'eq.favorites', label: 'Favorited items', merge: 'union' }
 ] as const
 
@@ -201,11 +225,11 @@ export type ShareDecodeError =
 
 /** User-facing text for each failure. The UI reports these — it never throws at the user. */
 export const SHARE_ERROR_TEXT: Record<ShareDecodeError, string> = {
-  empty: 'Nothing to import — paste a share string first.',
+  empty: 'Nothing to import - paste a share string first.',
   'not-a-share-string': `That doesn't look like a share string. It should start with "${SHARE_PREFIX}".`,
   'too-long': 'That share string is too large to be genuine.',
-  corrupt: 'That share string is damaged — it may have been cut off when it was copied.',
-  checksum: 'That share string failed its integrity check — copy it again, in full.',
+  corrupt: 'That share string is damaged - it may have been cut off when it was copied.',
+  checksum: 'That share string failed its integrity check - copy it again, in full.',
   'newer-version': 'That share string was made by a newer version of the app. Update, then import.',
   'unknown-kind': "That share string carries something this version doesn't understand.",
   'empty-payload': 'That share string is valid but contains nothing to import.'
@@ -349,6 +373,24 @@ export function sanitizeAlertDef(v: unknown): AlertDef | null {
     sound
   }
   if (r.volume !== undefined) def.volume = clamp01(r.volume, 1)
+  applyTimingFields(def, r)
+  const note = clampStr(r.note, SHARE_LIMITS.maxNoteChars).trim()
+  if (note) def.note = note
+  applyVoiceFields(def, r)
+  applyBannerFields(def, r)
+  return def
+}
+
+/**
+ * Copy the TIMING keys onto a def in place — how often it may fire, what that is counted per, and
+ * how early it fires (JOS-216).
+ *
+ * Its own function for the same reason `applyVoiceFields` is: `sanitizeAlertDef` is at the
+ * factoring ceiling. The three share the rule the whole file reads by — write a key ONLY when it is
+ * present, legal, and not the default, so an alert that asked for none of it sanitizes to the
+ * byte-identical object it always did (import dedupe hashes these fields; see sanitizeAlertDef).
+ */
+function applyTimingFields(def: AlertDef, r: Record<string, unknown>): void {
   if (typeof r.cooldownMs === 'number' && Number.isFinite(r.cooldownMs)) {
     def.cooldownMs = Math.max(0, Math.min(600000, Math.round(r.cooldownMs)))
   }
@@ -356,10 +398,10 @@ export function sanitizeAlertDef(v: unknown): AlertDef | null {
   // 'alert'), so a shared alert that rate-limits per mob keeps doing so on the other machine
   // instead of quietly reverting to one clock — and an ordinary alert sanitizes byte-identically.
   if (r.cooldownScope === 'target') def.cooldownScope = 'target'
-  const note = clampStr(r.note, SHARE_LIMITS.maxNoteChars).trim()
-  if (note) def.note = note
-  applyVoiceFields(def, r)
-  return def
+  // The offset survives a share when it is a number THIS build would have offered, and is dropped
+  // otherwise — `normalizeEarlyWarnSec` is the one place that decides, at all three inlets.
+  const earlyWarnSec = normalizeEarlyWarnSec(r.earlyWarnSec)
+  if (earlyWarnSec !== undefined) def.earlyWarnSec = earlyWarnSec
 }
 
 /**
@@ -379,6 +421,32 @@ function applyVoiceFields(def: AlertDef, r: Record<string, unknown>): void {
   // bundle must not make their alert the one that always shouts, so anything but a real `true`
   // is dropped back to the throttled default.
   if (r.alwaysPlay === true) def.alwaysPlay = true
+}
+
+/**
+ * Copy the ALERT BANNER keys onto a def in place (JOS-378) — whether it shows on screen, the
+ * optional on-screen wording, and its swatch.
+ *
+ * Its own function for the two above's reason (`sanitizeAlertDef` is at the factoring ceiling),
+ * and it keeps their rule: each key is written ONLY when it is present, legal, and not the
+ * default, so an alert that asked for none of this sanitizes to the byte-identical object it
+ * always did and import dedupe keeps matching it.
+ *
+ * EITHER BOOLEAN ON THE SWITCH, and only a boolean. What an absent key means is the trigger's to
+ * decide since JOS-380 (`defaultShowOnScreen`), so BOTH values now carry information: `false` is
+ * somebody deliberately taming an alert, and `true` is somebody deliberately showing one the
+ * default would have hidden. Dropping either would restore the recipient's default over the
+ * sender's decision, which is the bug this rule exists to prevent.
+ *
+ * The colour goes through the same closed-union normalizer every other inlet uses, so a
+ * stranger's bundle cannot name a colour this build would not have offered.
+ */
+function applyBannerFields(def: AlertDef, r: Record<string, unknown>): void {
+  if (typeof r.showOnScreen === 'boolean') def.showOnScreen = r.showOnScreen
+  const bannerText = clampStr(r.bannerText, MAX_BANNER_CHARS).trim()
+  if (bannerText) def.bannerText = bannerText
+  const bannerColor = normalizeBannerColor(r.bannerColor)
+  if (bannerColor) def.bannerColor = bannerColor
 }
 
 /** The three header fields that must be present and well-typed before anything else is read. */

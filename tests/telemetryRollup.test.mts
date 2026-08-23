@@ -87,7 +87,7 @@ test('a session end is kept THREE ways: a count, a total, and a histogram bucket
   const c = counters(batchOf([{ t: 'sessionEnd', durationMs: 20 * 60_000, viewsVisited: 3 }]))
   assert.equal(c.get(`${USAGE_METRICS.sessionEnds} ${DIM_NONE}`), 1)
   assert.equal(c.get(`${USAGE_METRICS.sessionMsTotal} ${DIM_NONE}`), 20 * 60_000)
-  // 20 min lands in the 15–30 bucket, which is index 3 over the edges.
+  // 20 min lands in the 15-30 bucket, which is index 3 over the edges.
   assert.equal(c.get(`${USAGE_METRICS.sessionLenBucket} 3`), 1)
 })
 
@@ -129,27 +129,93 @@ test('a setup snapshot becomes one row per FIELD, each dim a bucket index or an 
   assert.equal(c.get(`${USAGE_METRICS.setupAutoHide} off`), 1)
   assert.equal(c.get(`${USAGE_METRICS.setupVoice} kokoro`), 1)
   assert.equal(c.get(`${USAGE_METRICS.setupPacks} ${DIM_NONE}`), 4)
+  // A client that predates the machine class writes NO machine rows at all — not zero-index ones.
+  // Bucket 0 is a real bucket (fewer than two cores, no display), so folding an absent field into
+  // it would invent a population of impossible machines out of old clients.
+  assert.equal(c.get(`${USAGE_METRICS.setupCpu} 0`), undefined)
+  assert.equal(c.get(`${USAGE_METRICS.setupGpuVendor} unknown`), undefined)
+  assert.equal(c.get(`${USAGE_METRICS.setupSafeMode} off`), undefined)
 })
 
-test('health counters keep the FIELD as the dim, so an error class is a row not a column', () => {
+test('THE MACHINE CLASS folds to one row per field — bucket index or enum member (JOS-364)', () => {
   const c = counters(
     batchOf([
       {
-        t: 'healthCounters',
-        rendererCrashes: 1,
-        mainErrorLogLines: 12,
-        parserStalls: 0,
-        presenceRestarts: 2,
-        speechFailures: 0
+        t: 'setupSnapshot',
+        charCountBucket: 2,
+        logSizeBucket: 3,
+        alertCountBucket: 1,
+        overlaysEnabled: ['fight'],
+        cursorRing: true,
+        autoHide: false,
+        voiceEngine: 'off',
+        soundPackCount: 1,
+        updateChannel: 'main',
+        cpuCountBucket: 4,
+        totalMemBucket: 6,
+        gpuVendor: 'nvidia',
+        gpuCompositing: 'software',
+        safeMode: true,
+        displayCountBucket: 2,
+        primaryScaleBucket: 3,
+        eqWindowMode: 'fullscreen'
       }
     ])
   )
-  assert.equal(c.get(`${USAGE_METRICS.healthReports} ${DIM_NONE}`), 1)
-  assert.equal(c.get(`${USAGE_METRICS.health} rendererCrashes`), 1)
-  assert.equal(c.get(`${USAGE_METRICS.health} mainErrorLogLines`), 12)
+  assert.equal(c.get(`${USAGE_METRICS.setupCpu} 4`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupMem} 6`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupGpuVendor} nvidia`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupCompositing} software`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupSafeMode} on`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupDisplays} 2`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupScale} 3`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.setupEqWindowMode} fullscreen`), 1)
+})
+
+const HEALTH: TelemetryEvent = {
+  t: 'healthCounters',
+  rendererCrashes: 1,
+  mainErrorLogLines: 12,
+  parserStalls: 0,
+  presenceRestarts: 2,
+  speechFailures: 0
+}
+
+test('health counters are dimmed <version>:<field>, so an error class is a row PER BUILD', () => {
+  // JOS-96. The question the owner asks of these numbers is "did I release buggy code", which is
+  // a question about a RELEASE — a fleet-wide count keyed on the field name alone can never
+  // answer it, and would smear a bad build across the ones either side of it.
+  const c = counters(batchOf([HEALTH], '0.9.0'))
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:rendererCrashes`), 1)
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:mainErrorLogLines`), 12)
+  assert.equal(c.get(`${USAGE_METRICS.health} 0.9.0:presenceRestarts`), 2)
   // A ZERO IS NOT A ROW. Writing zeros would multiply the table by five for no information —
   // "no parser stall was reported" is the absence of the row, and the reader defaults to 0.
-  assert.equal(c.has(`${USAGE_METRICS.health} parserStalls`), false)
+  assert.equal(c.has(`${USAGE_METRICS.health} 0.9.0:parserStalls`), false)
+  // And the OLD encoding is gone: an un-versioned dim would sum two builds into one row.
+  assert.equal(c.has(`${USAGE_METRICS.health} rendererCrashes`), false)
+})
+
+test('healthReports is dimmed by VERSION — its own denominator, and the capability signal', () => {
+  // The rate is health/healthReports AT THE SAME VERSION, which is self-normalizing: a build with
+  // more users cannot look buggier than one with fewer. And a version with no `healthReports` row
+  // at all is a build that never reported — 'not reporting', which the panel must never render
+  // the same way as a build that reported sessions and found nothing wrong.
+  const c = counters(batchOf([HEALTH], '0.9.0'))
+  assert.equal(c.get(`${USAGE_METRICS.healthReports} 0.9.0`), 1)
+  assert.equal(c.has(`${USAGE_METRICS.healthReports} ${DIM_NONE}`), false)
+})
+
+test('two builds reporting on one day stay SEPARATE rows — never summed into a fleet average', () => {
+  const a = counters(batchOf([HEALTH, HEALTH], '0.9.0'))
+  const b = counters(batchOf([HEALTH], '0.10.0'))
+  assert.equal(a.get(`${USAGE_METRICS.healthReports} 0.9.0`), 2)
+  assert.equal(a.get(`${USAGE_METRICS.health} 0.9.0:mainErrorLogLines`), 24)
+  assert.equal(b.get(`${USAGE_METRICS.healthReports} 0.10.0`), 1)
+  assert.equal(b.get(`${USAGE_METRICS.health} 0.10.0:mainErrorLogLines`), 12)
+  // The dims are disjoint, which is the whole property: nothing a later reader does can merge
+  // them by accident, because there is no shared key to merge on.
+  assert.equal(a.has(`${USAGE_METRICS.health} 0.10.0:mainErrorLogLines`), false)
 })
 
 test('an update outcome carries its own ok/failed dim, and the failure CLASS is a second row', () => {
@@ -305,12 +371,12 @@ test('the median is a BUCKET, and an empty histogram has no median at all', () =
 })
 
 test('a session bucket renders as a RANGE, and the top bucket is open-ended', () => {
-  assert.equal(sessionBucketLabel(0), '0–1 min')
-  assert.equal(sessionBucketLabel(3), '15 min–30 min')
+  assert.equal(sessionBucketLabel(0), '0-1 min')
+  assert.equal(sessionBucketLabel(3), '15 min-30 min')
   assert.equal(sessionBucketLabel(SESSION_MS_EDGES.length), '4 h+')
-  // Out of range clamps rather than producing `undefined–undefined`.
+  // Out of range clamps rather than producing `undefined-undefined`.
   assert.equal(sessionBucketLabel(99), '4 h+')
-  assert.equal(sessionBucketLabel(-1), '0–1 min')
+  assert.equal(sessionBucketLabel(-1), '0-1 min')
 })
 
 test('the day key is the ARRIVAL day in UTC — never the client clock', () => {
@@ -340,7 +406,10 @@ test('the ingest handler runs the SHARED validator and the SHARED rollup', () =>
 
 test('every counter UPSERT is ADDITIVE, so a retried transaction cannot double-count', () => {
   const src = readFileSync(join(ROOT, 'infra', 'lambda', 'telemetry.ts'), 'utf8')
-  assert.match(src, /ON CONFLICT \(day, cohort, metric, dim\) DO UPDATE SET n = usage_daily\.n \+ EXCLUDED\.n/)
+  // The conflict target gained the SHARD (JOS-394) and must still be EXACTLY the sharded
+  // table's primary key, or postgres answers 42P10 and the UPSERT resolves against nothing.
+  assert.match(src, /ON CONFLICT \(shard, day, cohort, metric, dim\) DO UPDATE/)
+  assert.match(src, /SET n = usage_daily_sharded\.n \+ EXCLUDED\.n/)
   assert.match(src, /ON CONFLICT \(day, cohort, funnel, step, outcome, app_version\) DO UPDATE/)
   assert.match(src, /SET n = usage_funnel_daily\.n \+ EXCLUDED\.n/)
   // The install UPSERT's guard IS the daily cap; without the WHERE it would never refuse.
@@ -368,13 +437,62 @@ test('the cohort is part of the counter KEY, in the handler and in schema.sql al
   assert.match(src, /writeCounters\(day, facts\.cohort, roll\)/)
 })
 
-test('THE THREE TABLES, AND NO FOURTH: the handler writes exactly the plan’s storage shape', () => {
+test('THE FIVE TABLES, AND NO SIXTH: the handler writes exactly the plan’s storage shape', () => {
+  // THIS TEST USED TO SAY "THE THREE TABLES, AND NO FOURTH", and JOS-100 added the fourth
+  // deliberately rather than sneaking a row into `usage_daily`. The rename is the honest edit:
+  // `error_report` keeps something that is not a bare count (an EXEMPLAR), which no counter
+  // table can, and pretending otherwise by widening `dim` would have hidden that fact.
+  //
+  // JOS-372 ADDED THE FIFTH, on the same terms and for the same kind of reason: `perf_daily`
+  // keeps a CROSS-TAB, which a table keyed on one `dim` structurally cannot, and widening `dim`
+  // into a five-part string would have been the same lie in the other direction. Every dim of it
+  // is a closed enum or a bucket index (src/shared/telemetryPerfCube.ts), and its rows are the
+  // same session reports `liveStallP95` already counts.
+  //
+  // T6 IS STILL INTACT AND THAT IS WHAT THE ASSERTIONS BELOW CHECK. T6 refused a per-user event
+  // TRAIL; `error_report` is keyed on (day, cohort, version, FINGERPRINT) and `perf_daily` on
+  // seven dims with no id among them, so a hundred installs on the same class of box write ONE
+  // row. There is still nothing here that could reconstruct what one install did.
+  //
+  // JOS-394 DID NOT ADD A SIXTH KIND. Two of the five are written under their SHARDED names now
+  // (`usage_daily_sharded`, `perf_daily_sharded`) — same columns, same meaning, one extra key
+  // column that spreads a hot counter over 32 rows — and the pre-cutover tables are frozen and
+  // merged back by a view at read time. The storage SHAPE is unchanged: still five kinds of
+  // fact, still no per-user trail, and the new column is a random integer that carries no
+  // information about the sender (the test below pins that).
   const src = readFileSync(join(ROOT, 'infra', 'lambda', 'telemetry.ts'), 'utf8')
   const tables = [...src.matchAll(/INSERT INTO (\w+)/g)].map((m) => m[1])
-  assert.deepEqual([...new Set(tables)].sort(), ['analytics_install', 'usage_daily', 'usage_funnel_daily'])
-  // NO RAW EVENT STORE (T6): nothing inserts an event row, and no id is ever logged.
+  assert.deepEqual(
+    [...new Set(tables)].sort(),
+    [
+      'analytics_install',
+      'error_report',
+      'perf_daily_sharded',
+      'usage_daily_sharded',
+      'usage_funnel_daily'
+    ]
+  )
+  // The cube's CONFLICT TARGET and the schema's PRIMARY KEY have to agree, or the UPSERT
+  // resolves against nothing (42P10, on a cluster, weeks later) — the pin the cohort test above
+  // makes for the two counter tables, made for the fifth.
+  const cubeKey =
+    'shard, day, cohort, window_mode, machine_class, locked, stall_bucket, tail_bucket'
+  // The statement is assembled from concatenated literals, so the pin is over the JOINED text:
+  // a key that only matches because of where the source happens to wrap is not a pin.
+  const joined = src.replace(/' \+\s+'/g, '')
+  assert.ok(joined.includes(`ON CONFLICT (${cubeKey})`))
+  assert.ok(readFileSync(join(ROOT, 'infra', 'schema.sql'), 'utf8').includes(`PRIMARY KEY (${cubeKey})`))
+  // The cube carries no id either, and the two install-level dims it needs live on the row that
+  // already exists rather than in a table of their own.
+  assert.equal(/perf_daily[^;]*analytics_id/.test(src), false, 'no id may reach the perf cube')
+  // NO RAW EVENT STORE (T6): nothing inserts a per-event row, and no id is ever logged.
   assert.equal(/INSERT INTO (telemetry_event|usage_event|raw_)/.test(src), false)
   assert.equal(/log\(\{[^}]*analyticsId/.test(src), false)
+  // The error table is keyed on a FINGERPRINT, never on the sender.
+  assert.match(src, /ON CONFLICT \(day, cohort, version, fingerprint\) DO UPDATE/)
+  assert.equal(/error_report[^;]*analytics_id/.test(src), false, 'no id may reach the error store')
+  // FIRST EXEMPLAR WINS — a reader who looked at an issue yesterday sees the same example today.
+  assert.match(src, /exemplar = COALESCE\(error_report\.exemplar, EXCLUDED\.exemplar\)/)
 })
 
 test('the body cap is bigger than feedback’s, and big enough for a maximal batch', () => {
@@ -387,16 +505,28 @@ test('the body cap is bigger than feedback’s, and big enough for a maximal bat
 
 test('schema.sql declares the three tables, the kill switch and a role that cannot read reports', () => {
   const sql = readSource(join(ROOT, 'infra', 'schema.sql'))
-  for (const table of ['usage_daily', 'usage_funnel_daily', 'analytics_install']) {
+  for (const table of ['usage_daily', 'usage_funnel_daily', 'analytics_install', 'error_report']) {
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`))
   }
+  // The error store is BORN with its key (DSQL cannot ALTER one), cohort included for the same
+  // reason the counter tables carry theirs: nothing anywhere sums the author's rows with a user's.
+  assert.match(sql, /PRIMARY KEY \(day, cohort, version, fingerprint\)/)
+  // TEXT holding JSON, not jsonb — this file's own SHAPE NOTES (env_json / log_json made the
+  // same call, and DSQL cannot index jsonb). The JOS-100 brief asked for jsonb; the convention
+  // is older than the brief and wins, and this assertion is what keeps that decision visible.
+  assert.match(sql, /exemplar {4}text/)
   // Seeded CLOSED, and guarded so a re-run cannot re-close a switch somebody opened.
   assert.match(sql, /SET telemetry_accepting = false\n WHERE id = 'FEEDBACK' AND telemetry_accepting IS NULL/)
   assert.match(sql, /CREATE ROLE telemetry_ingest WITH LOGIN/)
   // THE GRANT LIST IS THE PROMISE (§8.5). No privilege on `report`, and no DELETE anywhere.
   const grants = [...sql.matchAll(/GRANT ([^;]+) TO telemetry_ingest/g)].map((m) => m[1])
-  assert.ok(grants.length >= 4)
+  assert.ok(grants.length >= 5)
+  // NO privilege on `report` — the feedback backlog. `\b` does the real work here since
+  // JOS-100: `error_report` IS granted and is a different table, and `\breport\b` does not
+  // match inside it because `_` is a word character. Spelled out so a future reader does not
+  // "fix" this regex into one that passes a grant on the backlog.
   assert.equal(grants.some((g) => /\breport\b/.test(g)), false)
+  assert.ok(grants.some((g) => /error_report/.test(g)), 'the error store IS granted')
   assert.equal(grants.some((g) => /DELETE/.test(g)), false)
   assert.equal(grants.some((g) => /install_profile/.test(g)), false)
 })

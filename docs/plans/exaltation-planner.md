@@ -163,6 +163,56 @@ simplification, recorded in §8 open questions.
 > The widening is ADDITIVE in the store (D4's own argument): every key a past
 > build could write is still legal, so no migration transforms anything.
 
+> **WIDENED AGAIN (JOS-104, 2026-08-08) — the same argument a second time.** A
+> v0.12.0 player reported the board as *"missing 2x any slots"* (feedback
+> 01KZGHFSF6TW32TA4SMJQNWJE9). `PlanSlotId` now also carries `ANY1` / `ANY2`
+> and the board draws **23 cells**.
+>
+> **What an "any" slot is.** A real, named equipment slot on the character.
+> Daybreak's 2026-07-28 update notes describe an AA choosing gear from "the
+> primary, secondary, or Any slots" — the devs enumerating it as a peer of the
+> two hands (everquestlegends.com/patch-notes/eql-update-notes-7-28-2026). A
+> community FAQ states the count and the kind in one line: "Two slots that take
+> any item type" (everquestguides.com, unofficial — corroboration, not basis).
+> eqlwiki.com has **no page at all** about it (searched 2026-08-08); its
+> `Equipment_By_Slot` page is stale classic-EQ data and says so, so its silence
+> is not evidence either way.
+>
+> **The basis is the game's own dump.** `Any Slot` prints TWICE at top level in
+> the committed 295-line dump — once first, once between `Waist` and `Ammo` —
+> the same repetition that proved the pair rule above, and both rows hold real
+> gear while `Chest` is filled separately. The corpus states all three
+> occupants as CHEST items, so the character wears three chest pieces at once:
+> these are extra PLACES, not another spelling of an existing slot. Both rows
+> also print `-Slot<n>` children, the shape a socketed exaltation takes
+> everywhere else in the file — the only evidence anywhere that an any-slot
+> item hosts exaltations at all, which no wiki or patch note addresses in
+> either direction.
+>
+> **The model gap it exposed.** `equipSlotOf` was TOTAL and R2 was asked
+> `[equipSlotOf(cell)]`. An any-cell has no answer: the client's own word for
+> the place is "Any Slot", and the corpus states ZERO items with an `ANY` slot
+> token, so ANY is a property of the PLACE and never of an item. `equipSlotOf`
+> now returns `null` there and **`hostSlotsOf(cell)`** is what R2 asks — one
+> slot for the twenty-one named cells, all eighteen for an any-cell. That costs
+> nothing in principle: R2 is a rule about two ITEMS ("Exaltations also carry
+> the equipment slot restrictions of their source item", eqlwiki/Exaltations)
+> and the cell was only ever a free shortcut to the host's own slot. Class
+> overlap and the R3 haste lock are untouched — an any-slot is not a permit.
+>
+> **Not claimed:** both any-slot rows in the one dump we hold carry CHEST
+> items, so "any equip slot is legal here" rests on the client's token name and
+> the FAQ's wording, not on a measurement across all eighteen. It errs the safe
+> way (a cell that declines to constrain), and it is stated rather than hidden.
+>
+> **One deliberate scope line:** `targetCells` (the browser's blind "Add to
+> set") still names the donor's OWN slots. Appending the any-cells would open a
+> three-item menu for every single-slot donor and would cost both the one-click
+> add and JOS-42's replace warning. The any-cells are reached from the
+> Inventory board instead — they auto-fill their host from the dump, their host
+> picker runs with no slot filter, and their sockets open the browser exactly
+> as every other cell's do.
+
 ### 3.2 Normalization — `src/shared/planner/normalize.ts` (new)
 
 - `normalizeSlotTokens(slot?: string): EquipSlot[]` — splits the space-joined

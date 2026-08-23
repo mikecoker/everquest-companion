@@ -34,91 +34,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { flattenSkills, type Drill } from '../src/renderer/src/features/combat/dashboardData'
+import { flattenSkills, meterDrill, type Drill } from '../src/renderer/src/features/combat/dashboardData'
 import {
   laneDps,
   meterPanel,
   meterSources,
   nestedRows,
   ownBreakdown,
+  panelTotals,
   petSources,
   selfSource,
   type MeterPanel
 } from '../src/renderer/src/features/combat/petRows'
-import type { SkillView, SourceView } from '../src/shared/combat'
+import type { SourceView } from '../src/shared/combat'
+// The two sources every damage-meter derivation test shares — tests/combatMeterFixture.mts.
+import { ENTITIES, PET, YOU, cat, skill, source } from './combatMeterFixture.mjs'
 
-function skill(name: string, over: Partial<SkillView> = {}): SkillView {
-  return { name, total: 0, pct: 0, hits: 0, crits: 0, max: 0, ...over }
-}
-
-function cat(category: SourceView['categories'][number]['category'], skills: SkillView[]): SourceView['categories'][number] {
-  return {
-    category,
-    total: skills.reduce((n, s) => n + s.total, 0),
-    pct: 100,
-    hits: skills.reduce((n, s) => n + s.hits, 0),
-    crits: 0,
-    critPct: 0,
-    max: Math.max(0, ...skills.map((s) => s.max)),
-    resists: 0,
-    resistPct: 0,
-    skills
-  }
-}
-
-/**
- * A whole SourceView, derived the way the engine derives one (`main/combat/sourceViews.ts`) — the
- * counters summed from the categories and the three percentages taken from those counters. It is
- * fully populated rather than cast-and-hope because the LEVEL-1 FOLD reads every counter on it:
- * a half-built fixture would have let `meterSources` combine fields nothing here ever checked.
- */
-function source(
-  id: string,
-  name: string,
-  kind: SourceView['kind'],
-  categories: SourceView['categories']
-): SourceView {
-  const total = categories.reduce((n, c) => n + c.total, 0)
-  const hits = categories.reduce((n, c) => n + c.hits, 0)
-  const crits = categories.reduce((n, c) => n + c.crits, 0)
-  const misses = categories.reduce((n, c) => n + c.skills.reduce((m, s) => m + (s.misses ?? 0), 0), 0)
-  const swings = hits + misses
-  return {
-    id,
-    name,
-    kind,
-    total,
-    dps: total / 60,
-    pct: 100,
-    hits,
-    crits,
-    critPct: hits ? (crits / hits) * 100 : 0,
-    ambiguousHits: 0,
-    ambiguousTotal: 0,
-    misses,
-    hitPct: swings ? (hits / swings) * 100 : 100,
-    missBreakdown: { miss: misses, dodge: 0, parry: 0, riposte: 0, block: 0, absorb: 0 },
-    resists: 0,
-    resistPct: 0,
-    skills: categories.flatMap((c) => c.skills),
-    categories
-  }
-}
-
-const YOU = source('you', 'You', 'you', [
-  cat('melee', [
-    skill('Melee', { total: 5000, hits: 100, max: 120, min: 10, misses: 20 }),
-    skill('Backstab', { total: 3000, hits: 20, max: 400, min: 50 })
-  ]),
-  cat('spell', [skill('Ancient Wrath', { total: 1000, hits: 4, max: 300, min: 200 })])
-])
-
-/** A summoned pet's random proper name (law: pets are named Vebarn, Garer, …). */
-const PET = source('pet:7', 'Vebarn', 'pet', [
-  cat('melee', [skill('Melee', { total: 7000, hits: 210, max: 90, min: 5, misses: 30 })])
-])
-
-const ENTITIES = [PET, YOU]
 
 test('combined: the pet is ONE row, named for the pet, beside your untouched skill lanes', () => {
   const b = ownBreakdown(ENTITIES, true)
@@ -225,27 +156,31 @@ interface Panel {
 }
 
 function shown(p: MeterPanel): Panel {
-  return p.level === 1
-    ? { level: 1, subject: 'sources', rows: p.sources.map((s) => s.name) }
-    : { level: 2, subject: p.subject.name, rows: p.rows.map((r) => (r.kind === 'pet' ? r.pet.name : r.skill.name)) }
+  if (p.level === 1) return { level: 1, subject: 'sources', rows: p.sources.map((s) => s.name) }
+  return { level: 2, subject: p.subject.name, rows: p.rows.map((r) => (r.kind === 'pet' ? r.pet.name : r.skill.name)) }
 }
 
 /**
  * THE COMBAT TAB'S CALL, spelled exactly as `SegmentPanel.tsx` spells it: its drill is a union
- * that can also name a mob, so only the entity arm reaches the builder, and `null` means the user
- * explicitly backed all the way out.
+ * that can also name a mob, so `dashboardData.meterDrill` is what reaches the builder, and `null`
+ * means the user explicitly backed all the way out.
+ *
+ * THE OVERVIEW CARD MAKES THE IDENTICAL CALL (JOS-105 — `DpsCard.tsx`, same two functions in the
+ * same order), which is why there is no third helper here: a card that needed its own spelling
+ * would be the fork this ticket removed.
  */
 function combatTab(entities: SourceView[], combine: boolean, drill: Drill | null): MeterPanel {
-  return meterPanel(entities, combine, drill?.kind === 'entity' ? drill.entityId : null)
+  return meterPanel(entities, combine, meterDrill(drill))
 }
 
 /**
  * THE OVERLAY'S CALL, spelled exactly as `meterBars.tsx` spells it: its drill is the persisted
- * `{ entityId }` of `overlays.<kind>.drill`, and having none is LEVEL 1 — the same thing `null`
- * means on the Combat tab.
+ * `{ entityId, category? }` of `overlays.<kind>.drill` handed straight over — that record IS the
+ * builder's argument shape — and having none is LEVEL 1, the same thing `null` means on the
+ * Combat tab.
  */
 function overlayMeter(entities: SourceView[], combine: boolean, drill: { entityId: string } | null): MeterPanel {
-  return meterPanel(entities, combine, drill?.entityId ?? null)
+  return meterPanel(entities, combine, drill)
 }
 
 const panel = (entities: SourceView[], combine: boolean, drill: Drill | null): Panel =>
@@ -425,14 +360,25 @@ test('ONE CALL: an overlay with no drill of its own rests exactly where the Comb
   })
 })
 
-test('ONE CALL: the Overview card’s breakdown is the same rows as the meters’ level 2', () => {
-  // `ownBreakdown` is the third surface (features/overview/DpsCard.tsx) and is a thin wrapper over
-  // the same `nestedRows` fold, not a fourth opinion — so its rows must be the meters' rows.
+test('ONE CALL: the Overview card is the same panel as the Combat tab, at every level', () => {
+  // JOS-105. The card used to reach past the builder to `ownBreakdown`, hold its own three-value
+  // drill vocabulary, and draw bars with no click on them — so the SAME fight drilled on one
+  // surface and sat inert on the other. It now makes the identical call, so the panels are equal
+  // objects at every level there is, not merely "the same rows" at one of them.
+  const levels: (Drill | null)[] = [
+    null,
+    { kind: 'entity', entityId: 'you' },
+    { kind: 'entity', entityId: 'pet:7' }
+  ]
   for (const combine of [true, false]) {
-    const card = ownBreakdown(ENTITIES, combine)
-    const meter = combatTab(ENTITIES, combine, { kind: 'entity', entityId: 'you' })
-    assert.deepEqual(card.rows, meter.level === 2 ? meter.rows : null, `combine=${String(combine)}`)
+    for (const drill of levels) {
+      const card = meterPanel(ENTITIES, combine, meterDrill(drill))
+      assert.deepEqual(shown(card), shown(combatTab(ENTITIES, combine, drill)), `combine=${String(combine)}`)
+    }
   }
+  // …and the fold is still the fold: your breakdown's rows are the meters' level-2 rows.
+  const meter = combatTab(ENTITIES, true, { kind: 'entity', entityId: 'you' })
+  assert.deepEqual(ownBreakdown(ENTITIES, true).rows, meter.level === 2 ? meter.rows : null)
 })
 
 test('the overlay drill maps onto the collapsed model: pet drill, its way back, and stale ids', () => {
@@ -460,14 +406,188 @@ test('the overlay drill maps onto the collapsed model: pet drill, its way back, 
   })
 })
 
+// ── THE DRILL SURVIVES A CHANGE OF FIGHT (JOS-240) ─────────────────────────────────────────
+//
+// Owner, 2026-08-12: drilling a row and then flipping to the next pull reset the meter to level 1,
+// so comparing the same breakdown across two fights meant re-clicking into it every time. The
+// Combat tab no longer un-drills on a fight change (CombatView.undrilling — only the DIRECTION
+// does); everything else is this builder's job, because a token is only worth keeping if it can
+// find its row in the fight it lands in.
+//
+// AND HALF THESE IDS ARE PER-SPAWN. 'you' and `member:<key>` are the same string in every fight,
+// but `pet:<instanceId>` is minted per summon and an incoming mob's id per spawn — so "the same
+// pet, the next pull" is a DIFFERENT id for a row the user reads as the same one, and after a
+// restart re-folds the log it is a different id for the very fight they left drilled. Hence the
+// recorded NAME, and hence the order: the id first (an exact row always wins, including when two
+// same-named pets are both in the segment — the two-pet case is pinned above), the name only as
+// the rescue that keeps the drill from degrading.
+//
+// The degrade itself is UNCHANGED and is what makes "a fight lacking that row" safe: level 1 with
+// its sources, and the caller's stored token untouched, so the next fight that HAS the row opens
+// drilled again. That is asserted here rather than described, because it is the acceptance
+// criterion the owner wrote ("switch to a fight lacking the entity - clean top-level view").
+
+/** The same pet, one summon later: a new instance id under the name the user actually clicked. */
+const RESUMMONED = source('pet:19', 'Vebarn', 'pet', [
+  cat('melee', [skill('Melee', { total: 4200, hits: 130, max: 88, min: 5, misses: 18 })])
+])
+
+test('a drill follows its row into the next fight by NAME when the id was minted per spawn', () => {
+  // Fight A: the user drills the pet. Fight B is the same pet after a re-summon — same name, new
+  // instance. Without the name this is a stale id and the meter drops to level 1 on every flip.
+  const drill: Drill = { kind: 'entity', entityId: 'pet:7', name: 'Vebarn' }
+  const fightB = [YOU, RESUMMONED]
+  assert.deepEqual(panel(ENTITIES, true, drill), { level: 2, subject: 'Vebarn', rows: ['Melee'] })
+  assert.deepEqual(panel(fightB, true, drill), { level: 2, subject: 'Vebarn', rows: ['Melee'] })
+  // It really resolved to fight B's row, not to a remembered copy of fight A's.
+  const b = combatTab(fightB, true, drill)
+  assert.equal(b.level === 2 && b.subject.id, 'pet:19')
+  assert.equal(b.level === 2 && b.subject.total, 4200)
+  // …and it is still nested, so Back goes to your row exactly as it did in fight A.
+  assert.equal(b.level === 2 && b.parent?.id, 'you')
+})
+
+test('…and the ID still wins: a name is a rescue, never a re-targeting', () => {
+  // Both pets in one segment, the stored name matching BOTH. The exact row the user clicked opens.
+  const both = [YOU, PET, RESUMMONED]
+  const a = combatTab(both, true, { kind: 'entity', entityId: 'pet:19', name: 'Vebarn' })
+  assert.equal(a.level === 2 && a.subject.id, 'pet:19')
+  const c = combatTab(both, true, { kind: 'entity', entityId: 'pet:7', name: 'Vebarn' })
+  assert.equal(c.level === 2 && c.subject.id, 'pet:7')
+  // A name that contradicts a resolvable id is ignored outright — the id resolved, so nothing
+  // needed rescuing.
+  const d = combatTab(ENTITIES, true, { kind: 'entity', entityId: 'you', name: 'Vebarn' })
+  assert.equal(d.level === 2 && d.subject.id, 'you')
+})
+
+test('a fight without that row is LEVEL 1, never a blank panel or a wrong subject', () => {
+  // The acceptance case, both ways round. A fight where nobody is called Vebarn degrades…
+  const petless = [YOU]
+  assert.deepEqual(panel(petless, true, { kind: 'entity', entityId: 'pet:7', name: 'Vebarn' }), {
+    level: 1,
+    subject: 'sources',
+    rows: ['You']
+  })
+  // …a fight where YOU dealt nothing degrades the same way (your row is absent, not empty)…
+  assert.deepEqual(panel([PET], true, { kind: 'entity', entityId: 'you', name: 'You' }), {
+    level: 1,
+    subject: 'sources',
+    rows: ['Vebarn']
+  })
+  // …and a token with NO name (every drill stored before JOS-240, and every overlay drill) is
+  // exactly the pure-id behaviour it has always had.
+  assert.equal(combatTab(ENTITIES, true, { kind: 'entity', entityId: 'pet:404' }).level, 1)
+  assert.equal(combatTab(ENTITIES, true, { kind: 'entity', entityId: 'pet:404', name: 'Nobody' }).level, 1)
+  // An empty name never means "match the row with no name" — parseDrillMemory drops it, and the
+  // builder refuses it too, so the two ends agree.
+  assert.equal(combatTab(ENTITIES, true, { kind: 'entity', entityId: 'pet:404', name: '' }).level, 1)
+})
+
+test('IDENTICAL FOR ANYONE WHO NEVER DRILLS: no token, no change, at either preference', () => {
+  // The ticket's third acceptance line. Nothing about level 1 moved, so a user who has never
+  // clicked a bar cannot tell this ticket shipped.
+  for (const combine of [true, false]) {
+    assert.deepEqual(shown(combatTab(ENTITIES, combine, null)), shown(overlayMeter(ENTITIES, combine, null)))
+  }
+  assert.deepEqual(panel(ENTITIES, true, null), { level: 1, subject: 'sources', rows: ['You'] })
+  assert.deepEqual(panel(ENTITIES, false, null), { level: 1, subject: 'sources', rows: ['Vebarn', 'You'] })
+})
+
+// ── THE HEADLINE OVER THE ROWS FOLLOWS THE ROWS (JOS-170) ──────────────────────────────────
+//
+// Owner report, 2026-08-09: "with a fight drilled into the You row, changing the pet preference
+// does not recalculate the You line - the pet was moved out, and the title line for the You drill
+// kept the old combined total (321 in the observed case)."
+//
+// The mechanism was not a stale memo and not a drill-time snapshot. The headline was the SEGMENT's
+// aggregate at every level, and with the pet folded INTO your row that aggregate is exactly what
+// the You drill is showing (`ownBreakdown.total` is self + nested pets, which IS `outTotal` for a
+// solo fight — the invariant three blocks up). Turn the preference off and the pet's damage leaves
+// the drill while the headline stays put: a number no visible row accounts for, which is the
+// "aggregates lie" failure `meterScope.scopeTotals` already guards one axis over.
+//
+// `panelTotals` is that guard for the DRILL axis, and the block below is the acceptance: the You
+// figure moves in BOTH directions off nothing but the preference — no new fight, no re-selection,
+// no second snapshot.
+
+/** The segment's own pair, as the engine would state it: every source, over the same clock. */
+const SEG_TOTAL = ENTITIES.reduce((n, e) => n + e.total, 0)
+const SEG_DPS = SEG_TOTAL / 60
+
+const headline = (combine: boolean, drill: Drill | null): { total: number; dps: number } =>
+  panelTotals(combatTab(ENTITIES, combine, drill), SEG_TOTAL, SEG_DPS)
+
+/** What the rows on screen actually add up to — the thing the headline must equal. */
+function rowSum(p: MeterPanel): number {
+  return p.level === 1
+    ? p.sources.reduce((n, s) => n + s.total, 0)
+    : p.rows.reduce((n, r) => n + r.total, 0)
+}
+
+test('THE ACCEPTANCE: the You headline follows the pet preference, both ways, with nothing else touched', () => {
+  const you: Drill = { kind: 'entity', entityId: 'you' }
+  const folded = headline(true, you)
+  const separate = headline(false, you)
+
+  assert.equal(folded.total, YOU.total + PET.total, 'pet inside You ⇒ the You line covers both')
+  assert.equal(folded.total, SEG_TOTAL, '…which for a solo fight is the whole segment (the coincidence that hid the bug)')
+  assert.equal(separate.total, YOU.total, 'pet moved out ⇒ the You line is yours alone')
+  assert.notEqual(folded.total, separate.total, 'THE REGRESSION: the number moved when the preference did')
+  // …and back again. The derivation is pure, so "both directions" is the same statement twice —
+  // which is precisely why the defect could never have been in the flip and always was in the read.
+  assert.deepEqual(headline(true, you), folded, 'flipping back restores it exactly')
+  // The rate rides the same fraction: one clock, so the ratio is arithmetic rather than a re-derive.
+  assert.equal(separate.dps, (SEG_DPS * YOU.total) / SEG_TOTAL)
+  assert.equal(folded.dps, SEG_DPS)
+})
+
+test('the headline is what the rows add up to — at every level, in both preference states', () => {
+  const levels: (Drill | null)[] = [
+    null,
+    { kind: 'entity', entityId: 'you' },
+    { kind: 'entity', entityId: 'pet:7' },
+    // A drill this fight cannot resolve degrades to level 1 (meterPanel), so the headline has to
+    // degrade with it rather than keep describing a subject that is not on screen.
+    { kind: 'entity', entityId: 'pet:404' }
+  ]
+  for (const combine of [true, false]) {
+    for (const drill of levels) {
+      const p = combatTab(ENTITIES, combine, drill)
+      const h = panelTotals(p, SEG_TOTAL, SEG_DPS)
+      assert.equal(h.total, rowSum(p), `combine=${String(combine)} drill=${JSON.stringify(drill)}`)
+    }
+  }
+})
+
+test('a drilled PET headlines the pet, and level 1 hands the caller its own pair back untouched', () => {
+  const pet: Drill = { kind: 'entity', entityId: 'pet:7' }
+  assert.equal(headline(true, pet).total, PET.total, 'nested or not, the pet drill is the pet')
+  assert.equal(headline(false, pet).total, PET.total)
+  // Level 1 is the caller's already-scoped answer, BY VALUE and unrounded — `scopeTotals` has
+  // had its say by then and a second opinion here would be the fork this function exists to end.
+  for (const combine of [true, false]) {
+    assert.deepEqual(headline(combine, null), { total: SEG_TOTAL, dps: SEG_DPS })
+  }
+})
+
+test('an empty segment cannot divide by zero — a headline of nothing is 0, never NaN', () => {
+  const you: Drill = { kind: 'entity', entityId: 'you' }
+  const empty = panelTotals(combatTab(ENTITIES, false, you), 0, 0)
+  assert.equal(empty.dps, 0)
+  assert.ok(Number.isFinite(empty.dps))
+})
+
 // ── the source tripwire: a second row builder has nowhere to live ──────────────────────────
 
 const src = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8')
 
-test('NO SECOND BUILDER: both meters call meterPanel, and neither shapes rows any other way', () => {
+test('NO SECOND BUILDER: all THREE meters call meterPanel, and none shapes rows any other way', () => {
   const metres = {
     'the Combat tab': src('../src/renderer/src/features/combat/SegmentPanel.tsx'),
-    'the floating overlay': src('../src/renderer/src/overlay/meterBars.tsx')
+    'the floating overlay': src('../src/renderer/src/overlay/meterBars.tsx'),
+    // JOS-105 added the third: the Overview glance card, which used to call `ownBreakdown` and
+    // `nestedRows` itself. Its density is a PROP on the shared components now, not a fork.
+    'the Overview card': src('../src/renderer/src/features/overview/DpsCard.tsx')
   }
   for (const [who, text] of Object.entries(metres)) {
     assert.match(text, /\bmeterPanel\s*\(/, `${who} does not call the shared row builder`)
@@ -475,6 +595,58 @@ test('NO SECOND BUILDER: both meters call meterPanel, and neither shapes rows an
     // SourceView — the exact seam that let the two surfaces drift. It belongs to petRows now.
     assert.doesNotMatch(text, /\bflattenSkills\s*\(/, `${who} builds its own flat list again`)
     assert.doesNotMatch(text, /\bnestedRows\s*\(/, `${who} reaches past meterPanel to the row fold`)
+    assert.doesNotMatch(text, /\bownBreakdown\s*\(/, `${who} reaches past meterPanel to the pet fold`)
+  }
+})
+
+test('ONE HEADLINE DERIVATION: every UNLABELLED figure over a meter comes from panelTotals', () => {
+  // JOS-170. The two in-app damage surfaces print a bare number above their rows — the panel
+  // header's `· 321 ·` and the glance card's `321 total` — so each of them has to be the sum of
+  // what is underneath it. Neither may go back to reading the segment straight.
+  for (const [who, rel] of [
+    ['the Combat tab', '../src/renderer/src/features/combat/SegmentPanel.tsx'],
+    ['the Overview card', '../src/renderer/src/features/overview/DpsCard.tsx']
+  ] as const) {
+    assert.match(src(rel), /\bpanelTotals\s*\(/, `${who} headlines something other than its own panel`)
+  }
+  // …and the SegmentHeader takes the pair rather than reaching for `seg.outTotal` behind the
+  // caller's back — including the active-time rate in brackets beside it, which used to be the
+  // segment's while the headline was the panel's.
+  const header = src('../src/renderer/src/features/combat/SegmentHeader.tsx')
+  assert.doesNotMatch(header, /seg\.out(Total|Dps)\b/, 'the header reads the raw segment aggregate again')
+  assert.doesNotMatch(header, /seg\.activeDps\b/, 'the (act …) note reads the raw segment rate again')
+
+  // THE DELIBERATE DIVERGENCE, pinned so that changing it is a decision rather than a drift: the
+  // floating meters' crumb figure is LABELLED `all` and states the whole segment on purpose
+  // (JOS-158, owner direction with a screenshot). A labelled aggregate may cover the fight; an
+  // unlabelled one over a list may not. If this ever becomes panel-scoped, the WORD has to move
+  // with it — which is what this assertion makes impossible to forget.
+  const overlay = src('../src/renderer/src/overlay/meterBars.tsx')
+  assert.doesNotMatch(overlay, /\bpanelTotals\s*\(/, 'the overlay crumb went panel-scoped while still saying "all"')
+  assert.match(overlay, /formatRate\(seg\.outDps\)/, 'the overlay crumb no longer states the segment it labels')
+})
+
+test('NO SECOND PANEL, NO CATEGORY LEVEL: the multi-attack readout is a per-ability inline expansion', () => {
+  // JOS-105 killed the standalone `MultiAttackPanel.tsx` and moved its rows one level down, under a
+  // CATEGORY drill. JOS-113 removed that level too (owner: no category grouping); the double/triple
+  // is attached PER ABILITY now (abilityStats.abilityMultiAttack) and expands inline with the
+  // ability's crit/miss (combatShared.SkillReadout). So both the panel AND its replacement level
+  // are gone, and no surface may reintroduce either.
+  for (const gone of ['MultiAttackPanel.tsx', 'CategoryDrillBody.tsx', 'categoryDrill.ts']) {
+    assert.throws(() => src(`../src/renderer/src/features/combat/${gone}`), /ENOENT/, `${gone} is back`)
+  }
+  // The per-ability reading is where the numbers live now, off the engine's own round lanes.
+  const readout = src('../src/renderer/src/features/combat/combatShared.tsx')
+  assert.match(readout, /AbilityMulti|abilityExpandable/, 'the per-ability readout no longer sources the multi-attack stats')
+  // No surface mounts the old panel, and none carries a category-chip drill any more.
+  for (const [who, rel] of [
+    ['the Combat tab', '../src/renderer/src/features/combat/SegmentPanel.tsx'],
+    ['the drill body', '../src/renderer/src/features/combat/MeterRows.tsx'],
+    ['the overlay', '../src/renderer/src/overlay/meterBars.tsx']
+  ] as const) {
+    const text = src(rel)
+    assert.doesNotMatch(text, /<MultiAttackPanel\b/, `${who} still mounts a separate panel`)
+    assert.doesNotMatch(text, /kind:\s*'category'|category-chip|overlay-category/, `${who} still carries a category-chip drill`)
   }
 })
 

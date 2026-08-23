@@ -10,10 +10,15 @@
 //     three items writes three lines with the SAME ts. Both orders must therefore be TOTAL: each
 //     bottoms out in the item name, and neither depends on input order. (Before this change the
 //     count order fell through to Map insertion order on a full tie.)
-//   - the two keys genuinely disagree — a single recent pickup outranks a long-ago favourite
-//     grind under recency and loses to it under count, which is the whole reason to offer both;
-//   - the FAVORITES PIN is a stable second pass, so it re-blocks the list without disturbing the
-//     chosen order inside either block (this test replicates groupLootRows' exact two passes).
+//   - the two keys genuinely disagree — a single recent pickup outranks a long-ago grind under
+//     recency and loses to it under count, which is the whole reason to offer both.
+//
+// A CLAIM THIS FILE USED TO MAKE, AND DOES NOT ANY MORE (JOS-345). There was a test here for the
+// FAVORITES PIN — the stable second pass `groupLootRows` ran after the comparator, lifting starred
+// items into a block on top. The favorite star left the loot window on the owner's ruling and the
+// pin left with it, so the claim is deleted rather than weakened: `groupLootRows` runs exactly one
+// pass now, and the totality test below is the whole statement of what the grouped table's order
+// is. A removal removes its claims.
 //
 // Why the sort lives in its own module and is tested here rather than through `groupLootRows`:
 // lootGrouping imports lootItemData → data/index → `@shared/profiles`, a value import that does
@@ -130,31 +135,20 @@ test('compareLootRows agrees with sortLootRows on the pairwise calls', () => {
   for (const opt of LOOT_SORT_OPTIONS) assert.equal(compareLootRows(opt.value)(older, older), 0)
 })
 
-test('the favorites pin is a stable second pass — it re-blocks, it does not re-order', () => {
-  // Exactly what groupLootRows does: sort by the chosen key, then a stable sort on favorited.
-  const favorites = new Set(['Sphinx Claw', 'Bone Chips'])
-  const pin = (rows: SortableLootRow[]): SortableLootRow[] =>
-    [...rows].sort((a, b) => Number(favorites.has(b.item)) - Number(favorites.has(a.item)))
-
+test('the chosen order is the WHOLE order — nothing re-blocks the list behind it (JOS-345)', () => {
+  // The same four rows the deleted favorites-pin test used, asserted against what `groupLootRows`
+  // does today: sort once, by the chosen key, and hand that back. Two of these names were the
+  // starred ones, and they no longer travel together or lead the list — they sit exactly where
+  // count and recency put them, which is the point of the removal.
   const list = [
-    row('Bone Chips', 3, 100), // favorited, oldest
-    row('Rune Word', 12, 50), // not favorited, most looted
-    row('Sphinx Claw', 7, 900), // favorited, newest
-    row('Silk Swatch', 1, 800) // not favorited
+    row('Bone Chips', 3, 100), // the oldest
+    row('Rune Word', 12, 50), // the most looted
+    row('Sphinx Claw', 7, 900), // the newest
+    row('Silk Swatch', 1, 800)
   ]
 
-  const byRecent = pin(sortLootRows(list, 'recent'))
-  assert.deepEqual(names(byRecent), ['Sphinx Claw', 'Bone Chips', 'Silk Swatch', 'Rune Word'])
-  const byCount = pin(sortLootRows(list, 'count'))
-  assert.deepEqual(names(byCount), ['Sphinx Claw', 'Bone Chips', 'Rune Word', 'Silk Swatch'])
-
-  // The favorites block itself follows the chosen key, and nothing crossed the pin boundary.
-  const favNames = (l: SortableLootRow[]): string[] => names(l).filter((n) => favorites.has(n))
-  assert.deepEqual(favNames(byRecent), ['Sphinx Claw', 'Bone Chips'])
-  assert.deepEqual(favNames(byCount), ['Sphinx Claw', 'Bone Chips'])
-  for (const l of [byRecent, byCount]) {
-    assert.deepEqual(names(l).slice(0, 2), favNames(l), 'favorites must occupy the top block')
-  }
+  assert.deepEqual(names(sortLootRows(list, 'recent')), ['Sphinx Claw', 'Silk Swatch', 'Bone Chips', 'Rune Word'])
+  assert.deepEqual(names(sortLootRows(list, 'count')), ['Rune Word', 'Sphinx Claw', 'Bone Chips', 'Silk Swatch'])
 })
 
 test('the key union is closed — a new option cannot ship without a comparator', () => {

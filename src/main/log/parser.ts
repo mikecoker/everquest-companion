@@ -34,20 +34,30 @@ import {
   classifyAaActivate,
   classifyCastLifecycle,
   classifyCcApply,
+  classifyCcWake,
   classifyCharm,
   classifyDbBuff,
   classifyIllusionFade,
   classifyPetClaim,
+  classifyAllyPetLeader,
   classifyPetLeader,
   classifyPetSay,
   classifyPoisonCoat,
   classifyPoisonProc,
   classifySpellEmote,
+  classifySpellGems,
   classifyStance,
   classifyWornOff
 } from './parseCasts'
-import { classifyItemActivate, classifySelfWho, classifySkillUp, classifySpecialAttack } from './parseWho'
-import { classifyCamp, classifySessionStart } from './parseSession'
+import {
+  classifyClassUnlock,
+  classifyItemActivate,
+  classifySelfWho,
+  classifySkillUp,
+  classifySpecialAttack
+} from './parseWho'
+import { classifyAcquire } from './parseAcquire'
+import { classifyCamp, classifyOutputFile, classifySessionStart } from './parseSession'
 import { classifyGroup } from './parseGroup'
 import {
   classifyAa,
@@ -107,6 +117,11 @@ const CLASSIFIERS: readonly Classifier[] = [
   classifyCharm,
   classifyWornOff,
   classifyCcApply,
+  // …and the OTHER end of the same hold (JOS-180): `<mob> has been awakened by <name>.`, the one
+  // line that says a mez ENDED EARLY rather than merely ended. All 1,518 occurrences in the real
+  // log measured `{kind:'unknown'}` before this entry existed, so the position is for legibility
+  // (beside the family it annotates) and not for disambiguation.
+  classifyCcWake,
   classifyPetClaim,
   // …and the PUBLIC half of the same family, directly beneath it so the private/public split
   // is visible in the cascade itself (JOS-47). Cannot shadow anything: the six sentences it
@@ -118,6 +133,12 @@ const CLASSIFIERS: readonly Classifier[] = [
   // and "My leader is <X>." are disjoint), and this shape was `{kind:'unknown'}` before it
   // existed — the whole log holds exactly one line of it.
   classifyPetLeader,
+  // …and the SAME sentence about somebody else (JOS-250). It MUST sit directly beneath the self
+  // rule and never above it: the two differ only in whose name the second capture holds, so the
+  // self rule has to be offered every line first or your own `/pet who leader` answer would parse
+  // as a stranger's pet. It claims nothing the self rule claims, and the whole log holds zero
+  // lines of its shape (the one occurrence of the family names the owner).
+  classifyAllyPetLeader,
   classifyDeath,
   classifyZone,
   // SESSION frame (login / camp-out / camp-abort). Beside the zone rule because they answer
@@ -129,6 +150,12 @@ const CLASSIFIERS: readonly Classifier[] = [
   // position is for legibility, not disambiguation.
   classifySessionStart,
   classifyCamp,
+  // THE EXPORT RECEIPT (JOS-128) — `Outputfile Complete: <file>`. Beside the session frame
+  // because it is the same level: the player operating the CLIENT, not the world. It is
+  // anchored at the start of the message and gated on a leading `O`, and the whole log holds
+  // exactly two lines of this shape, both previously `{kind:'unknown'}` — so like its three
+  // neighbours it can neither shadow nor be shadowed, and the position is for legibility.
+  classifyOutputFile,
   // WHO YOU ARE WITH (docs/plans/group-model.md §1) — beside the session frame for the same
   // reason those two are beside the zone rule: they are the frame around the world model, one
   // level up from its contents. Every shape it claims was MEASURED to be `{kind:'unknown'}`
@@ -137,6 +164,14 @@ const CLASSIFIERS: readonly Classifier[] = [
   classifyGroup,
   classifyLoot,
   classifyItemMerge,
+  // EVERY OTHER WAY AN ITEM OR A COIN REACHES YOU (JOS-144, parseAcquire.ts) — coin off a
+  // corpse, a merchant buy or sell, a destroy payout, a marketplace delivery, a tradeskill
+  // combine. It sits directly beneath the two corpse families because it is the rest of the
+  // same question, and BENEATH rather than above so a loot sentence is never offered to it
+  // first. It cannot shadow anything regardless: a full-log replay measured all 5,002 lines it
+  // claims as `{kind:'unknown'}` beforehand, and the histogram of the 46 pre-existing kinds is
+  // byte-identical across the change.
+  classifyAcquire,
   classifyTurnIn,
   classifyLevel,
   // Experience: gated on a `You gain ` prefix and END-anchored, so it can only ever claim the
@@ -151,6 +186,12 @@ const CLASSIFIERS: readonly Classifier[] = [
   classifyAaPotion,
   classifyAaActivate,
   classifyStance,
+  // WHAT IS IN YOUR GEMS (JOS-391) — memorize / forget / spell set. Beside the stance and
+  // invocation rules because it is the same family of statement (the player operating their own
+  // character sheet, not the world acting on them), and, like them, MEASURED to claim only lines
+  // that were `{kind:'unknown'}` beforehand: all 4,321 begin, 4,285 finished, 4,232 forget and
+  // 474 spell-set lines of the owner's 2,048,450-line log. So the position is legibility.
+  classifySpellGems,
   // CLASS EVIDENCE (class-combo inference Wave 1). Both are gated on a substring probe and
   // both were MEASURED to claim only lines that previously produced `{kind:'unknown'}` (all
   // 421 /who rows, all 10,216 skill-ups). They sit beside the stance/invocation rule because
@@ -163,6 +204,12 @@ const CLASSIFIERS: readonly Classifier[] = [
   // statements about the CHARACTER — and, like them, MEASURED to claim only lines that were
   // `{kind:'unknown'}` before it existed (all 21).
   classifySpecialAttack,
+  // WHAT THE CHARACTER IS ALLOWED TO BE (JOS-148) — the fourth statement-about-the-character,
+  // beside the three above for that reason. Anchored on the full `You have completed
+  // achievement: Primary Class Unlock - ` prefix and gated on the leading `Y`; a full-log sweep
+  // measured all 155 lines of the achievement family as `{kind:'unknown'}` before it existed, so
+  // like its neighbours it can neither shadow nor be shadowed and the position is legibility.
+  classifyClassUnlock,
   classifyIllusionFade,
   classifyPoisonCoat,
   classifyPoisonProc,

@@ -173,6 +173,26 @@ export class ComboModule implements EqModule<ComboSnap, ComboDelta> {
     return this.intervals
   }
 
+  /**
+   * THE RESOLVED LOADOUT RIGHT NOW — the open interval, or null when the model has nothing to
+   * say (JOS-305). The combat engine's blade-coat clear reads this and nothing else, so the app
+   * has exactly ONE class detector rather than a second one grown inside the engine.
+   *
+   * DELIBERATELY NOT `snapshot()`. That method is the renderer's new BASELINE: it rewrites
+   * `pushed`, so a main-side caller using it would silently swallow the next delta and freeze the
+   * Combo card on screen. This is a pure read of the same fold — `current()` rebuilds if anything
+   * moved and returns the memo otherwise — and it touches no delta bookkeeping at all.
+   *
+   * `null` on an empty table set, for the reason `ComboSnap.ready` exists: before the class scrape
+   * runs, every slot would come back UNKNOWN, and "unknown" is an answer a caller could act on.
+   * The absence of an answer is not the same as an answer, and this seam says so in the type.
+   */
+  currentInterval(): ComboInterval | null {
+    if (!TABLES_READY) return null
+    const intervals = this.current()
+    return intervals.length > 0 ? intervals[intervals.length - 1] : null
+  }
+
   snapshot(): { seq: number; state: ComboSnap } {
     const intervals = this.current()
     // A snapshot IS the renderer's new baseline, so the delta bookkeeping resets with it —

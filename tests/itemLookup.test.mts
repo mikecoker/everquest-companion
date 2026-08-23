@@ -18,6 +18,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   parseDropSources,
+  parseEraBodyTag,
+  parseEraCategory,
   parseEraTag,
   parseItemWikitext,
   parseQuestLinks,
@@ -343,6 +345,90 @@ test('parseEraTag reads the page-top banner, and refuses everything that only lo
   // And end to end: the trimmed fixtures in this file open at `{{Itempage`, so they state none.
   assert.equal(parseItemWikitext('Sphinx Claw', SPHINX_CLAW).eraTag, undefined)
   assert.equal(parseItemWikitext('Sphinx Claw', `{{Fear Era}}\n${SPHINX_CLAW}`).eraTag, 'Fear')
+})
+
+// ---- the two era claims that are NOT in the page head (JOS-328) ---------------------------
+//
+// The verbatim shapes, from the two families the corpus-wide sweep found: `Small Fine Steel
+// Breastplate` puts its `{{Classic Era}}` inside `|playercrafted`, and `Flowing Red Silk Sash`
+// writes `[[Category:Kunark Era]]` at the foot with no banner anywhere. Both render an era claim on
+// the live page; neither is visible to the head-anchored reader above.
+
+/** Verbatim head of Small Fine Steel Breastplate (the banner-in-the-body family, 36 pages). */
+const BODY_BANNER = `{{delete}} not relevent in EQ legends
+
+<onlyinclude>{{Itempage
+|notes       = Part of the [[Fine Plate#Small|Small Fine Plate Armor]] set.
+|itemname    = Small Fine Steel Breastplate
+|statsblock  =
+Slot: CHEST<br>
+AC: 19<br>
+|playercrafted =
+{{Classic Era}}
+* [[Blacksmithing]] (Trivial: 228)
+}}</onlyinclude>
+
+[[Category:Cleric Equipment]]`
+
+/** Verbatim foot of Flowing Red Silk Sash (the hand-written-category family, 8 read pages). */
+const FOOT_CATEGORY = `
+<onlyinclude>{{Itempage
+|itemname    = Flowing Red Silk Sash
+|statsblock  =
+Slot: WAIST<br>
+Haste: +6%  <br>
+}}</onlyinclude>
+
+[[Category:Kunark Era]]
+[[Category:Waist]]
+[[Category:Timorous Deep]]`
+
+test('parseEraBodyTag reads a banner BELOW the item template, and only when they agree', () => {
+  assert.equal(parseEraBodyTag(BODY_BANNER), 'Classic')
+  assert.equal(parseEraBodyTag('{{Itempage\n|playercrafted = \n{{Kunark_Era}}\n}}'), 'Kunark')
+  // The same token twice is one claim, however it is spelled.
+  assert.equal(parseEraBodyTag('{{Itempage}}{{Velious Era}} x {{Velious  Era}}'), 'Velious')
+
+  // REFUSALS. Two body banners that DISAGREE state nothing — a page arguing with itself is not
+  // evidence, and taking the first would be a coin toss. `{{Era|Kunark}}` is the argument form the
+  // pattern cannot match at all. A page with no {{Itempage}} has no body to read. And the head
+  // banner is NOT the body: it sits above the anchor and belongs to `parseEraTag`.
+  assert.equal(parseEraBodyTag('{{Itempage}}{{Classic Era}}\n{{Velious Era}}'), undefined)
+  assert.equal(parseEraBodyTag('{{Itempage}}{{Era|Kunark}}'), undefined)
+  assert.equal(parseEraBodyTag('{{Classic Era}}\nnot an item page'), undefined)
+  assert.equal(parseEraBodyTag('{{Classic Era}}\n{{Itempage}}'), undefined)
+})
+
+test('parseEraCategory reads the page filing, and refuses the ones the register never named', () => {
+  assert.equal(parseEraCategory(FOOT_CATEGORY), 'Kunark')
+  assert.equal(parseEraCategory('[[Category:Velious Era]]'), 'Velious')
+  assert.equal(parseEraCategory('[[Category:Chardok Revamp Era|*]]'), 'Chardok Revamp')
+
+  // THE LAW-1 CLAUSE. `{{P99 Era Header| Nov | 2000 }}` files 8 corpus pages under a category that
+  // LOOKS like an era and names none; unlike a banner, a category renders nothing, so an unknown
+  // key is silence rather than the register's `#default`.
+  assert.equal(parseEraCategory('[[Category:Nov 2000 Era]]'), undefined)
+  assert.equal(parseEraCategory('[[Category:Mar 2000 Era]]'), undefined)
+  assert.equal(parseEraCategory('[[Category:May 1999 Era]]'), undefined)
+  // Two eras filed on one page, and the non-era categories every page carries.
+  assert.equal(parseEraCategory('[[Category:Classic Era]]\n[[Category:Kunark Era]]'), undefined)
+  assert.equal(parseEraCategory('[[Category:Waist]]\n[[Category:Quest Items]]'), undefined)
+  assert.equal(parseEraCategory(''), undefined)
+})
+
+test('the three era readers layer strongest-first, and each speaks only into silence', () => {
+  // End to end through the shipped `parseItemWikitext`: head > body > category, and a page that
+  // states none of the three keeps `eraTag` OFF rather than guessing (law 1).
+  assert.equal(parseItemWikitext('Small Fine Steel Breastplate', BODY_BANNER).eraTag, 'Classic')
+  assert.equal(parseItemWikitext('Flowing Red Silk Sash', FOOT_CATEGORY).eraTag, 'Kunark')
+  assert.equal(parseItemWikitext('Sphinx Claw', SPHINX_CLAW).eraTag, undefined)
+
+  // The head wins over both, and the body wins over the category — the order is the strength of
+  // the evidence: what the page OPENS with, then what it renders anywhere, then how it is filed.
+  const all = `{{Sky Era}}\n{{Itempage\n|playercrafted = {{Classic Era}}\n}}\n[[Category:Kunark Era]]`
+  assert.equal(parseItemWikitext('x', all).eraTag, 'Sky')
+  const bodyAndCat = `{{Itempage\n|playercrafted = {{Classic Era}}\n}}\n[[Category:Kunark Era]]`
+  assert.equal(parseItemWikitext('x', bodyAndCat).eraTag, 'Classic')
 })
 
 // The tradeskill NEGATIVE for this page lives here rather than in the tradeskill file

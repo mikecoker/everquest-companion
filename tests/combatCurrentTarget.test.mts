@@ -51,6 +51,13 @@ const T = (clock: string): number => Date.parse(`Sun Aug 02 ${clock} 2026`)
  */
 function replayUntil(untilTs: number, observeAt = untilTs + 500, opts = {}): CombatSnapshot {
   const eng = new CombatEngine()
+  // LIVE FROM THE START, because that is the only state anybody ever LOOKS at a meter in, and
+  // since JOS-208 phase 4 it is also the only state the wall-clock closure sweep runs in: a
+  // replay is not a moment in time, so `snapshot(now)` no longer finalizes a fight while the
+  // historical fold is still reading (engine.ts). Every window below asks what the meter shows
+  // after its span, which is a live question; the poll-lag arms model the live tick race and
+  // still exercise it.
+  eng.setLive()
   eng.setPlayerName('Primitive')
   let seq = 0
   for (const raw of W24) {
@@ -137,6 +144,7 @@ test('CT5: it tracks the switch back and forth within one open pull', () => {
     '[Sun Jul 19 09:00:03 2026] You crush a cave goblin for 40 points of damage.'
   ]
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   const seen: (string | undefined)[] = []
   let seq = 0
@@ -164,6 +172,7 @@ test('CT6 (tripwire): the accessor is READ-ONLY — no total moves, no segment m
   // three times, interleaved with a zone-scoped snapshot — must change nothing at all.
   const last = T('15:32:17')
   const eng = new CombatEngine()
+  eng.setLive()
   eng.setPlayerName('Primitive')
   let seq = 0
   for (const raw of W24) {

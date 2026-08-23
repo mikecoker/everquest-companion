@@ -37,14 +37,15 @@ import {
   MIGRATIONS,
   PRE_CHARACTER_PROGRESS_KEY,
   SCHEMA_VERSION_KEY,
-  backupPathFor,
   migrateStoreData,
-  migrateStoreFile,
-  quarantinePathFor,
   readSchemaVersion,
   type Migration,
   type StoreData
 } from '../src/main/storeMigrations'
+// The FILE half is its own module since JOS-272 (storeMigrations.ts was at the 400-code-line
+// ceiling and the salvage path had to go somewhere). Same functions, same behaviour, one import
+// line further down.
+import { backupPathFor, migrateStoreFile, quarantinePathFor } from '../src/main/storeFile'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 
@@ -190,15 +191,31 @@ test('an EMPTY pre-framework store migrates to a valid current store, not to jun
     // No `enabled` on the voice blob: schema v8 retired the master switch (an alert's own
     // `audio` is the whole switch), so a fresh store carries configuration and no permission.
     voice: { engine: 'system', voiceId: null, rate: 1, volume: 1 },
-    cursorRing: { enabled: false, sizePx: 44, thicknessPx: 4 },
+    // `colorHex` joined the ring blob in JOS-125 with NO schema bump — one more field the
+    // step-5 normalizer defaults, and white is the colour the ring already had.
+    cursorRing: { enabled: false, sizePx: 44, thicknessPx: 4, colorHex: '#ffffff' },
     overlayAutoHide: { hideWhenNotRunning: true, hideWhenUnfocused: false },
     // `funnelsDone` is the once-ever funnel ledger (src/main/telemetry/funnels.ts): empty here,
     // which is what makes a fresh install able to report `installed` exactly once.
     telemetry: { enabled: true, noticeShown: false, analyticsId: null, funnelsDone: [] },
     perfHud: { enabled: false },
-    // Both graphics-compatibility switches off (v10, JOS-40): software rendering and opaque
-    // overlays are workarounds for a driver, and a fresh store has no driver complaint.
-    graphics: { safeMode: false, opaqueOverlays: false },
+    // Both graphics-compatibility switches on 'auto' (v10 JOS-40, v11 JOS-31): software rendering
+    // and opaque overlays are workarounds for a driver or a compositor, and a fresh store has no
+    // complaint about either. 'auto' is not 'on' — it resolves to OFF on every machine where the
+    // Wine detection finds nothing (shared/graphicsPrefs.ts `resolveGraphics`), which is all of
+    // them here. What it buys is the ability to say 'off' and MEAN it, which a boolean could not.
+    graphics: { safeMode: 'auto', opaqueOverlays: 'auto' },
+    // ON (v12, JOS-366), and the only blob in this shape whose default is `true`. It is a
+    // statement about what this app is next to the game it sits beside — never the foreground
+    // experience, nothing it does latency-critical — rather than an instrument or a workaround,
+    // which is why it does not ship off like the two above it.
+    processPriority: { yieldToGame: true },
+    // ON (v14, JOS-385), and the SECOND blob here whose default is `true` — for a different
+    // reason, worth stating so the next author does not read "new switches ship off" as the whole
+    // rule. This one was MEASURED: the shipped default is whatever the player-versus-pet
+    // comparison on a real log said, and it said NPC casters are not systematically easier to
+    // resist than players. The switch stays because that is a fact a patch could move.
+    resists: { includeNpcCasters: true },
     [SCHEMA_VERSION_KEY]: CURRENT_SCHEMA_VERSION
   })
 })

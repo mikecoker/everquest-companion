@@ -5,6 +5,9 @@
  *   npx tsx scripts/linear.mts create "Title" --state Backlog [--desc "..."]
  *   npx tsx scripts/linear.mts move JOS-18 "In Progress"
  *   npx tsx scripts/linear.mts comment JOS-18 "E1 doer dispatched (worktree agent)"
+ *   npx tsx scripts/linear.mts comment JOS-18 --file brief.md   (multi-line bodies MUST use
+ *       --file / --desc-file: on Windows the npx cmd shim mangles argv at the first blank
+ *       line, silently truncating anything passed inline — proven 2026-08-14)
  *
  * CANONICAL PROJECT MANAGEMENT (owner decision, 2026-08-05): the kanban in the owner's
  * personal Linear workspace (Josh's Maker Space, team JOS — NEVER the work workspace) is the
@@ -90,8 +93,11 @@ if (cmd === 'list') {
 } else if (cmd === 'create' && a) {
   // --priority: 1 urgent, 2 high, 3 medium, 4 low (Linear's own scale; 0/absent = none)
   const prio = flag('priority')
+  const descFile = flag('desc-file')
   const input: Record<string, unknown> = {
-    teamId: team.id, title: a, description: flag('desc') ?? '', stateId: stateId(flag('state') ?? 'Todo')
+    teamId: team.id, title: a,
+    description: descFile !== undefined ? readFileSync(descFile, 'utf8') : (flag('desc') ?? ''),
+    stateId: stateId(flag('state') ?? 'Todo')
   }
   if (prio !== undefined) input.priority = Number(prio)
   const d = await gql<{ issueCreate: { issue: { identifier: string } } }>(
@@ -105,12 +111,27 @@ if (cmd === 'list') {
     id: issue.id, sid: stateId(b)
   })
   console.log(`${issue.identifier} -> ${b}`)
-} else if (cmd === 'comment' && a && b) {
+} else if (cmd === 'edit' && a && (flag('title') !== undefined || flag('desc-file') !== undefined)) {
+  // Rewrite an existing ticket's title and/or body in place (a ticket that graduates from GATED
+  // to a build brief keeps its identifier and its comment history).
   const issue = await issueByIdentifier(a)
+  const input: Record<string, unknown> = {}
+  const title = flag('title')
+  const descFile = flag('desc-file')
+  if (title !== undefined) input.title = title
+  if (descFile !== undefined) input.description = readFileSync(descFile, 'utf8')
+  await gql('mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }', {
+    id: issue.id, input
+  })
+  console.log(`${issue.identifier} edited`)
+} else if (cmd === 'comment' && a && (b || flag('file'))) {
+  const issue = await issueByIdentifier(a)
+  const file = flag('file')
+  const body = file !== undefined ? readFileSync(file, 'utf8') : b
   await gql('mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }', {
-    id: issue.id, body: b
+    id: issue.id, body
   })
   console.log(`${issue.identifier} commented`)
 } else {
-  console.log('usage: linear.mts list [--state S] | create "Title" [--state S] [--desc D] | move JOS-N "State" | comment JOS-N "text"')
+  console.log('usage: linear.mts list [--state S] | create "Title" [--state S] [--desc D|--desc-file F] | edit JOS-N [--title T] [--desc-file F] | move JOS-N "State" | comment JOS-N "text"|--file F')
 }

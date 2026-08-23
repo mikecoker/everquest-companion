@@ -5,8 +5,8 @@
 //   ingestWorld    — epoch / zone / charm / petClaim / uncharm / cc / death: the
 //                    entity and segmentation lifecycle.
 //   ingestCombat   — damage / heal / healUnstated / mitigation / miss / resist: the meter itself.
-//   ingestCast     — castBegin / fizzle / interrupt: the own-cast lifecycle both ownership
-//                    inferences (cast-less procs, charm/CC binding) run off.
+//   ingestCast     — castBegin / fizzle / interrupt / resume: the own-cast lifecycle both
+//                    ownership inferences (cast-less procs, charm/CC binding) run off.
 //   ingestChoice   — stance / invocation / active special attack: the character's STANDING
 //                    choices, which persist across pulls and zones until the game prints a
 //                    different one. Not events in a fight; they change what a swing MEANS.
@@ -17,21 +17,48 @@
 
 import { idKey } from '../log/parser'
 import { damageCategory } from './taxonomy'
-import { evalClosure, ensureEncounter, finalizeCurrent, finalizeZoneSession } from './lifecycle'
-import { route, routeHeal, routeHealUnstated, routeMiss, routeMitigation, routeResist } from './routing'
+import {
+  evalClosure,
+  ensureEncounter,
+  finalizeCurrent,
+  finalizeZoneSession,
+  resetZoneAccumulators
+} from './lifecycle'
+import { route, routeHeal, routeHealUnstated, routeMiss, routeMitigation, routeResist, verdict } from './routing'
 import { SEC_ANALYTICS, SEC_DISPATCH } from './foldProbe'
 import {
   applyStance,
+  clearCoats,
   routeCoat,
   routeDispelLanding,
   routeDry,
   routeProc,
   routeProcBuffApply,
-  routeProcBuffWearOff
+  routeProcBuffWearOff,
+  routeSelfLandingProc
 } from './procRouting'
-import { QUICK_BUFF_AA, isCastless, isCastlessHeal, noteCast, procEligibleDamage } from './procDetect'
+// LEAVING ROGUE BARES THE BLADES (JOS-305) — its own module, because the whole feature is the
+// GATE on when the class model may be consulted, and that reasoning does not belong in a switch.
+import { sweepCoatClass } from './coatClass'
+import {
+  QUICK_BUFF_AA,
+  castlessKind,
+  isCastlessHeal,
+  laneNameFor,
+  procEligibleDamage,
+  type SpellOrigin
+} from './procDetect'
+// SOMEBODY ELSE'S CHARM PET (JOS-250) — its own module, for the reason its header states: it is
+// one feature whose four ingest handlers and two routing paths would otherwise push both this file
+// and routing.ts past the measured 400-line ceiling.
+import { ingestAllyPetLeader, ingestForeignCharm, ingestOtherCastBegin } from './allyRouting'
+// …and its sibling: the three lines that bind one of YOUR pets, extracted VERBATIM by the same
+// split (petClaims.ts). Two ownership features, two modules, one dispatch switch.
+import { bindPetBuffLanding, ingestPetClaim } from './petClaims'
+// …and the coaching nudge that exists BECAUSE those three routes are all there are (JOS-258).
+import { isPetSummonSpell } from './petNudge'
 import { CC_HOLD_MS } from './encounter'
-import { Agg, type DamageEvent } from './aggregate'
+import { type Agg, type DamageEvent } from './aggregate'
 import type { WindowFold } from './procWindows'
 import type { EngineState } from './state'
 import type { Attribution } from './routing'
@@ -44,7 +71,6 @@ import type {
   LogEvent,
   MissEvent,
   MitigationEvent,
-  PetClaimEvent,
   SpecialAttackEvent
 } from '../../shared/logEvents'
 
@@ -64,7 +90,7 @@ import type {
  */
 function ingestCc(st: EngineState, ev: CcEvent): void {
   if (!ev.refresh && !st.charm.ccBroadcast(ev.ts)) {
-    st.log(ev.ts, 'cc', 'dropped', `✜ CC on ${ev.mob} — not ours (no own cast to resolve)`)
+    st.log(ev.ts, 'cc', 'dropped', `✜ CC on ${ev.mob} - not ours (no own cast to resolve)`)
     return
   }
   evalClosure(st, ev.ts)
@@ -88,55 +114,24 @@ function ingestCc(st: EngineState, ev: CcEvent): void {
  */
 function ingestCharm(st: EngineState, ev: CharmEvent): void {
   const key = idKey(ev.mob)
+  // WHOEVER'S CHARM IT IS, THE THING IS A MOB (JOS-430). Stated before the ownership branch because
+  // it is true of both arms: a name a charm broadcast has ever spoken is not a combatant the
+  // record-everything ladder may keep its own row for. `st.notePet` below would say it for YOUR
+  // charm; a stranger's would otherwise leave the row standing beside the ally-pet one.
+  st.retractOther(key, 'a charm broadcast named it')
   if (st.charm.charmBroadcast(key, ev.mob, ev.ts) === 'foreign') {
-    st.log(ev.ts, 'charm', 'dropped', `⚡ ${ev.mob} charmed by someone else — not your pet`)
+    ingestForeignCharm(st, ev, key)
     return
   }
+  // YOUR charm wins outright over any ally bind of the same mob. It can happen — you charm what
+  // somebody else's charm just broke off — and two models both calling one entity a pet is exactly
+  // the duplicated-ownership shape law 4 is a scar from.
+  st.ally.release(key)
   const inst = st.world.charm(ev.mob, ev.ts)
   st.notePet(key)
   st.log(ev.ts, 'charm', 'info', `⚡ charmed ${st.world.label(inst)} [${inst.instanceId}]`)
 }
 
-/**
- * A pet identified you as its owner, so the named entity is your pet. TWO lines produce this
- * one event (shared/logEvents.ts PetClaimEvent), and this function deliberately does not care
- * which — `ev.via` reaches the debug line and nothing else:
- *
- *   via 'tell'   `<Name> told you, '… Master.'` — private, unforgeable, but only ever sent by a
- *                pet you have ORDERED.
- *   via 'leader' `<Name> says, 'My leader is <You>.'` — the `/pet who leader` answer (JOS-52),
- *                the on-demand way out of that blind spot. Broadcast, so the parser has already
- *                refused every one of these that named anyone but the tailed character; by the
- *                time it arrives here it is the same fact the tell states.
- *
- * Ownership-DEFINITIVE and pet-only, which is why it also PROMOTES: a name we saw charmed but
- * declined to bind (no own cast behind the broadcast) is bound HERE, and bound as CHARMED rather
- * than summoned — AGENTS.md's rule that a claim from a name ever seen charmed re-arms the
- * charmed set, never the permanent one.
- *
- * Otherwise it binds a SUMMONED pet (idempotent; a charmed mob sends the tell too — the real log
- * shows both — and world.claim() leaves an already-charmed instance's petKind alone, so a
- * charmed pet is never reclassified as summoned). It adds the name to the ATTRIBUTION set only.
- */
-function ingestPetClaim(st: EngineState, ev: PetClaimEvent): void {
-  const key = idKey(ev.name)
-  const promote = !st.world.petInstance(ev.name) && st.charm.claimIsCharmed(key, ev.ts)
-  const inst = promote ? st.world.charm(ev.name, ev.ts) : st.world.claim(ev.name, ev.ts)
-  st.notePet(key)
-  // The claim is also the corroboration a provisional charm bind was waiting for.
-  st.charm.notePetEvidence(key)
-  const how = ev.via === 'leader' ? ' (it named you its leader)' : ''
-  const what = promote ? 'charm claim' : 'pet claim'
-  st.log(ev.ts, promote ? 'charm' : 'pet', 'info', `⚡ ${what} ${st.world.label(inst)} [${inst.instanceId}]${how}`)
-  // SINGLE-PET SUCCESSION (JOS-54): claiming a NEW summoned pet retires the previous one inside
-  // the world model, and the name index has to follow it out or routing would go on admitting
-  // the retired pet's swings as yours. Same two-line follow-through death already does — the
-  // world model decides, `petNames` and the charm model are told.
-  for (const gone of st.syncPetNames()) {
-    st.charm.release(gone)
-    st.log(ev.ts, 'pet', 'info', `✕ ${gone} retired — one pet at a time; ${ev.name} is yours now`)
-  }
-}
 
 // THE ENGINE NO LONGER CONSUMES `petSay` (JOS-49). The six pet-voiced public sentences used to
 // NOMINATE — pairing one with "…and it is fighting your target" was what let the meter ask about
@@ -156,6 +151,13 @@ function ingestPetClaim(st: EngineState, ev: PetClaimEvent): void {
 
 function ingestDeath(st: EngineState, ev: DeathEvent): void {
   const key = idKey(ev.name)
+  // A DEAD PET IS NOT A PET (JOS-250). Unconditional and by NAME, unlike the world model's
+  // careful pet-vs-twin disambiguation below: an ally bind is name-keyed to begin with, so if the
+  // log says something of that name died, the honest reading is that the bind is over. Erring
+  // toward ending it is the safe direction here — the failure it prevents is crediting a stranger
+  // with a corpse's damage, and the failure it risks is losing a few seconds of a survivor's.
+  const goneAlly = st.ally.release(key)
+  if (goneAlly) st.log(ev.ts, 'charm', 'dropped', `✕ ${goneAlly.display} died - ${goneAlly.charmer}'s pet is gone`)
   const killerKey = ev.bySelf ? 'you' : ev.killer ? idKey(ev.killer) : undefined
   const res = st.world.death(ev.name, ev.ts, killerKey)
   // Keep the fast pet-name set in lockstep: only drop the name from the
@@ -166,11 +168,12 @@ function ingestDeath(st: EngineState, ev: DeathEvent): void {
   }
   // The retired instance stays in `engaged` (so an in-fight heal on the corpse
   // still counts) — closure consults world.isRetired(), not set membership.
-  // Clear any CC hold on the dead instance so it can't keep the fight open.
-  if (res.retired) st.current?.ccActiveUntil.delete(res.retired.instanceId)
+  // The dead instance's CC hold is cleared by the world model's own retirement hook
+  // (EngineState's `world.onRetire`, JOS-176) — this used to be a delete right here, which
+  // meant DEATH was the only retirement that cleaned up after itself and staleness was not.
   const petNote = res.wasPet ? ' (pet)' : ''
   const ambNote = res.ambiguous ? ' ~ambiguous' : ''
-  st.log(ev.ts, 'death', 'info', `☠ ${ev.name} died${petNote}${ambNote} — ${res.reason}`)
+  st.log(ev.ts, 'death', 'info', `☠ ${ev.name} died${petNote}${ambNote} - ${res.reason}`)
 }
 
 /** epoch / zone / charm / petClaim / uncharm / cc / death. Returns true if consumed. */
@@ -188,6 +191,15 @@ function ingestWorld(st: EngineState, ev: LogEvent): boolean {
       st.petNames = new Set()
       st.world.reset()
       st.charm.reset()
+      // …and the ally binds with them: they describe people standing beside a character that is
+      // not this one. The friendly set goes too, because `reset()` is a whole-model wipe.
+      st.ally.reset()
+      // …and the BLADE COATS go with them (JOS-305). This case used to censor the coat SPANS on
+      // the line below and leave `coatUtility` / `coatCombat` standing — the identical
+      // slot-versus-span disagreement the death rule was written to cure, rebuilt one boundary
+      // over. A rebirth is a different character; nothing was on these blades. Same shared door,
+      // so the two can never drift apart again.
+      clearCoats(st, ev.ts, 'epoch')
       // An epoch severs every active-state span: the beta character's stances, coats and buffs
       // are not this character's. CENSORED, never 'observed' (proc-analytics §3.1 boundaries).
       st.stateTimeline.censorAll(ev.ts)
@@ -204,11 +216,9 @@ function ingestWorld(st: EngineState, ev: LogEvent): boolean {
       // damage is dropped (nothing to show), matching the empty-encounter drop rule.
       finalizeZoneSession(st)
       st.zone = ev.zone
-      st.zoneAgg = new Agg()
-      st.zoneFinalizedMs = 0
-      st.zoneActiveMs = 0
-      st.zoneStartTs = 0
-      st.zoneLastTs = 0
+      // The accumulator half of the boundary is shared with the SESSION MARK now (JOS-322) — see
+      // `resetZoneAccumulators`. Everything BELOW this line is the part a mark deliberately omits.
+      resetZoneAccumulators(st)
       // Charm cannot survive a zone transition, and hostile mobs don't follow —
       // both are retired. SUMMONED class pets DO persist across zones (real-log
       // verified), so world.zone() returns the survivors (summoned pets only) and we
@@ -217,6 +227,9 @@ function ingestWorld(st: EngineState, ev: LogEvent): boolean {
       const survivors = st.world.zone(ev.ts)
       st.petNames = new Set(survivors.map((i) => i.nameKey))
       st.charm.zone(survivors.map((i) => i.nameKey))
+      // Somebody else's charm cannot survive a zone either, and neither can a cast in flight.
+      // The friendly SET survives (allyCharms.zone) — it is about people, not about the room.
+      st.ally.zone()
       st.log(ev.ts, 'zone', 'info', `▸ entered ${ev.zone}`)
       return true
     }
@@ -225,6 +238,22 @@ function ingestWorld(st: EngineState, ev: LogEvent): boolean {
       return true
     case 'petClaim':
       ingestPetClaim(st, ev)
+      return true
+    case 'allyPetLeader':
+      // The speaker just named somebody its leader, which settles what it is whether or not the
+      // ally model goes on to bind it (JOS-430).
+      st.retractOther(idKey(ev.pet), `named ${ev.owner} its leader`)
+      ingestAllyPetLeader(st, ev)
+      return true
+    case 'petSay':
+      // THE ENGINE CONSUMES `petSay` AGAIN, for one job and a different one (JOS-430). JOS-49 cut
+      // the question these six sentences used to answer — "is this one YOURS?" — and the note below
+      // still holds: a `says` line is broadcast and proves nothing about whose pet the speaker is.
+      // What it DOES prove is that the speaker is SOMEBODY's pet, which is exactly the fact the
+      // record-everything ladder cannot get any other way: EQ spells a summoned pet's name with the
+      // same grammar it gives people, so without this the strangers' pets in a raid keep rows of
+      // their own. Measured on the owner's whole log: it settles 8 names no other rung reaches.
+      st.retractOther(idKey(ev.name), `said a pet sentence (${ev.say})`)
       return true
     case 'uncharm': {
       // `Your <charm spell> spell has worn off of <mob>` — only the CASTER sees this, so it is
@@ -287,8 +316,9 @@ function mitigationLine(ev: MitigationEvent): string {
  *   - SWING = a melee or slay HIT (misses are added by the miss path). Slay counts because a
  *     Slay Undead proc rides an ordinary swing — it IS a swing.
  *   - PROC = a `dtype: 'spell'` line with no own cast behind it. `dot` is never eligible (its
- *     ticks are cast-detached by construction), which is the one gate that keeps this
- *     inference honest.
+ *     ticks are cast-detached by construction), and neither is a RAIN spell (its later waves
+ *     are cast-detached the same way — JOS-414). Those two gates are what keep this inference
+ *     honest.
  */
 interface DamageAnalytics {
   /** Attributed to YOU (not a pet, not incoming). */
@@ -300,6 +330,29 @@ interface DamageAnalytics {
 }
 
 /**
+ * WHERE ONE OF YOUR SPELL EFFECTS CAME FROM (JOS-167), decided BEFORE the line is routed
+ * because the answer names the meter LANE it lands in.
+ *
+ * It CONSUMES the cast claim (see procDetect's header), so it must be asked exactly once per
+ * damage line, in log order. `null` = the question does not arise: not a spell effect, not
+ * yours, or a line the meter drops anyway.
+ *
+ * The attribution is re-derived here rather than taken from `route()`'s return (JOS-59's
+ * sharing) for the plain reason that the lane name has to exist before `route()` is called. The
+ * two eligibility gates run FIRST and in that order, so only a `dtype: 'spell'` line of the
+ * player's ever pays for the extra `classify` — a few hundredths of the fold's damage lines.
+ */
+function damageOrigin(st: EngineState, ev: DamageEvent): SpellOrigin | null {
+  if (ev.amount <= 0) return null
+  if (!procEligibleDamage(ev.dtype, ev.skill)) return null
+  if (idKey(ev.attacker) !== 'you') return null
+  if (verdict(st, ev).kind !== 'out-you') return null
+  // The cast ledger answers cast-or-not; the held-clicky set is what turns a `proc` verdict into
+  // a `click` one (JOS-438). Empty set ⇒ identity, so this line changes nothing without a dump.
+  return castlessKind(st.recentCasts.origin(ev.skill, ev.ts), ev.skill, st.heldClickies)
+}
+
+/**
  * The three judgements, separated from the accumulation so each stays readable. `null` means
  * "the meter ignored this line", in which case the ledgers must ignore it too.
  *
@@ -307,8 +360,11 @@ interface DamageAnalytics {
  * re-derived here, which cost a second pair of `idKey` calls, a second roster pull and a second
  * result object per damage line for a decision that cannot have changed in between — nothing on
  * the routing path writes `petNames`, `knownPlayers` or the roster.
+ *
+ * `origin` is likewise ALREADY decided (`damageOrigin`, above) and is never recomputed: asking
+ * twice would take two claims off one cast line and count the second landing as a proc.
  */
-function damageAnalytics(st: EngineState, ev: DamageEvent, at: Attribution): DamageAnalytics | null {
+function damageAnalytics(ev: DamageEvent, at: Attribution, origin: SpellOrigin | null): DamageAnalytics | null {
   if (ev.amount <= 0) return null
   if (at.kind === 'ignore') return null
   // A GROUP MEMBER's hit is not yours, exactly like a pet's: it is not your swing, not your
@@ -317,8 +373,10 @@ function damageAnalytics(st: EngineState, ev: DamageEvent, at: Attribution): Dam
   // the same `mine: false` branch the pet does and moves no proc counter.
   if (at.kind !== 'out-you') return { mine: false, swing: 0, proc: false }
   const swing = ev.category === 'melee' || ev.category === 'slay' ? 1 : 0
-  const proc = procEligibleDamage(ev.dtype) && isCastless(st.recentCasts, ev.skill, ev.ts)
-  return { mine: true, swing, proc }
+  // A CLICK IS A CAST-LESS FIRING TOO (JOS-438), so it still folds a lane — `procDamage` and the
+  // Tier-B windows keep counting the damage an item effect delivered, which is what they are for.
+  // What changes is the LANE it lands in, and `foldDamageAnalytics` carries the marker there.
+  return { mine: true, swing, proc: origin === 'proc' || origin === 'click' }
 }
 
 /**
@@ -337,8 +395,23 @@ function foldBoth(st: EngineState, ts: number, fold: (agg: Agg, active: Readonly
   if (enc) fold(enc.agg, active)
 }
 
-function foldDamageAnalytics(st: EngineState, ev: DamageEvent, activeDeltaMs: number, at: Attribution): void {
-  const a = damageAnalytics(st, ev, at)
+/** Everything the analytics fold needs about one already-routed damage line. An args object
+ *  because the four values arrive from three different steps of `ingestDamage` and a positional
+ *  fifth parameter would blow `max-params`. */
+interface DamageFold {
+  /** The line as the LEDGER sees it: `skill` is the SPELL, never the split lane name, so the
+   *  proc ledger keeps keying on the spell and its join to the meter rows is unchanged. */
+  ev: DamageEvent
+  /** The engine's own per-hit active-time accrual, measured by the caller. */
+  activeDeltaMs: number
+  at: Attribution
+  /** `damageOrigin`'s already-consumed verdict; `null` when the question did not arise. */
+  origin: SpellOrigin | null
+}
+
+function foldDamageAnalytics(st: EngineState, f: DamageFold): void {
+  const { ev, activeDeltaMs, at } = f
+  const a = damageAnalytics(ev, at, f.origin)
   if (!a) return
   const p = st.probe
   if (p) p.enter(SEC_ANALYTICS)
@@ -353,7 +426,12 @@ function foldDamageAnalytics(st: EngineState, ev: DamageEvent, activeDeltaMs: nu
     agg.windows.fold(fold, active)
     agg.procs.addActiveMs(activeDeltaMs, active)
     if (a.swing) agg.procs.addSwing(active)
-    if (a.proc) agg.procs.addSpellProc({ spell: ev.skill, amount: ev.amount, isHeal: false, active })
+    if (a.proc) {
+      agg.procs.addSpellProc({
+        spell: ev.skill, side: 'damage', amount: ev.amount, active,
+        ...(f.origin === 'click' ? { click: true as const } : {})
+      })
+    }
   })
   if (p) p.leave()
 }
@@ -367,10 +445,13 @@ function foldHealAnalytics(st: EngineState, ev: HealEvent): void {
   const spell = ev.spell
   if (!spell || idKey(ev.healer ?? '') !== 'you') return
   if (!isCastlessHeal(st.recentCasts, { spell, ts: ev.ts, overTime: ev.overTime === true, quickBuffTs: st.quickBuffTs })) return
+  // The gate above has already reached `proc`; the held set is what promotes it (JOS-438). A
+  // clicky heal (Stein of Moggok's Light Healing) is the same shape as the damage side.
+  const click = castlessKind('proc', spell, st.heldClickies) === 'click'
   const p = st.probe
   if (p) p.enter(SEC_ANALYTICS)
   foldBoth(st, ev.ts, (agg, active) => {
-    agg.procs.addSpellProc({ spell, amount: ev.amount, isHeal: true, active })
+    agg.procs.addSpellProc({ spell, side: 'heal', amount: ev.amount, active, ...(click ? { click: true as const } : {}) })
   })
   if (p) p.leave()
 }
@@ -420,15 +501,24 @@ function ingestDamage(st: EngineState, ev: DamageEventE): void {
   // after a closure starts a fresh encounter rather than reviving the old one.
   evalClosure(st, ev.ts)
   const dmgEv = nameSpecialLane(st, toDamageEvent(ev, ev.attacker))
+  // WHERE IT CAME FROM, BEFORE IT IS FILED (JOS-167). The verdict names the lane, so it has to
+  // be reached before route() folds the hit — and it is reached exactly once, here.
+  const origin = damageOrigin(st, dmgEv)
+  // The lane a cast-less firing lands in. A fresh object, never a mutation: the canonical
+  // LogEvent is shared with every other module on the bus (same rule nameSpecialLane states).
+  const laned = origin === null ? dmgEv : { ...dmgEv, skill: laneNameFor(dmgEv.skill, origin) }
   // Read the engine's active-time clock either side of route(): the DIFFERENCE is the exact
   // capped-gap delta it accrued for this hit. A fresh encounter (route() opened one)
   // contributes 0, which is precisely what routing.ts does for a first hit.
   const encBefore = st.current
   const activeBefore = encBefore?.activeMs ?? 0
-  const at = route(st, dmgEv)
+  const at = route(st, laned)
   if (at === null) return
   const delta = st.current === encBefore ? (st.current?.activeMs ?? 0) - activeBefore : 0
-  foldDamageAnalytics(st, dmgEv, delta, at)
+  // The LEDGER gets the un-split event: `agg.procs.spellProcs` is keyed by the SPELL, so the
+  // ledger row, its PPM and its `proc · N ppm` tag stay one lane however many meter rows the
+  // spell now occupies.
+  foldDamageAnalytics(st, { ev: dmgEv, activeDeltaMs: delta, at, origin })
 }
 
 /** damage / heal / healUnstated / mitigation / miss / resist. Returns true if consumed. */
@@ -460,7 +550,14 @@ function ingestCombat(st: EngineState, ev: LogEvent): boolean {
       // `<mob> resisted your <Charm>!` is the third way an armed cast fails to land (Task #65).
       // Only OUR OWN outgoing resist counts; an incoming one (we shrugged off a mob's spell)
       // says nothing about what we were casting.
-      if (!ev.incoming && idKey(ev.caster) === 'you') st.charm.noteCastFailed(ev.spell, ev.ts)
+      if (!ev.incoming && idKey(ev.caster) === 'you') {
+        // A fully-resisted cast landed NOTHING, so like a fizzle it must not stay in the window
+        // to claim the next proc of the same name (JOS-167). `forget` drops only an UNCLAIMED
+        // record, which is what keeps a partially-resisted AoE honest: if a target of the same
+        // firing already took damage, the cast is spent and the rest of that instant still joins.
+        st.recentCasts.forget(ev.spell)
+        st.charm.noteCastFailed(ev.spell, ev.ts)
+      }
       routeResist(st, ev)
       return true
     default:
@@ -469,8 +566,8 @@ function ingestCombat(st: EngineState, ev: LogEvent): boolean {
 }
 
 /**
- * THE OWN-CAST LIFECYCLE — begin / fizzle / interrupt. Its own family because BOTH of the
- * engine's ownership inferences run off it, and they must see the same three lines:
+ * THE OWN-CAST LIFECYCLE — begin / fizzle / interrupt / resume. Its own family because BOTH of
+ * the engine's ownership inferences run off it, and they must see the same lines:
  *   - the cast-less PROC detector (proc-analytics §4.1): a spell effect with no cast behind it
  *     is a proc, and only the PLAYER prints `You begin casting <Spell>.` — a mob's or another
  *     player's cast is never in this map.
@@ -484,12 +581,38 @@ function ingestCombat(st: EngineState, ev: LogEvent): boolean {
 function ingestCast(st: EngineState, ev: LogEvent): boolean {
   switch (ev.kind) {
     case 'castBegin':
-      noteCast(st.recentCasts, ev.spell, ev.ts)
+      st.recentCasts.note(ev.spell, ev.ts)
       st.charm.noteCastBegin(ev.spell, ev.ts)
+      // …AND THE THIRD READER OF THE SAME EXCLUSIVITY (JOS-258). A pet SUMMON is knowable from
+      // this line and only from this line — the summon itself prints nothing the log can attribute
+      // — so a summon with no bind behind it is the one moment the meter can honestly say it is
+      // about to miss a pet. LIVE ONLY: a summon from four hours ago is not news, and the whole
+      // point of `hydrating` is that a replayed moment must not be dressed up as the present.
+      if (!st.hydrating && isPetSummonSpell(ev.spell)) st.petNudge.noteSummonCast(ev.ts)
       return true
     case 'castFizzle':
     case 'castInterrupted':
+      // A cast that resolved to nothing explains no landing (JOS-167), so its record goes —
+      // otherwise it sits in the window waiting to claim the next PROC of the same name as if
+      // it were the cast. An interrupt can still RECOVER, which is what `castResumed` is for.
+      st.recentCasts.forget(ev.spell)
       st.charm.noteCastFailed(ev.spell, ev.ts)
+      // The same argument, for the nudge: a summon that never resolved summoned nothing, and a
+      // nudge about a pet that does not exist is exactly the staleness the ruling forbids.
+      if (isPetSummonSpell(ev.spell)) st.petNudge.noteCastFailed()
+      return true
+    case 'otherCastBegin':
+      // THE LINE COMBAT NEVER INGESTED (JOS-250 — allyRouting.ts). The only sentence in this log
+      // that says who ELSE is casting what, and therefore the only thing that can name the owner
+      // of a caster-less `<mob> has been charmed.` broadcast.
+      ingestOtherCastBegin(st, ev)
+      return true
+    case 'castResumed':
+      // `You regain your concentration and continue your casting.` — the interrupted cast is
+      // back on and will land, so give it back its claim. Deliberately does NOT re-arm the
+      // charm/CC model: that model's own evidence rules are a separate question and were not
+      // measured here (charmModel.ts holds them).
+      st.recentCasts.resume()
       return true
     default:
       return false
@@ -507,7 +630,7 @@ function ingestSpecialAttack(st: EngineState, ev: SpecialAttackEvent): void {
   // verb and need no attribution; Slam — whose evidence refuses the claim, see specialAttacks.ts)
   // is still SEEN and still logged. Saying so is the honest report: the line was read and
   // deliberately not acted on.
-  const note = lane === undefined ? ' (no verb lane — label unchanged)' : ` (${lane} lane)`
+  const note = lane === undefined ? ' (no verb lane - label unchanged)' : ` (${lane} lane)`
   const from = ev.replaces === undefined ? '' : ` instead of ${ev.replaces}`
   st.log(ev.ts, 'special', 'info', `▸ special attack: ${ev.skill}${from}${note}`)
 }
@@ -556,11 +679,17 @@ function ingestModifier(st: EngineState, ev: LogEvent): void {
       // the dispel variants and such)" ledger. Message-driven and gated to DISPEL_FAMILY; it
       // names NO caster, and the view labels it accordingly.
       const names = ev.candidates.map((c) => c.name)
+      // …and the SAME stream is where an unordered pet finally names itself (JOS-188). Runs
+      // FIRST so the two curated gates below see a world model that already knows whose the
+      // buffed entity is. A third disjoint gate over one event, and the only one that binds.
+      if (ev.target !== 'self') bindPetBuffLanding(st, ev.ts, ev.target, names)
       routeDispelLanding(st, ev.ts, ev.target, names)
-      // The SAME landing stream also carries the tracked proc-buff spans (§3.2). Two disjoint
-      // curated gates over one event: DISPEL_FAMILY names a lane on a mob, PROC_BUFF_CATALOG
-      // opens a self-buff span. Neither can consume the other's lines.
+      // The SAME landing stream also carries the tracked proc-buff spans (§3.2), and — JOS-246 —
+      // the procs whose ONLY printed evidence IS a landing. Three disjoint curated gates over one
+      // event: DISPEL_FAMILY names a lane on a mob, PROC_BUFF_CATALOG opens a self-buff span, and
+      // SELF_LANDING_PROCS counts a firing. None can consume another's lines.
       routeProcBuffApply(st, ev.ts, ev.target, names)
+      routeSelfLandingProc(st, ev.ts, ev.target, names)
       return
     }
     case 'buffWearOff':
@@ -577,22 +706,25 @@ function ingestModifier(st: EngineState, ev: LogEvent): void {
       if (idKey(ev.name) === QUICK_BUFF_AA) st.quickBuffTs = ev.ts
       return
     case 'playerDeath':
-      // A boundary that SEVERS every span. The end is unknowable, so it is 'censored' — never
-      // 'observed', and never a fabricated expiry (law 1).
-      st.stateTimeline.censorAll(ev.ts)
       // BLADE COATS DIE WITH YOU (corrected 2026-08-04). eqlwiki's Rogue page states poisons
       // "remain active until class swap or death", and the log corroborates it without ever
       // printing a dry line for it: `Your Paralytic Poison spell did not take hold. (Blocked by
       // Neurotoxic Poison.)` at 20:01:47 Aug 03, then — after `You have been slain by a rock
       // golem!` at 21:01:40 — the SAME Paralytic coat lands cleanly at 21:15:23. Something
-      // removed Neurotoxic in between and no line said so. Until this, the slot state and the
-      // span timeline disagreed at exactly this instant: censorAll ended the coat spans while
-      // `coatUtility` kept naming a poison the corpse no longer had, which made the header show
-      // a dead coat and `slowExpected` true for pulls that could not slow.
-      // NOT modeled, and stated rather than guessed: the wiki's other clearer, a CLASS SWAP.
-      // The combat engine sees no loadout signal, so a swap leaves the coats standing.
-      st.coatUtility = undefined
-      st.coatCombat = []
+      // removed Neurotoxic in between and no line said so.
+      //
+      // FIRST, and through the shared door (JOS-305). The coat clear runs BEFORE `censorAll`
+      // below so the coat spans close through `clearCoats`, which — unlike a bare censor — also
+      // STAMPS the window transition the way `routeDry` does. That stamp is what discards the
+      // boundary minute from the Tier-B purity gate, and a minute in which the player died and
+      // four coats ended is the last minute that should be believed clean. `censorAll` then
+      // finds the coat groups already closed and severs everything else.
+      //
+      // The wiki's OTHER clearer, a class swap, is no longer a stated gap: coatClass.ts models it.
+      clearCoats(st, ev.ts, 'death')
+      // A boundary that SEVERS every span. The end is unknowable, so it is 'censored' — never
+      // 'observed', and never a fabricated expiry (law 1).
+      st.stateTimeline.censorAll(ev.ts)
       return
     default:
       return
@@ -630,6 +762,19 @@ function ingestOne(st: EngineState, ev: LogEvent, live: boolean): void {
   // driven from the event stream and from snapshot(now) — whichever observes the deadline
   // first. Guarded on an empty-map read, so the ordinary line costs nothing.
   st.sweepCharm(ev.ts)
+  // The ally binds age out on the same log clock (JOS-250) — a charm cannot outlive its own
+  // spell, so the hold is a certainty rather than a heuristic and needs no evidence to fire.
+  st.sweepAlly(ev.ts)
+  // …and the pet nudge times out on it too (JOS-258), from here and from snapshot(now), for the
+  // reason the other two do: whichever observes the deadline first should be the one that acts.
+  st.petNudge.sweep(ev.ts)
+  // …and the BLADE COATS are consulted against the class model on the same log clock (JOS-305):
+  // a character who stopped being a rogue no longer has poison on their blades, and no line says
+  // so. Deliberately NOT in snapshot(now) beside the three above — those are display timers, this
+  // one MUTATES the fold, and a fold that advanced because the UI polled would make a replay
+  // disagree with the live tail. Guarded on two field reads for every non-rogue in the world; the
+  // gate that keeps it cheap for a rogue too is coatClass.ts's whole subject.
+  sweepCoatClass(st, ev)
   if (ingestWorld(st, ev)) return
   if (ingestCombat(st, ev)) return
   if (ingestCast(st, ev)) return

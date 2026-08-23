@@ -29,9 +29,27 @@
 //   Game     — EverQuest install-folder discovery/override (effective path + how it
 //             resolved + a folder picker + character-log validation). Lives in
 //             ./EqFolderSetting.tsx, like Updates does — this file only names it.
+//   Appearance — how big things are drawn and how see-through the floating windows are (JOS-123,
+//             JOS-405, JOS-407, named and reshaped by JOS-408). TWO items: `In-app text size`, the
+//             main window's zoom as an A− / A+ over the five-stop ladder, applied on the press; and
+//             `Overlays`, ONE card carrying a single `Independent per overlay` switch and then
+//             EITHER two shared steppers (text size, transparency) OR the twelve per-overlay rows —
+//             never both, because a control that is on screen while it governs nothing is the
+//             pattern the owner's 2026-08-17 review threw out. Second in the rail on purpose. Lives
+//             in ./TextSizeSetting.tsx (descriptor and the in-app card) plus
+//             ./OverlaysAppearanceSetting.tsx; the section id is still `textsize`, because it is
+//             what the rail testid, the deep link and the e2e steps address it by. The steppers and
+//             sliders on the overlays themselves are unchanged and write the same values — this is
+//             where a player who pinned their meters can reach them at all.
+//   Combat   — the meters' two shaping choices: WHOSE damage they show (You / Group / Everyone,
+//             default Everyone since JOS-229 — JOS-115 moved it here off every combat surface,
+//             JOS-229 changed which way it opens) and where the
+//             pet's damage sits. Lives in ./CombatSection.tsx, descriptor and all.
 //   Overlays — when the floating meters get out of the way: hide them while EverQuest isn't
 //             running (on by default) and/or while it isn't the window you're in (off).
-//             Lives in ./OverlayAutoHideSetting.tsx.
+//             Lives in ./OverlayAutoHideSetting.tsx. Plus the celebration toast's controls — and
+//             the opt-in drag magnetism (JOS-217, ./OverlaySnapSetting.tsx), which is HELD OUT of
+//             this release and therefore not built into the section at all (JOS-359).
 //   Graphics — the two compatibility switches for a machine whose graphics driver dislikes what
 //             this app draws: software rendering (next launch) and solid, non-transparent
 //             overlays (next overlay open). Lives in ./GraphicsSetting.tsx, descriptor and all.
@@ -57,22 +75,16 @@
 //             Lives in ./PerfSetting.tsx.
 //   Feedback — the second entry point into the feedback DIALOG (the first is the nav
 //             drawer's footer). Feedback is not a view, so this section only opens it.
+//   Thanks   — whose pictures these are (JOS-198). The app SHIPS ~3.75 MB of item icons and boss
+//             portraits copied from two volunteer-run wikis; this is where it says so, links
+//             them, and states the consequence a user cares about (they are on your machine, and
+//             drawing them asks nobody for anything). Lives in ./ThanksSetting.tsx, descriptor
+//             and all. Last in the rail on purpose — see the table.
 
-import { type JSX, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
-import {
-  Box,
-  FormControlLabel,
-  List,
-  ListItemButton,
-  ListItemText,
-  Stack,
-  Switch,
-  TextField,
-  Typography
-} from '@mui/material'
+import { type JSX, useCallback, useDeferredValue, useMemo, useState } from 'react'
+import { Box, List, ListItemButton, ListItemText, TextField, Typography } from '@mui/material'
 import SearchIcon from '@mui/icons-material/Search'
 import SportsEsportsIcon from '@mui/icons-material/SportsEsports'
-import BarChartIcon from '@mui/icons-material/BarChart'
 import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt'
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver'
 import IosShareIcon from '@mui/icons-material/IosShare'
@@ -81,14 +93,21 @@ import PrivacyTipIcon from '@mui/icons-material/PrivacyTip'
 import LayersIcon from '@mui/icons-material/Layers'
 import { ExportSettingsSetting, ImportSettingsSetting } from '../profiles/ProfileSharing'
 import { ClassComboSetting } from '../profiles/ClassComboPanel'
-import { useCombinePetRow } from '../combat/useCombatPrefs'
 import { UpdateSetting, VersionSetting, useUpdateStatus } from './UpdateSetting'
 import type { UpdateStatus } from '@shared/types'
 import { EqFolderSetting } from './EqFolderSetting'
+// Combat: whose damage the meters show (JOS-115) + where the pet's sits. Its own file with its own
+// descriptor, same ceiling and same answer as PerfSetting and GraphicsSetting.
+import { combatSection } from './CombatSection'
 import { FeedbackSetting, type OpenFeedback } from './FeedbackSetting'
 import { VoiceSetting } from './VoiceSetting'
 import { OverlayAutoHideSetting } from './OverlayAutoHideSetting'
+import { OverlaySnapSetting } from './OverlaySnapSetting'
+// The release hold this card is behind (JOS-359). Imported for the FLAG, not for geometry.
+import { SNAP_RELEASE_HOLD } from '@shared/overlaySnap'
 import { ToastSetting } from './ToastSetting'
+import { AlertBannerSetting } from './AlertBannerSetting'
+import { ConCardSetting } from './ConCardSetting'
 // Cursor ring: another descriptor that lives beside its own card, same ceiling, same answer.
 import { cursorRingSection } from './CursorRingSetting'
 import { TelemetrySetting } from './TelemetrySetting'
@@ -99,6 +118,15 @@ import { perfSection } from './PerfSetting'
 // Same arrangement, same reason: the two graphics-compatibility switches name their own section
 // beside the card that renders them. See ./GraphicsSetting.tsx.
 import { graphicsSection } from './GraphicsSetting'
+// Same arrangement (JOS-140): the buff externals allowlist names its own section beside the card
+// that renders it. See ./BuffTrustSetting.tsx.
+import { buffTrustSection } from './BuffTrustSetting'
+// Same arrangement again (JOS-123): the Appearance section names itself beside the card that
+// renders its first item. See ./TextSizeSetting.tsx.
+import { appearanceSection } from './TextSizeSetting'
+// Same arrangement again (JOS-139): what the X does — the app keeps running in the tray, or it
+// quits — names its own section beside the card that renders it. See ./CloseToTraySetting.tsx.
+import { windowSection } from './CloseToTraySetting'
 // Same arrangement again (JOS-73): the release-notes panel names its own section beside the card
 // that renders it. See features/whatsnew/WhatsNewPanel.tsx for why the notes are a SECTION.
 import { whatsNewSection } from '../whatsnew/WhatsNewPanel'
@@ -106,55 +134,10 @@ import { cloudSyncSection } from './CloudSyncSettings'
 // The section CARD and the arrival pulse live together in their own file — same ceiling, same
 // answer as PerfSetting's descriptor: split, don't widen the threshold.
 import PrefSectionBlock, { FILL_COLUMN_SX, FILL_ROOT_SX, FILL_ROW_SX, paneFills, useLandedSection } from './PrefSectionBlock'
+// THE HYDRATION GATE (JOS-340) — one batched read of everything this pane paints from main, and
+// nothing renders until it lands. Read that file's header before touching any card's state.
+import { PrefsGate, usePrefsSeed } from './prefsHydration'
 import { normalizeQuery } from '../../lib/search'
-
-// -------------------------------------------------------------- Combat section
-
-/**
- * Pet nesting (owner direction, 2026-08-03). ON by default: the game is mostly played solo, so
- * "you and your pet" is the shape of nearly every fight, and a two-row source meter is a lid on
- * the only list worth reading. Combined, the pet is ONE line item inside your breakdown —
- * labelled with its real name, drillable into its own skills, and never summed into a skill row
- * of yours (features/combat/petRows.ts). Off, it is a separate source row, as it always was.
- *
- * IT IS THE PET'S LAYOUT, NOT A ZOOM (owner ruling, 2026-08-05 — JOS-35). Every meter opens on
- * level 1 whatever this says; what it decides is WHERE the pet's damage lives. On ⇒ inside your
- * level-1 bar, and once more as a drillable line item in your breakdown — never a source row of
- * its own, so a fight's damage is never listed twice. Off ⇒ the pet keeps its own bar and
- * nothing is nested.
- *
- * ONE SWITCH, EVERY DAMAGE METER (owner ruling, 2026-08-04 — the floating overlay used to render
- * the engine's own pet fold instead, and showed a different breakdown for the same fight). The
- * Combat tab, the Overview card and the floating overlay meters all read THIS value and build
- * their rows with `petRows.meterPanel`.
- *
- * Renderer-local (localStorage, like the Fight/Overall scope), so it needs no store migration —
- * and it applies LIVE, across windows: same-window readers are notified directly, and the overlay
- * windows are same-origin, so they get the DOM's own 'storage' event (useCombatPrefs.ts).
- */
-function PetNestingSetting(): JSX.Element {
-  const [combine, setCombine] = useCombinePetRow()
-  return (
-    <Stack spacing={1}>
-      <FormControlLabel
-        control={
-          <Switch
-            size="small"
-            checked={combine}
-            data-testid="pref-combine-pet"
-            onChange={(e) => setCombine(e.target.checked)}
-          />
-        }
-        label={<Typography variant="body2">Show your pet inside your damage</Typography>}
-      />
-      <Typography variant="caption" color="text.secondary">
-        {combine
-          ? 'Your pet’s damage rides inside your bar, and appears once more as one row inside your breakdown — click it for the pet’s own skills. Your per-skill numbers stay yours; the pet’s damage is never folded into them.'
-          : 'Your pet gets its own bar beside yours, and each bar drills into its own skills.'}
-      </Typography>
-    </Stack>
-  )
-}
 
 // ------------------------------------------------------------------- the view
 
@@ -211,9 +194,31 @@ function voiceSection(): PrefSection {
 }
 
 /**
- * The floating overlays' auto-hide rules. Its own factory for the same reason `voiceSection` is
- * one — `buildSections` sits against the 100-code-line ceiling — and, like that one, it depends
- * on none of buildSections' inputs.
+ * The drag magnetism card (JOS-217), or nothing at all while the feature is HELD OUT of the
+ * release (JOS-359 — `SNAP_RELEASE_HOLD` carries the ruling and is the one line that lifts it).
+ *
+ * A card whose switch the store would ignore is worse than no card, which is why the hold reaches
+ * up here and not only into the normalizer: the item is not built, so it is not in the pane, not
+ * in the search index, and not a control a user can be told is broken.
+ */
+function snapItems(): PrefItem[] {
+  if (SNAP_RELEASE_HOLD) return []
+  return [
+    {
+      id: 'overlay-snap',
+      label: 'Snap overlays while dragging',
+      keywords:
+        'snap snapping magnet align alignment grid edge edges side abut stack line up lined tidy position drag move overlay overlays meter meters screen monitor match matching sizes equal',
+      content: <OverlaySnapSetting />
+    }
+  ]
+}
+
+/**
+ * The floating overlays' own rules: when they get out of the way, whether a drag snaps them into
+ * line (JOS-217, held out of this release — see `snapItems`), and the celebration toast. Its own
+ * factory for the same reason `voiceSection` is one — `buildSections` sits against the
+ * 100-code-line ceiling — and, like that one, it depends on none of buildSections' inputs.
  */
 function overlaysSection(): PrefSection {
   return {
@@ -228,12 +233,30 @@ function overlaysSection(): PrefSection {
           'overlay overlays meter meters hide auto autohide show running focus focused unfocused alt tab background desktop game closed floating',
         content: <OverlayAutoHideSetting />
       },
+      ...snapItems(),
       {
         id: 'toast',
         label: 'Celebration toasts',
         keywords:
           'toast toasts celebrate celebration boss kill raid target defeated quest complete sky plane of sky notification popup card sound silent position move top',
         content: <ToastSetting />
+      },
+      {
+        id: 'alert-banner',
+        label: 'Alert banner',
+        keywords:
+          'alert alerts banner on screen onscreen text overlay big large popup message discord hear miss show display warning countdown colour color position move lines hold seconds',
+        content: <AlertBannerSetting />
+      },
+      {
+        id: 'con-card',
+        label: 'Mob card on con',
+        // Written for the person who saw a card appear over their game and came here to find out
+        // what it was: this kind ships ON, so the search terms have to include what they SAW (a
+        // card, a popup, resists, drops) as well as what it is called.
+        keywords:
+          'con consider mob card popup tooltip creature resists resist chips drops loot level zone respawn faction overlay top centre center hide auto hide seconds close',
+        content: <ConCardSetting />
       }
     ]
   }
@@ -292,21 +315,17 @@ function buildSections({ version, status, onSendFeedback, onWhatsNew }: SectionI
         }
       ]
     },
-    {
-      id: 'combat',
-      label: 'Combat',
-      icon: <BarChartIcon fontSize="small" />,
-      items: [
-        {
-          id: 'combine-pet',
-          label: 'Show your pet inside your damage',
-          keywords: 'pet combine merge damage breakdown solo meter drill charm nest source zoom default level',
-          content: <PetNestingSetting />
-        }
-      ]
-    },
+    // SECOND IN THE RAIL, ahead of everything about the game (JOS-123). A person who opens
+    // Preferences because they can barely read the app has to find this one, and the rail is
+    // itself drawn at the size they are complaining about.
+    appearanceSection(),
+    combatSection(),
     overlaysSection(),
+    // Right after the overlays, because the promise this switch makes is about them: closing the
+    // window keeps them running (JOS-139).
+    windowSection(),
     graphicsSection(),
+    buffTrustSection(),
     cursorRingSection(),
     voiceSection(),
     cloudSyncSection,
@@ -377,7 +396,11 @@ function buildSections({ version, status, onSendFeedback, onWhatsNew }: SectionI
           content: <FeedbackSetting onSend={onSendFeedback} />
         }
       ]
-    }
+    },
+    // LAST in the rail, and that is where a credit belongs: it is the thing you go looking for
+    // rather than the thing you land on. Never above the controls a user opened Preferences to
+    // change (JOS-198).
+    thanksSection()
   ]
 }
 
@@ -426,7 +449,11 @@ function SectionRail({
   onPick: (id: string) => void
 }): JSX.Element {
   return (
-    <List dense disablePadding sx={{ width: RAIL_WIDTH, flexShrink: 0 }}>
+    // The rail scrolls WITHIN the split rather than growing the page: thirteen rows (JOS-198
+    // added Thanks) outgrow a short window, and a rail that stretches the document makes the
+    // whole page scroll — the exact thing the whats-new pane's "the LIST scrolls, never the
+    // page" contract forbids. minHeight: 0 is what lets a flex child shrink below its content.
+    <List dense disablePadding sx={{ width: RAIL_WIDTH, flexShrink: 0, minHeight: 0, overflowY: 'auto' }}>
       {sections.map((s) => {
         const dim = unmatched.has(s.id)
         return (
@@ -473,31 +500,27 @@ function PrefSearch({
   )
 }
 
-export default function PreferencesView({
+/**
+ * The pane, INSIDE the hydration gate — every card below this point may assume its value is
+ * already known (JOS-340). Split from the exported component so the gate can be the thing that
+ * decides whether this function runs at all: hooks cannot be conditional, and `usePrefsSeed` has
+ * to be able to say "there is a snapshot" without a null check in thirteen places.
+ */
+function PreferencesPane({
   onSendFeedback,
-  section = null
+  section
 }: {
   onSendFeedback: OpenFeedback
-  /** A deep link's landing section, or null for the usual one. App KEYS this component on it,
-   *  so an arriving link paints its section on the first frame and needs no effect here. */
-  section?: string | null
+  section: string | null
 }): JSX.Element {
   const [query, setQuery] = useState('')
   const deferred = useDeferredValue(query)
   const [active, setActive] = useState(section ?? 'game')
   const landed = useLandedSection(section)
-  const [version, setVersion] = useState('')
+  // Both out of the gate's snapshot now. The version used to start as the EMPTY STRING and fill
+  // in, so the Updates section opened on a Version row with no version on it.
+  const version = usePrefsSeed().version
   const status = useUpdateStatus()
-
-  useEffect(() => {
-    let alive = true
-    void window.eq.getAppVersion().then((v) => {
-      if (alive) setVersion(v)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
 
   // A rail click is always an exit from search mode into that one section.
   const pick = useCallback((id: string): void => {
@@ -568,5 +591,35 @@ export default function PreferencesView({
         </Box>
       </Box>
     </Box>
+  )
+}
+
+/**
+ * THE PANE, GATED (JOS-340).
+ *
+ * A control never paints a value it does not know, and every card in here reads a store that
+ * lives in MAIN over a promise-only bridge — so the honest arrangement is that NOTHING in the
+ * pane renders until one batched read has landed. See ./prefsHydration.tsx for why this is a
+ * gate rather than a synchronous preload snapshot, and why the wait is invisible after the first
+ * time: the snapshot is cached for the renderer's life, so every later rail click and every trip
+ * back to this tab paints the right value on its first frame with no wait at all.
+ *
+ * The gate wraps the WHOLE pane, heading and rail included, rather than only the content column.
+ * A rail that appeared a frame before its cards would be a second, smaller version of the same
+ * jump — and there is nothing to look at in an empty pane anyway.
+ */
+export default function PreferencesView({
+  onSendFeedback,
+  section = null
+}: {
+  onSendFeedback: OpenFeedback
+  /** A deep link's landing section, or null for the usual one. App KEYS this component on it,
+   *  so an arriving link paints its section on the first frame and needs no effect here. */
+  section?: string | null
+}): JSX.Element {
+  return (
+    <PrefsGate>
+      <PreferencesPane onSendFeedback={onSendFeedback} section={section} />
+    </PrefsGate>
   )
 }

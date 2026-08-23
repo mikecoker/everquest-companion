@@ -327,7 +327,9 @@ async function consumeQuota(
     execute(QUOTA_SQL, [
       req.installId,
       utcDate(now),
-      req.log?.bytes ?? 0,
+      // EVERY attachment counts against the byte counter (JOS-296, JOS-441). It is the record of
+      // what an install asked this stack to store, and a dump costs the same S3 as a slice does.
+      (req.log?.bytes ?? 0) + (req.inventory?.bytes ?? 0) + (req.achievements?.bytes ?? 0),
       now + QUOTA_TTL_MS,
       config.maxPerInstallPerDay,
     ]),
@@ -370,11 +372,38 @@ async function duplicateDescription(
  * flood" are all trivial. Computed BEFORE the row is written and stored on it, so
  * triage can find (and HeadObject, and delete) the object without guessing.
  */
-function logObjectKey(reportId: string, now: number): string {
+function datePrefix(now: number): string {
   const d = new Date(now)
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
   const dd = String(d.getUTCDate()).padStart(2, '0')
-  return `logs/${d.getUTCFullYear()}/${mm}/${dd}/${reportId}.log.gz`
+  return `${d.getUTCFullYear()}/${mm}/${dd}`
+}
+
+function logObjectKey(reportId: string, now: number): string {
+  return `logs/${datePrefix(now)}/${reportId}.log.gz`
+}
+
+/**
+ * The dump's key (JOS-296) — a SEPARATE top-level prefix, not a second file under `logs/`.
+ *
+ * The bucket's 90-day lifecycle rule and every `aws s3 ls` treat a prefix as the unit, so
+ * putting the two attachments under one prefix would make "how much log am I holding" and "wipe
+ * last Tuesday's flood" ambiguous. Same date partitioning, same reasoning, one report id.
+ */
+function inventoryObjectKey(reportId: string, now: number): string {
+  return `inventory/${datePrefix(now)}/${reportId}.txt.gz`
+}
+
+/**
+ * The achievements dump's key (JOS-441) — its own top-level prefix, on the identical argument.
+ *
+ * AND THE IDENTICAL OBLIGATION: a prefix with no lifecycle rule lives forever, so `infra/s3.tf`
+ * grows a third `expire-…-dumps` rule beside this, and `infra/iam.tf` names `achievements/*` in
+ * all three of its attachment statements. A key the presigner may not write is a 403 the client
+ * reports as "not uploaded"; a key with no expiry is a bill.
+ */
+function achievementsObjectKey(reportId: string, now: number): string {
+  return `achievements/${datePrefix(now)}/${reportId}.txt.gz`
 }
 
 // The triage-only columns (severity, cluster_id, dupe_of, disposition, issue_url,
@@ -385,11 +414,19 @@ function logObjectKey(reportId: string, now: number): string {
 // wire contract, then from the schema. NAMING A COLUMN THAT NO LONGER EXISTS WOULD 42703
 // EVERY SUBMIT, which is why this bundle has to be deployed BEFORE the columns are
 // removed from a live cluster (infra/README.md states the ordering).
+//
+// `inventory_json` / `inventory_key` (JOS-296) and `achievements_json` / `achievements_key`
+// (JOS-441) are named UNCONDITIONALLY, which is why the `ALTER TABLE report ADD COLUMN`
+// statements in schema.sql have to be applied BEFORE this bundle is deployed — the 42703 trap the
+// paragraph above describes, in the other direction. It has now bitten twice in theory and zero
+// times in practice, which is the runbook doing its job (infra/README.md).
 const REPORT_SQL = `INSERT INTO report (
   report_id, install_id, report_type, description,
   channel, app_version, platform, env_json, log_json, log_key,
+  inventory_json, inventory_key,
+  achievements_json, achievements_key,
   client_ts, received_at, spam_score, status
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'new')`
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'new')`
 
 const IDEMP_SQL = `INSERT INTO report_idempotency
   (install_id, client_report_id, report_id, expires_at)
@@ -415,6 +452,10 @@ function reportParams(
     JSON.stringify(req.env),
     req.log ? JSON.stringify(req.log) : null,
     req.log ? logObjectKey(reportId, now) : null,
+    req.inventory ? JSON.stringify(req.inventory) : null,
+    req.inventory ? inventoryObjectKey(reportId, now) : null,
+    req.achievements ? JSON.stringify(req.achievements) : null,
+    req.achievements ? achievementsObjectKey(reportId, now) : null,
     req.clientTs,
     now,
     score,
@@ -466,9 +507,15 @@ async function writeReport(
  * `content-length-range`. A presigned PUT accepts anything up to 5 GB, which would
  * turn the whole cost model into a promise. The key is EXACT (not starts-with), so
  * one presign writes exactly one object at exactly one path.
+ *
+ * ONE FUNCTION, TWO ATTACHMENTS (JOS-296). The dump gets its own presign at its own key, and
+ * every condition below applies to it unchanged: `MAX_UPLOAD_BYTES` is THE server-side size cap
+ * for both — the shared validator bounds the DECLARED size and this policy bounds the bytes S3
+ * will actually accept, which is the half a lying client cannot get around. The content type is
+ * `application/gzip` for both because both are gzipped; the dump's own extension lives in the
+ * key, not in the type.
  */
-async function mintUpload(reportId: string, now: number) {
-  const key = logObjectKey(reportId, now)
+async function mintUpload(key: string) {
   const { url, fields } = await createPresignedPost(s3, {
     Bucket: BUCKET,
     Key: key,
@@ -516,15 +563,29 @@ async function accept(req: SubmitRequest, now: number): Promise<HttpResult> {
   if (!written.created) {
     return json(200, { ok: true, reportId: written.reportId, upload: null })
   }
-  const upload = req.log ? await mintUpload(written.reportId, now) : null
+  const upload = req.log ? await mintUpload(logObjectKey(written.reportId, now)) : null
+  const inventoryUpload = req.inventory
+    ? await mintUpload(inventoryObjectKey(written.reportId, now))
+    : null
+  const achievementsUpload = req.achievements
+    ? await mintUpload(achievementsObjectKey(written.reportId, now))
+    : null
   log({
     msg: 'report.created',
     reportId: written.reportId,
     channel: req.env.channel,
     score,
     log: req.log !== null,
+    inventory: req.inventory !== null,
+    achievements: req.achievements !== null,
   })
-  return json(201, { ok: true, reportId: written.reportId, upload })
+  return json(201, {
+    ok: true,
+    reportId: written.reportId,
+    upload,
+    inventoryUpload,
+    achievementsUpload,
+  })
 }
 
 export async function handler(event: HttpEvent): Promise<HttpResult> {

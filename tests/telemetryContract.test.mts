@@ -86,6 +86,16 @@ test('EVERY string-valued field in every event is a member of a closed set', () 
   // The tripwire for the property above stated positively: take one valid instance of every
   // event kind, and assert that no string anywhere in it is free text. `t` is the union tag;
   // every other string must appear in one of the file's own exported enums.
+  //
+  // ONE EVENT IS EXEMPT, BY AN OWNER RULING, AND IT IS EXEMPT LOUDLY (JOS-100). `errorReport`
+  // carries a redacted message, a stack of bundle-relative frames and a fingerprint — none of
+  // which can be enum members, because the whole value of an error report is the part that is
+  // SPECIFIC. Its strings are PATTERN-bound instead, and the pattern bounds are pinned
+  // adversarially in `tests/errorReportContract.test.mts` (a bare path as a message, a function
+  // name with a space in it, an 11th frame, a log line, `out/../../secret.txt`) — which is a
+  // STRICTER suite than this one, not a waiver of it. The exemption is spelled as a skip of one
+  // named kind rather than a loosened predicate, so adding a TWELFTH kind with free text in it
+  // still fails here.
   const closed = new Set<string>([
     ...TELEMETRY_EVENT_KINDS,
     ...TELEMETRY_VIEWS,
@@ -111,7 +121,7 @@ test('EVERY string-valued field in every event is a member of a closed set', () 
     'other'
   ])
   // Flattened to one loop: every string anywhere in every sample, with the path that found it.
-  const strings = SAMPLES.flatMap((ev) =>
+  const strings = SAMPLES.filter((ev) => ev.t !== 'errorReport').flatMap((ev) =>
     Object.entries(ev).flatMap(([key, v]) =>
       (Array.isArray(v) ? (v as unknown[]) : [v])
         .filter((x): x is string => typeof x === 'string')
@@ -154,7 +164,28 @@ const SAMPLES: TelemetryEvent[] = [
     presenceRestarts: 1,
     speechFailures: 0
   },
-  { t: 'updateOutcome', step: 'download', ok: false, failureClass: 'network' }
+  { t: 'updateOutcome', step: 'download', ok: false, failureClass: 'network' },
+  {
+    t: 'errorReport',
+    errorName: 'TypeError',
+    code: 'ENOENT',
+    // ALREADY REDACTED — that is what makes it a legal value. The validator re-runs the
+    // redactor and refuses anything that changes under it, so an unredacted sample here would
+    // fail the round-trip below rather than quietly documenting a hole.
+    redactedMessage: 'ENOENT: no such file or directory, open <path>',
+    frames: [{ file: 'out/main/pipeline.js', line: 120, col: 15, func: 'Object.foldEvent' }],
+    fingerprint: '0123456789abcdef',
+    breadcrumbs: [{ kind: 'damage', offsetMs: 0 }],
+    view: 'combat',
+    sessionAgeBucket: 2,
+    mode: 'live',
+    count: 1
+  },
+  // JOS-109. Their round-trip below is the strongest assertion in this list precisely because
+  // there is so little of it: `valid({t:'optOut'})` must deep-equal `{t:'optOut'}`, so a future
+  // edit that gave either of these a field would fail here before it could reach the wire.
+  { t: 'optOut' },
+  { t: 'optIn' }
 ]
 
 test('every kind in the union has a sample, and every sample round-trips unchanged', () => {
@@ -216,9 +247,17 @@ test('the overlay-kind list is the SAME set the app uses (the duplication cannot
   assert.deepEqual([...TELEMETRY_OVERLAY_KINDS].sort(), [...OVERLAY_KINDS].sort())
 })
 
-/** The views `appViews.ts` gates behind `UNRELEASED` — read out of its `KNOWN_VIEWS` spread. */
-function unreleasedViews(src: string): string[] {
-  const spread = /UNRELEASED \? \(\[([^\]]*)\]/.exec(src)?.[1] ?? ''
+/**
+ * The views `appViews.ts` gates behind `UNRELEASED` — read out of its `KNOWN_VIEWS` spread.
+ *
+ * `null` means THE SPREAD IS NOT THERE, which since JOS-327 is the ordinary state of the file: the
+ * character sheet was the flag's only tenant and its release deleted the splice. That is reported
+ * separately from "the spread is there and holds nothing", because the two look identical to a
+ * regex and only one of them would also be what a BROKEN regex looks like — see the caller.
+ */
+function unreleasedViews(src: string): string[] | null {
+  const spread = /UNRELEASED \? \(\[([^\]]*)\]/.exec(src)?.[1]
+  if (spread === undefined) return null
   return [...spread.matchAll(/'([a-z]+)'/g)].map((m) => m[1])
 }
 
@@ -238,8 +277,24 @@ test('the view list is the SAME set the app can render', () => {
   // out of the schema until it graduates. The tripwire is UNWEAKENED — this list is read from
   // the source, not hand-maintained here, so an ordinary new view still fails until the schema
   // (and therefore TELEMETRY.md) learns about it.
-  const unreleased = unreleasedViews(src)
-  assert.ok(unreleased.length > 0, 'failed to read the UNRELEASED spread out of appViews.ts')
+  //
+  // THERE ARE NONE TODAY (JOS-327 released the flag's only tenant), and the absence is CHECKED
+  // rather than assumed: a missing spread and a spread this regex stopped understanding look the
+  // same to a `null`, and only one of those is a passing state. The tell is the IMPORT — a splice
+  // has to READ the flag, and the only way to read it is to import it from `./devFlags`, so a file
+  // that does not is a file with no gate whatever its comments say about the one it used to have.
+  // With no gated views the assertion below becomes `declared === TELEMETRY_VIEWS`, which is
+  // strictly stronger than what it was: every view the app can render must be in the schema.
+  const gated = unreleasedViews(src)
+  if (gated === null) {
+    assert.ok(
+      !/import\s*\{[^}]*\bUNRELEASED\b[^}]*\}\s*from\s*'\.\/devFlags'/.test(src),
+      'appViews.ts imports UNRELEASED but its gated-view spread did not parse'
+    )
+  } else {
+    assert.ok(gated.length > 0, 'the UNRELEASED spread is there and empty — delete it or fill it')
+  }
+  const unreleased = gated ?? []
   const reportable = declared.filter((v) => !unreleased.includes(v))
   assert.deepEqual(reportable.sort(), [...TELEMETRY_VIEWS].sort())
 

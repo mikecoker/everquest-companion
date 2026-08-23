@@ -59,6 +59,12 @@ export async function mainWindow(app: ElectronApplication, timeoutMs = 60_000): 
  * may not have run yet, so the BRIDGE is the readiness signal, never the window's existence.
  * `getFightSelection` is on every kind's overlay bridge (the cross-window selection trio), so it
  * is the cheapest such probe and works for a meter, the event log and the toast alike.
+ *
+ * THE MATCH IS EXACT, NOT A SUBSTRING (JOS-119). It used to be `search.includes('kind=' + kind)`,
+ * which was unambiguous only while no kind's id was a suffix of another's. Splitting the timer
+ * overlay produced 'buffs' and 'debuffs', and `'?kind=debuffs'.includes('kind=buffs')` is TRUE —
+ * so a caller asking for the buffs window could be handed the debuffs one, and every "these two
+ * windows are independent" assertion would have passed against a single window. Parse the query.
  */
 export async function overlayWindow(
   app: ElectronApplication,
@@ -69,7 +75,7 @@ export async function overlayWindow(
   while (Date.now() - t0 < timeoutMs) {
     for (const w of app.windows()) {
       const search = await w.evaluate(() => window.location.search).catch(() => '')
-      if (!search.includes(`kind=${kind}`)) continue
+      if (new URLSearchParams(search).get('kind') !== kind) continue
       const ready = await w
         .evaluate(
           () =>
@@ -82,6 +88,35 @@ export async function overlayWindow(
     await sleep(400)
   }
   return null
+}
+
+/**
+ * QUIT THE WAY A USER QUITS, which is not the way Playwright does.
+ *
+ * MEASURED (JOS-57, and it cost a red run to find): `ElectronApplication.close()` calls
+ * `app.quit()`, and Electron does NOT emit `window-all-closed` on that path — it closes the windows
+ * itself as part of the quit sequence. Every teardown this app hangs off that event (`stopSession`,
+ * `stopTelemetry`, `stopPerf`) therefore never runs under the default harness exit, which is why no
+ * `sessionEnd` had ever appeared in an e2e ring. Closing the windows and letting the app quit itself
+ * is the real user path — clicking the X — and it is the only one under which the last record of a
+ * session is written.
+ *
+ * IT LIVES HERE, beside `launchApp`, rather than in the one spec that first needed it: a lesson
+ * this expensive should have exactly one copy, and any spec that asserts about what a session
+ * WROTE ON THE WAY OUT needs this exit rather than Playwright's. (It was
+ * tests/e2e/telemetry.e2e.mts's private helper first; that spec now imports this one, unchanged.)
+ *
+ * Best effort on both halves: a launch that has already gone is not an error here, and the caller's
+ * own `close()` still runs afterwards (it swallows "already closed").
+ */
+export async function closeWindows(app: ElectronApplication): Promise<void> {
+  const exited = app.waitForEvent('close').catch(() => undefined)
+  await app
+    .evaluate(({ BrowserWindow }) => {
+      for (const w of BrowserWindow.getAllWindows()) w.close()
+    })
+    .catch(() => undefined)
+  await exited
 }
 
 /**
@@ -155,6 +190,53 @@ export function reapOrphanUserData(maxAgeMs = 86_400_000): number {
   return reaped
 }
 
+/**
+ * THE SUITE MAKES NO NOISE (JOS-443, reported live: e2e runs were audibly playing alert tones on
+ * the owner's desktop while he worked).
+ *
+ * `--mute-audio` is Chromium's own switch and it silences the OUTPUT, not the code: every
+ * `new Audio()` is still constructed, `play()` still resolves or rejects exactly as it would, the
+ * element still advances, and speech still travels its seam — so every spec that asserts about
+ * audio BEHAVIOUR (voice-alerts' spoken lines, the preview steps in alert-banner and voice-alerts)
+ * asserts precisely what it did before. Nothing in this suite has ever asserted that a sound was
+ * AUDIBLE; it cannot, on a hidden window on a CI box.
+ *
+ * IT IS A LAUNCH ARGUMENT RATHER THAN AN EQ_E2E BRANCH IN MAIN on purpose. Muting is a property of
+ * the harness's own launches, not of the product — a `commandLine.appendSwitch` under the test flag
+ * would put a behaviour change inside the thing under test, and `EQ_E2E` is deliberately a mode
+ * that changes as little as possible (src/main/e2e.ts lists what it changes and why). Passing it
+ * here also covers every window this launch ever opens, overlays included, because the switch is
+ * process-wide.
+ *
+ * The mixer slider it protects is the owner's: this must hold whatever state that slider is in,
+ * which is exactly why it is not "the machine happens to be quiet".
+ */
+const MUTE_ARGS = ['--mute-audio']
+
+/**
+ * The second half of the same promise, belt and braces: mute every window's WebContents too.
+ *
+ * WHY BOTH. The switch is process-wide and is the one that cannot be missed, but it is a Chromium
+ * command-line flag — invisible from the app, and nothing in a test can read back that it took.
+ * `webContents.setAudioMuted(true)` is the half that ANSWERS: `isAudioMuted()` is a fact a spec (or
+ * a person debugging this) can read. Installed on `browser-window-created` as well as over the
+ * windows that already exist, because the overlays, the toast strip and the cursor ring are all
+ * opened after the launch resolves and every one of them is a renderer that could play something.
+ *
+ * Best effort by design: a launch that dies before this lands is a launch whose spec is about to
+ * fail on its own terms, and silencing that failure behind a mute error would be the worse report.
+ */
+async function muteEveryWindow(app: ElectronApplication): Promise<void> {
+  await app
+    .evaluate(({ app: electronApp, BrowserWindow }) => {
+      for (const w of BrowserWindow.getAllWindows()) w.webContents.setAudioMuted(true)
+      electronApp.on('browser-window-created', (_e, w) => {
+        w.webContents.setAudioMuted(true)
+      })
+    })
+    .catch(() => undefined)
+}
+
 /** A launched app, its userData dir, and the teardown that matches how the dir was obtained. */
 export interface LaunchedApp {
   readonly app: ElectronApplication
@@ -198,15 +280,21 @@ export async function launchApp(
   // The other override `config.ts` honours: a bare log PATH. A staged install must not be
   // second-guessed by one left in the ambient environment.
   delete env.EQ_LOG_PATH
+  // The owner's machine sets EQ_OWNER_TOOLS=1 user-wide (their installed copy's opt-in), which
+  // made feedback.e2e's default-state assertions fail in every local full run. The suite tests
+  // the DEFAULT; the one spec that wants the opt-in names it in opts.env below, which outranks
+  // this delete.
+  delete env.EQ_OWNER_TOOLS
   // LAST, deliberately: a spec that names a variable outranks the harness's own defaults.
   Object.assign(env, opts.env ?? {})
   const app = await electron.launch({
     executablePath: electronBinary(),
-    args: [MAIN_ENTRY],
+    args: [MAIN_ENTRY, ...MUTE_ARGS],
     cwd: ROOT,
     env,
     timeout: 60_000
   })
+  await muteEveryWindow(app)
   return {
     app,
     userData,

@@ -399,17 +399,43 @@ test('P1: a leader say binds SUMMONED, so it walks the five zone lines like the 
   assert.ok(withPet.length >= 2, 'the pet followed you')
 })
 
-test("P1: a STRANGER's pet naming ITS OWN owner is not an event at all", { skip }, () => {
+test("P1: a STRANGER's pet naming ITS OWN owner is never YOURS", { skip }, () => {
   // `says` is BROADCAST — every pet in earshot prints this exact shape naming its own owner, and
   // the log's one real occurrence would look identical coming from the player beside you. The
-  // leader's name is the entire guard, and a line that fails it parses to `unknown`: not an event
-  // consumers filter out, not an inert event they must remember to ignore — nothing, exactly like
-  // the mob growl beside it.
+  // leader's name is the entire guard, and this assertion is what pins which side of it a line
+  // lands on.
+  //
+  // THIS TEST USED TO ASSERT `unknown`, AND JOS-250 SUPERSEDED THAT HALF OF IT. The claim that
+  // mattered was never "the parser emits nothing" — it was "a stranger's pet is nobody of OURS",
+  // which is what the two assertions below say and what they said before. What changed is that
+  // the line now has a reader: it parses to `allyPetLeader`, a kind NOTHING that binds your pets
+  // consumes (the combat world model's `claim()`, the JOS-54 succession, modules/buffs.ts's
+  // buff-entity succession, the progression pet ledger and the roster all switch on `petClaim`
+  // and are untouched), and the one model that does read it credits that pet to GONEKN.
+  //
+  // The distinction the original comment drew — an event consumers must remember to ignore is
+  // worse than no event — is answered by the separate KIND rather than by silence: there is no
+  // field for anyone to forget to check, because the kind they match on never arrives.
   const strangers = `[Thu Jul 30 16:10:11 2026] Kober says, 'My leader is Gonekn.'`
-  assert.equal(parseEvent(strangers, 0)?.kind, 'unknown')
+  const ev = parseEvent(strangers, 0)
+  assert.equal(ev?.kind, 'allyPetLeader')
+  assert.deepEqual(
+    ev?.kind === 'allyPetLeader' ? { pet: ev.pet, owner: ev.owner } : null,
+    { pet: 'Kober', owner: 'Gonekn' },
+    'both ends named, and neither of them is you'
+  )
   const { eng, lastTs } = replay([P1], [strangers])
   assert.deepEqual(eng.petDisplayNames(), [], "somebody else's pet is still nobody of ours")
   assert.equal(petTotals(allSessions(eng, lastTs)).total, 0)
+})
+
+test("P1: a MOB-shaped leader is refused — a growl cannot mint a charmer", { skip }, () => {
+  // The other half of the guard (JOS-250). `says` carries the whole log's mob speech, so a leader
+  // capture that admitted an article-named subject would invent an owner out of flavour text.
+  for (const owner of ['a fire giant warrior', 'A fire giant warrior', 'The Hand of Veeshan']) {
+    const line = `[Thu Jul 30 16:10:11 2026] Kober says, 'My leader is ${owner}.'`
+    assert.equal(parseEvent(line, 0)?.kind, 'unknown', `${owner} is not a person`)
+  }
 })
 
 test("P1: with no character installed the rule declines the OWNER's own line", { skip }, () => {

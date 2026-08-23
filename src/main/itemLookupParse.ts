@@ -24,7 +24,10 @@
 //   |second_image / |third_image  (present in the template; not consumed here)
 //
 // One piece of knowledge lives OUTSIDE the template: the page-top `{{Velious Era}}` banner that
-// 7,315 of the 11,247 item pages open with. It is read too (`parseEraTag`, censused there).
+// 7,448 of the 11,288 item pages open with. It is read too (`parseEraTag`, censused there), and so
+// are the two places the other 44 era-stating pages put it instead — a banner in the page BODY and
+// a hand-written `[[Category:X Era]]` (`parseEraBodyTag` / `parseEraCategory`, JOS-328, whose
+// census also records what the owner's out-of-era badge report actually turned out to be).
 //
 // TRADESKILL FIELDS — the "QUEST ITEM flag but no quest anywhere" gap. Plenty of items
 // carry `QUEST ITEM` in their stats block yet appear in NO quest on the whole wiki: they
@@ -65,8 +68,10 @@
 // ===========================================================================
 // RESEARCH — the item upgrade (tier) + exaltation mechanic
 // Sources: eqlwiki.com pages "Item Upgrade System", "Exaltations", "Mote Guide",
-// "Marketplace", "Patch Notes" (read 2026-08-02). Everything below is quoted mechanics,
-// not inference; anything the wiki doesn't say is deliberately absent.
+// "Marketplace", "Patch Notes" (read 2026-08-02), PLUS — for the stat arithmetic, and
+// overruling the prose pages on it — the wiki's own ItemLevelSlider ResourceLoader module
+// (`load.php?modules=ext.itemLevelSlider`, extracted 2026-08-13). Everything below is
+// quoted mechanics, not inference; anything the wiki doesn't say is deliberately absent.
 //
 // TIERS ("item level"). All gear starts at tier 0 and can reach tier 10. You raise it by
 // MERGING: consume another copy of the same item, or a Mote of Potential, to add item
@@ -74,12 +79,38 @@
 // T+1 costs 2^T exp, so total exp for tier T is 2^T − 1. The in-game window's
 // "Tier N   x / y" row is exactly (exp banked toward the next tier) / (2^N) — which is
 // why the screenshots read "Tier 1  0 / 2" and "Tier 7  3 / 128".
-//   Stat effect: +10% cumulative per tier, applied to the item's base stats and rounded
-//   DOWN; a +1 minimum increase is guaranteed at each tier boundary; partial exp gives a
-//   partial (mid-tier) bonus of tier% + (percent-toward-next / 10); weapon DAMAGE scales
-//   +5%/tier; weapon DELAY never drops; weight shrinks but never below 0.1.
+//
+//   STAT EFFECT — CORRECTED 2026-08-13 (JOS-281). What stood here was read off the wiki's
+//   PROSE pages and was wrong three ways: it claimed one flat "+10% per tier, rounded DOWN"
+//   for every stat, a separate "+1 minimum increase per tier" floor rule, and "+5%/tier" for
+//   weapon DAMAGE. The authority is not the prose — it is the wiki's OWN CALCULATOR, the
+//   ItemLevelSlider module every item page runs when a reader drags the level slider. That
+//   algorithm is ported exactly (rounding, branches and all) in `src/shared/itemUpgrade.ts`;
+//   read that file's header for the rules and tests/itemUpgrade.test.mts for the numbers.
+//   In brief:
+//     - the state is a `full` tier plus a `fraction` out of 2^full, so a mid-tier item
+//       scales by a FRACTIONAL level — there is no separate "partial bonus" term;
+//     - a PRIMARY stat (AC, the seven attributes, HP/MP/END, every SV) at base > 10 is
+//       floor(base + round(base * effective / 10)): the increment rounds HALF-AWAY-FROM-ZERO
+//       BEFORE it is added and the SUM is floored (WIS 15 at tier 2+3/4 is 19, not 20). At
+//       base 1..10 it is simply base + tier with the FRACTION IGNORED — that branch is what
+//       the old "+1 minimum" note was actually describing, and it is a branch, never a floor
+//       laid over a percentage. A NEGATIVE stat shrinks toward zero by the tier and stops at 0;
+//     - weapon DAMAGE is base + floor(base * effective / 10) — +10% per level, NOT +5%
+//       (Thelvorn at tier 2+3/4 reads DMG 25; +5%/tier would say 22, and the screenshot
+//       says 25). Weapon DELAY never scales, which is where the ratio gain comes from;
+//     - WEIGHT shrinks on a log curve in total progression and is CEILED to one decimal.
+//       The old "never below 0.1" was an ENTRY GUARD misread as an output clamp: an item
+//       already at or under 0.1 is not touched at all, and the output clamps at 0;
+//     - an upgraded item with two or more attribute/save fields also gains a synthetic
+//       `SV VOID: +tier` line.
+//   `tierBonusPct` (shared/itemStats.ts) survives all of this as the window's LABEL only —
+//   the "+N% stats" headline — and is not arithmetic any individual stat goes through.
 //   The upgraded item's DISPLAY NAME carries the tier as a ` +N` suffix ("Cloak of
 //   Flames +4"), which is the only tier signal that ever reaches the log.
+//
+//   DEAD DATA: the wiki page `MediaWiki:ItemLevelMultipliers` ({1:1.3, 2:1.6, …}) is loaded
+//   by nothing, contradicts the real progression, and must not be ported.
 //
 // EXALTATIONS (the "slot rows" that vary between screenshots). Every item has exaltation
 // SOCKETS whose count is set by its item level, unlocking progressively:
@@ -122,7 +153,10 @@
 //   `Your <Item> (Exaltation) shimmers briefly.` (+3 sibling emotes, 6433× total)
 //        — a socketed click/proc exaltation FIRING; names the SOURCE item, not the host,
 //        and carries no tier. NOT parsed: it identifies nothing we can attribute.
-//   `You successfully destroyed 1 <Item> +N.` — the item is gone. NOT parsed.
+//   `You successfully destroyed <N> <Item>[ +N].` (356×) — the item is gone. PARSED since
+//        JOS-401 as a loot event with disposition 'destroyed', which is how held counts learn
+//        about it; it still retires NO tier evidence, because a tier is a fact about an item
+//        that was observed once and never a claim about current inventory.
 // Nothing reports item exp, socket contents, or the tier of an item we merely hold — so
 // the ItemWindow still draws tier POSITION only, never an exp fill, and observed tiers come
 // exclusively from merge evidence (main/modules/itemTiers.ts).
@@ -136,6 +170,9 @@ import type {
   ItemRecipeUse
 } from '../shared/types'
 import { itemBaseName, parseStatsBlock, type ItemStatBlock } from '../shared/itemStats'
+// The ONE question this parser asks the era tables: "is this a token you name?" — the guard on the
+// category reader below. What a token MEANS is still decided only in shared/planner/era.ts.
+import { namesEra } from '../shared/planner/era'
 
 /** Strip a trailing ` +N` upgrade suffix. Applied before lookup + as the cache key. ONE
  *  definition of the rule for every main-side caller — see shared/itemStats.itemBaseName. */
@@ -451,12 +488,17 @@ function dropSourcesField(raw: string | null): ItemDropSource[] | undefined {
 // coloured "Velious Era" banner. Zone provenance is still the better witness (a zone is where you
 // physically go), so this is LAYER 2 — consulted only when no source zone resolves.
 //
-// CENSUS, measured 2026-08-04 over the full scrape cache (369 batch files, 11,247 item pages):
-// 7,315 pages carry one in the head. Velious 2,761 · Classic 2,422 · Kunark 1,224 · Sky 349 ·
-// Chardok Revamp 136 · Epics 113 · Temple 98 · EpicQuests 76 · FearHateRevamp 53 · Fear 27 ·
-// Luclin 25 · Paineel 22 · Hate 5 · Unknown 2 · `kunark` 1 · `Chardok` 1. The token is the
-// template NAME minus its ` Era` suffix, and the dirt in it is exactly three pages deep:
-// `{{Velious  Era}}` (double space, 2), `{{Kunark_Era}}` (underscore, 1) and `{{kunark Era}}`
+// CENSUS, first measured 2026-08-04 and RE-MEASURED 2026-08-13 (JOS-328) over a fresh `--refresh`
+// cache — 369 batch files, 18,433 pages enumerated, 11,288 of them item pages:
+//   7,448 carry a banner in the HEAD (3,840 do not). Velious 2,757 · Classic 2,549 · Kunark 1,224 ·
+//   Sky 365 · Chardok Revamp 136 · Epics 110 · Temple 96 · EpicQuests 76 · FearHateRevamp 53 ·
+//   Fear 27 · Luclin 24 · Paineel 22 · Hate 5 · Unknown 2 · `Chardok` 1 · `kunark` 1.
+// THE WIKI IS STILL BANNER-TAGGING, and at a pace worth knowing before anyone reads a bannerless
+// page as evidence of anything: 7,315 of 11,247 on 2026-08-04, 7,448 of 11,288 nine days later, and
+// a page-by-page diff of the two caches shows 108 banners ADDED upstream in that window with none
+// removed — the `Classic` column is where nearly all of the growth landed.
+// The token is the template NAME minus its ` Era` suffix, and the dirt in it is exactly three pages
+// deep: `{{Velious  Era}}` (double space, 2), `{{Kunark_Era}}` (underscore, 1) and `{{kunark Era}}`
 // (lowercase, 1) — hence the whitespace/underscore fold here, and the case fold in the mapping
 // table (`shared/planner/era.ts`, which is the only place a token becomes an expansion).
 //
@@ -464,26 +506,212 @@ function dropSourcesField(raw: string | null): ItemDropSource[] | undefined {
 //   * `{{Era}}` (1), `{{Era|Velious}}` / `{{Era | Hole}}` (6) — a DIFFERENT template with the
 //     name in an argument, and all but one of them sit inline in prose or a drop list rather than
 //     at the page top. Six occurrences is not a shape, it is a typo; a name we can't read is
-//     `undefined`, never a guess (law 1).
+//     `undefined`, never a guess (law 1). Note the pattern below cannot match them anyway: it
+//     demands `}}` straight after ` Era`, so an argument disqualifies the whole shape.
 //   * `{{P99 Era Header| Nov | 2000 }}` (16) — a date banner, not an era claim; it does not end
-//     in ` Era` so the pattern never sees it.
-//   * 36 pages ("Small Fine Plate Boots" and its 35 siblings) whose only `{{Classic Era}}` was
-//     pasted INSIDE `|playercrafted`. Scanning past `{{Itempage` to catch them would also start
-//     reading the inline `{{Era|Kunark}}` notes above — the head is the shape the wiki means, and
-//     36 crafted-armour pages are not worth widening it for.
+//     in ` Era` so the pattern never sees it. (Its CATEGORY does look like one — see below.)
 const ERA_TAG_RE = /\{\{\s*([A-Za-z][A-Za-z0-9 _'`-]*?)[ _]+Era\s*\}\}/
+
+/** `{{Velious  Era}}` / `{{Kunark_Era}}` → `Velious` / `Kunark`. Whitespace and underscores fold to
+ *  single spaces; CASE IS PRESERVED, because these readers report what the page SAID and the
+ *  mapping table is the place that decides what a spelling means. */
+function eraToken(match: RegExpExecArray | RegExpMatchArray): string | undefined {
+  return match[1].replace(/[_\s]+/g, ' ').trim() || undefined
+}
 
 /**
  * The page-top era template's token — `{{Velious Era}}` → `Velious` — or `undefined` when the
- * page carries none in its head (3,932 of 11,247 pages don't). Whitespace and underscores are
- * folded to single spaces; CASE IS PRESERVED, because this function reports what the page said
- * and the mapping table is the place that decides what a spelling means.
+ * page carries none in its head (3,840 of the 11,288 item pages don't).
+ *
+ * HEAD-ANCHORED, and it stays that way: `parseItemWikitext` layers the two weaker readers below
+ * behind it rather than widening this one, so "what the page opens with" remains a question with
+ * exactly one answer.
  */
 export function parseEraTag(wikitext: string): string | undefined {
   const at = wikitext.search(/\{\{\s*Itempage\b/i)
   if (at < 0) return undefined
   const m = ERA_TAG_RE.exec(wikitext.slice(0, at))
-  return m ? m[1].replace(/[_\s]+/g, ' ').trim() || undefined : undefined
+  return m ? eraToken(m) : undefined
+}
+
+// ---- LAYER 2b: the era claims that are not in the page HEAD (JOS-328, 2026-08-13) --------------
+//
+// THE REPORT THIS ANSWERS, and the answer it did not get. The owner's spot checks said every gear
+// row we chip `era?` carries a red `Out of Era` badge on its wiki page — a THIRD signal above and
+// beyond the zones and the banner. It does not reproduce, and the negative is worth as much as the
+// fix, so it is recorded here rather than in a ticket that will scroll away. MEASURED 2026-08-13:
+//   * `Template:Itempage` contains no era logic whatever — no `PageEra` call, no badge, no
+//     category. The red box comes only from `Template:PageEra`, and only a `{{X Era}}` wrapper ever
+//     reaches it, so a page with no banner renders no badge. `MediaWiki:Common.js` / `Common.css`
+//     inject nothing era-related either. (The live PageEra switch was re-read the same day and is
+//     byte-identical to the register mirrored in `shared/planner/era.ts`.)
+//   * The 24 era? gear rows at the TOP of the table by AC and by DMG — the rows a spot check
+//     actually lands on — carry no banner in their CURRENT wikitext, and rendering three of them
+//     through `action=parse` returns no `Out of Era` box, while Breastplate of the Righteous (the
+//     JOS-298 control) returns one. The badge machinery works; those pages do not have it.
+//   * Authoritative version of the same question: `PageEra` emits `[[Category:{{{2}}}]]` on every
+//     banner, so the wiki's era CATEGORIES are its own complete list of era-claiming pages. All 696
+//     categories were enumerated, the 15 era ones' ns0 members pulled, and intersected with our
+//     1,166 era?-chipped gear rows: THIRTY-EIGHT, of which 36 are `Classic Era` (in-era, no badge)
+//     and 2 are `Kunark Era`. Two, not 1,166.
+// If a badge was really on screen it was on another wiki (P99 keeps its own era markers, and 16
+// eqlwiki pages still carry a `{{P99 Era Header}}` date banner from that lineage). Changing data
+// source is not a parser change and was not done.
+//
+// WHAT IS REAL is that intersection: 52 corpus pages state an era somewhere other than the head,
+// in exactly two shapes, and each gets its own reader below.
+//
+//   SHAPE 1 — THE BANNER IN THE BODY. `{{Classic Era}}` pasted inside `|playercrafted`, below the
+//   `{{Itempage` open: 36 pages, the Fine Plate / Large Fine Plate / Small Fine Plate crafted-armour
+//   family, and the census above used to list them as a known, accepted loss. It renders: the
+//   template outputs `{{{playercrafted}}}` verbatim, so the coloured banner really is drawn on the
+//   page and `PageEra` really does file it in `Category:Classic Era` — which is how the category
+//   sweep found them. The old reason for not reading it was that scanning past `{{Itempage` would
+//   also start reading inline `{{Era|Kunark}}` notes; that reason was WRONG about its own pattern
+//   (`ERA_TAG_RE` demands `}}` straight after ` Era`, so an argument form can never match it). So
+//   the honest guard is not position, it is AGREEMENT: measured over today's whole cache, the pages
+//   with no head banner and a bare `{{X Era}}` in the body are exactly 36, exactly that family, and
+//   every one of them states exactly ONE token, `Classic`. A page whose body banners disagree is
+//   `undefined`, which is what keeps this from becoming a scan for the loudest match.
+//
+//   SHAPE 2 — THE HAND-WRITTEN CATEGORY. `[[Category:Kunark Era]]` at the page foot with no banner
+//   template anywhere: 16 pages, of which 8 are read — 7 Kunark (Flowing Red Silk Sash, Leech Husk
+//   Tunic, Mantle of Fire, Mucilaginous Girdle, Sash of the Dragonborn, Scaled Prowler Belt, Scaled
+//   Wolf Hide Belt) and 1 Velious (Fist of Lightning). The other 8 are `Nov 2000 Era` filings left
+//   behind by `{{P99 Era Header}}` and are refused by the law-1 clause below. A category
+//   is PAGE-LEVEL by MediaWiki semantics wherever it sits — there is no such thing as a category
+//   that applies to a drop list — so position is meaningless for it and only agreement matters.
+//
+// BOTH ARE LAYER 2b: consulted only when the HEAD is silent, in that order (a rendered banner
+// outranks a filing), and both stay strictly weaker than the drop zones the way layer 2 always was.
+//
+// THE LAW-1 CLAUSE, and it applies to the CATEGORY only: `namesEra`. An unknown BANNER key is
+// allowed to mean `out`, because `Template:PageEra`'s `#default` really does draw the red box for it
+// and mirroring a rendered page is reporting. An unknown CATEGORY renders nothing at all, so
+// `Nov 2000` / `Mar 2000` / `May 1999` — the date filings — are not era claims and must not become
+// them. Those 8 Illegible Note pages stay `undefined`, which is the whole point of the guard.
+const ERA_CATEGORY_RE = /\[\[\s*Category\s*:\s*([A-Za-z][A-Za-z0-9 _'`-]*?)[ _]+Era\s*(?:\||\]\])/gi
+const ERA_BODY_RE = /\{\{\s*([A-Za-z][A-Za-z0-9 _'`-]*?)[ _]+Era\s*\}\}/g
+
+/** Fold a list of stated tokens to THE token, or `undefined` when they do not agree (or there are
+ *  none). Keyed by the register's own fold so `Kunark` and `kunark_` are one claim, valued by the
+ *  page's spelling so the mapping table still sees what was written. */
+function soleToken(tokens: readonly string[]): string | undefined {
+  const byKey = new Map<string, string>()
+  for (const t of tokens) byKey.set(t.toLowerCase().replace(/[\s_]+/g, ''), t)
+  return byKey.size === 1 ? [...byKey.values()][0] : undefined
+}
+
+/**
+ * The era token a `{{X Era}}` banner states BELOW the `{{Itempage` open — `undefined` unless the
+ * page's body banners all agree, and `undefined` for a page with no `{{Itempage}}` at all (there is
+ * no "body" to speak of then, and `parseEraTag` has already declined it).
+ */
+export function parseEraBodyTag(wikitext: string): string | undefined {
+  const at = wikitext.search(/\{\{\s*Itempage\b/i)
+  if (at < 0) return undefined
+  const found: string[] = []
+  for (const m of wikitext.slice(at).matchAll(ERA_BODY_RE)) {
+    const token = eraToken(m)
+    if (token !== undefined) found.push(token)
+  }
+  return soleToken(found)
+}
+
+/**
+ * The era token the page's own CATEGORY states — `[[Category:Kunark Era]]` → `Kunark` — or
+ * `undefined`. Same ` Era`-suffix rule and same whitespace fold as `parseEraTag`, so a category and
+ * a banner produce the identical spelling and the mapping table needs no second set of rows.
+ *
+ * Refuses a token the era register does not name (the `{{P99 Era Header}}` date filings), and
+ * refuses a page that files itself under two different eras.
+ */
+export function parseEraCategory(wikitext: string): string | undefined {
+  const found: string[] = []
+  for (const m of wikitext.matchAll(ERA_CATEGORY_RE)) {
+    const token = eraToken(m)
+    if (token !== undefined && namesEra(token)) found.push(token)
+  }
+  return soleToken(found)
+}
+
+/**
+ * THE PAGE'S ERA CLAIM — the three readers in strength order, each speaking only into the previous
+ * one's silence: what the page OPENS with, then what it renders anywhere, then how it is FILED.
+ * `undefined` when the page says none of the three, which is 3,796 of the 11,288 item pages.
+ */
+function pageEraTag(wikitext: string): string | undefined {
+  return parseEraTag(wikitext) ?? parseEraBodyTag(wikitext) ?? parseEraCategory(wikitext)
+}
+
+// ---- the same two questions, asked of a page that is NOT an item (JOS-341) ---------------------
+//
+// LAYER 3 GREW A PAGE EDGE, and the pages it reads are armour-set hubs and quest indexes rather
+// than `{{Itempage}}` transclusions. Those two readers live HERE, beside the item ones, for the
+// reason this file's header already states about the live fallback: there must be no second parser
+// to drift. `scripts/scrape-page-era.ts` is their only caller today, and it commits the answer.
+
+/**
+ * A NON-ITEM page's era claim: the `{{X Era}}` banner it renders, else how it is FILED.
+ *
+ * The item readers above are anchored on `{{Itempage}}` — head means "before the item template" —
+ * and an armour-set page has no such anchor, so neither of them can answer for one (both return
+ * `undefined` on the very first line). This asks the same two questions without the anchor, using
+ * the SAME `ERA_TAG_RE` / `ERA_CATEGORY_RE` and the same `soleToken` agreement rule, so a set page
+ * and an item page that both open `{{Kunark Era}}` produce the identical token.
+ *
+ * AGREEMENT, NOT FIRST-MATCH, for the banner too. On an item page the banner is a page-top header
+ * and there is one; a hub page can render a banner per SECTION (a set page listing a classic and a
+ * Kunark tier), and "the first one wins" would be a coin toss decided by section order. Disagreeing
+ * banners are `undefined` — the page did not make one claim — which is law 1 and is also what
+ * `parseEraBodyTag` already does for the item body.
+ */
+export function parsePageEraTag(wikitext: string): string | undefined {
+  const banners: string[] = []
+  for (const m of wikitext.matchAll(ERA_BODY_RE)) {
+    const token = eraToken(m)
+    if (token !== undefined) banners.push(token)
+  }
+  return soleToken(banners) ?? parseEraCategory(wikitext)
+}
+
+/**
+ * The internal link targets an item page's `|notes` prose names — the LINKS the era pill is drawn
+ * on, kept as titles instead of thrown away.
+ *
+ * `cleanSummary` reduces the same field to one line of prose and DISCARDS the targets (`[[Cultural
+ * Tradeskills: Human|the human cultural set]]` becomes four words), which is why the corpus row of
+ * a set-page member does not even carry the title of the page that decides its era (JOS-333's named
+ * refusal). This reader keeps them, and nothing else about `|notes` changes.
+ *
+ * WHY `|notes` AND NOT THE WHOLE PAGE. eqlwiki's own era filter walks every anchor on the rendered
+ * page, so a whole-page scan would be the more literal mirror — and measured over the 2,292 corpus
+ * pages layers 1-2 leave silent, it finds 1,504 distinct non-item targets against `|notes`'s 151.
+ * The difference is class pages, deity pages, spell pages and infobox furniture: links that say
+ * nothing about how you GET the item, and that would speak loudest in the one direction (IN era)
+ * where being wrong shows a player content that is not there. Every other field of the template is
+ * already parsed into a structured edge — components, yields, quests, drop zones — so `|notes` is
+ * exactly the acquisition prose no other reader sees, and it is the field the owner's screenshots
+ * are of. A whole-page scan is a widening that needs its own evidence, not a default.
+ *
+ * SECTION ANCHORS and PIPED LABELS are folded to the bare title (`[[Kaladim#Smithing|here]]` →
+ * `Kaladim`), underscores to spaces, and the wiki's own excluded namespaces are dropped — the same
+ * `File:`/`Category:`/`Template:`/`Special:` skip list the skin module documents. Order is the
+ * page's, duplicates removed.
+ */
+/** The namespaces eqlwiki's own `eraFilter` skips before it asks about a link target. */
+const EXCLUDED_NS = /^(File|Image|Category|Template|Special|Help|MediaWiki|User|Talk|Media|Portal)\s*:/i
+
+export function notesLinkTargets(wikitext: string): string[] {
+  const notes = templateField(wikitext, 'notes')
+  if (notes === null) return []
+  const out: string[] = []
+  for (const m of notes.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g)) {
+    const title = m[1].replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
+    if (title === '' || EXCLUDED_NS.test(title) || out.includes(title)) continue
+    out.push(title)
+  }
+  return out
 }
 
 /** Collapse a `notes` field to a single trimmed prose line (strips wiki markup, caps length). */
@@ -543,8 +771,9 @@ function tradeskillFields(
  * LORE/QUEST text flags, `|relatedquests` a bulleted [[link]] list, `|notes` prose,
  * `|recipes` the tradeskill recipes that CONSUME this item, `|playercrafted` how the
  * item is itself made and `|dropsfrom` where the page says it drops (shapes documented in the
- * file header + the census above `parseDropSources`). The page-top `{{X Era}}` banner — the one
- * field that is not a template field at all — comes through as `eraTag`.
+ * file header + the census above `parseDropSources`). The page's era claim — the one piece of
+ * knowledge that is not a template field at all — comes through as `eraTag`: the page-top
+ * `{{X Era}}` banner, or the `[[Category:X Era]]` filing when the head carried no banner.
  *
  * `stats` is the same block parsed into the game item WINDOW's structure (see
  * shared/itemStats.ts) so the UI can draw it with the game's hierarchy and colors
@@ -606,7 +835,7 @@ export function parseItemWikitext(
     summary,
     stats,
     iconId,
-    eraTag: parseEraTag(wikitext),
+    eraTag: pageEraTag(wikitext),
     ...tradeskillFields(recipeParse, craftParse),
     statsBlock: statsBlock
       ? statsBlock.replace(/<br\s*\/?>/gi, '\n').replace(/[ \t]{2,}/g, ' ').trim()

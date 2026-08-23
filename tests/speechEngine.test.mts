@@ -36,7 +36,8 @@ import {
   speechCacheKey,
   speechCachePath
 } from '../src/main/speech/cache'
-import { KOKORO_ASSETS, KOKORO_TOTAL_BYTES } from '../src/main/speech/pinned'
+import { createSpeechEngine, kokoroSessionOptions, resolveKokoroVoice } from '../src/main/speech/engine'
+import { KOKORO_ASSETS, KOKORO_DEFAULT_VOICE, KOKORO_TOTAL_BYTES } from '../src/main/speech/pinned'
 import { assetPath, isKokoroInstalled, kokoroDir, provisionKokoro } from '../src/main/speech/provision'
 import type { SpeechInstallProgress } from '../src/shared/alertTypes'
 
@@ -315,6 +316,10 @@ test('a failed asset is retried exactly MAX_ATTEMPTS times, then stops (no storm
   assert.deepEqual(waits, [2000, 4000]) // exponential, and none after the last attempt
 })
 
+// A 429 against this same downloader is JOS-420's, and it lives with the rest of that policy in
+// tests/packInstallRateLimit.test.mts — including the assertion that a non-429 failure still
+// behaves exactly as the MAX_ATTEMPTS test above proves it does.
+
 test('a wrong-digest file already on disk is re-fetched, not trusted', async () => {
   const root = tempRoot()
   mkdirSync(kokoroDir(root), { recursive: true })
@@ -361,6 +366,115 @@ test('progress carries whole-install bytes and exactly one terminal phase', asyn
   assert.equal(terminal.length, 1)
   assert.equal(terminal[0].phase, 'failed')
   assert.ok(terminal[0].message)
+})
+
+// ------------------------------------------------- 4. WHICH KIND OF DEAD (JOS-247)
+//
+// The reporter's screen was a downloaded 115 MB model, a full voice picker, and every alert in
+// the default Microsoft voice — while `speech:say` answered 'engine-not-installed' for a model
+// that was very much installed. These pin the three answers apart, because the renderer renders
+// each as a different sentence and only one of them tells the user to download anything.
+//
+// `isInstalled` is the documented test seam (engine.ts): the real check demands 120 MB of files
+// at exact byte lengths, so without it every case below would stop at the install check and the
+// distinction this ticket exists for could never be tested.
+
+/** A worker file that dies the way the field report died: a thread-level error carrying a code. */
+function throwingWorker(root: string, code: string | null): string {
+  const path = join(root, `worker-${code ?? 'plain'}.cjs`)
+  writeFileSync(
+    path,
+    code === null
+      ? "throw new Error('the worker exploded')\n"
+      : `const e = new Error('dlopen failed'); e.code = ${JSON.stringify(code)}; throw e\n`
+  )
+  return path
+}
+
+test('a tier that is NOT downloaded says exactly that, and never spawns a worker', async () => {
+  const root = tempRoot()
+  const engine = createSpeechEngine({ userData: root, workerPath: join(root, 'never-read.cjs') })
+  // No `isInstalled` override: the real check on an empty dir, which is the honest "not installed".
+  assert.deepEqual(await engine.say('charm break', 'af_heart'), {
+    ok: false,
+    reason: 'engine-not-installed'
+  })
+  engine.dispose()
+})
+
+test('a DOWNLOADED tier whose worker dies is engine-failed, not "not installed"', async () => {
+  const root = tempRoot()
+  const errors: string[] = []
+  const engine = createSpeechEngine({
+    userData: root,
+    workerPath: throwingWorker(root, null),
+    isInstalled: () => true,
+    onError: (message) => errors.push(message)
+  })
+  assert.deepEqual(await engine.say('charm break', 'af_heart'), { ok: false, reason: 'engine-failed' })
+  // A DEAD WORKER STAYS DEAD: the second utterance answers from the latch rather than spawning
+  // a second thread that would fail identically and file a second report.
+  assert.deepEqual(await engine.say('root broke', 'af_heart'), { ok: false, reason: 'engine-failed' })
+  assert.ok(
+    errors.some((m) => m.includes('the synthesis worker failed')),
+    errors.join(' | ')
+  )
+  engine.dispose()
+})
+
+test('ERR_DLOPEN_FAILED is its OWN answer — the engine cannot load on this PC', async () => {
+  // The field report's exact shape (0.20.0, 2026-08-11): code=ERR_DLOPEN_FAILED with
+  // node:internal/modules/cjs frames, i.e. the thread died while requiring onnxruntime-node. It
+  // is a different sentence to the user (a remedy exists, and it is not "download the model"),
+  // so it must be a different reason. This also pins that the code SURVIVES the worker→parent
+  // hop, which is the only reason main can tell the two apart at all.
+  const root = tempRoot()
+  const errors: string[] = []
+  const engine = createSpeechEngine({
+    userData: root,
+    workerPath: throwingWorker(root, 'ERR_DLOPEN_FAILED'),
+    isInstalled: () => true,
+    onError: (message) => errors.push(message)
+  })
+  assert.deepEqual(await engine.say('charm break', 'af_heart'), {
+    ok: false,
+    reason: 'engine-unloadable'
+  })
+  assert.ok(
+    errors.some((m) => m.includes('ERR_DLOPEN_FAILED') && m.includes('Visual C++')),
+    'the log line names the code AND the measured missing piece: ' + errors.join(' | ')
+  )
+  engine.dispose()
+})
+
+test('an unknown voice id falls back to the tier default rather than refusing to speak', () => {
+  // Unchanged by the above, and restated here because the reason split must not have turned a
+  // stale cross-tier voice id (a SAPI URI left over from the system tier) into a failure.
+  assert.equal(resolveKokoroVoice('urn:moz-tts:sapi:Microsoft David'), KOKORO_DEFAULT_VOICE)
+  assert.equal(resolveKokoroVoice(null), KOKORO_DEFAULT_VOICE)
+  assert.equal(resolveKokoroVoice('af_heart'), 'af_heart')
+})
+
+test('the inference session is bounded to one core — the game is on this box (JOS-365)', () => {
+  // The one thing in the Kokoro tier that costs the user something they can FEEL while it is
+  // working perfectly. Left at onnxruntime's defaults the pool is sized to the physical core
+  // count and each uncached phrase burned ~21 CPU-seconds (measured, 24 cores) for audio that
+  // one thread produces in the same wall time, byte for byte. A future edit that raises either
+  // number, or lets the execution mode go parallel, is a stutter in EverQuest at the exact
+  // moment an alert fires — so the numbers are pinned here rather than left inside a native
+  // call no test can see.
+  const options = kokoroSessionOptions()
+  assert.equal(options.intraOpNumThreads, 1)
+  assert.equal(options.interOpNumThreads, 1)
+  assert.equal(options.executionMode, 'sequential')
+  // Pure: no hidden state, and nothing the caller can mutate into the next session.
+  const second = kokoroSessionOptions()
+  assert.notEqual(options, second)
+  assert.deepEqual(options, second)
+  // `session.intra_op.allow_spinning` is deliberately ABSENT: onnxruntime-node 1.20.1 does not
+  // read `SessionOptions.extra` at all (its typings say WebAssembly-only, and passing it changed
+  // nothing when measured). One intra-op thread means no pool, hence nothing to spin.
+  assert.equal(options.extra, undefined)
 })
 
 test('the pinned assets are two immutable, hash-pinned https URLs', () => {

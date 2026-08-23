@@ -37,7 +37,7 @@
 // game.
 
 import type { AAEvent, AAPotionEvent, LevelingSnap, ProgressionSnap } from './types'
-import { offlineMsIn, type RangeStats } from './progressionStats'
+import { offlineMsIn, wallMs, type RangeStats } from './progressionStats'
 
 /**
  * Completions one bottle pays double for.
@@ -124,6 +124,12 @@ export interface AaPace {
    * how much play it is over, and a shaper that holds the rate but not its denominator cannot.
    */
   activeMs: number
+  /**
+   * The window's ELAPSED span — `wallMs(...)`, the other denominator the pair below divides by
+   * (JOS-288). MEASURED, and carried for `activeMs`' reason: a rate that cannot state the span it
+   * was measured over is a rate the reader cannot size.
+   */
+  wallMs: number
   /** completions inside the window (gain LINES). MEASURED. */
   events: number
   /** points inside the window — Σ of the stated amounts, doubling included. MEASURED. */
@@ -132,6 +138,11 @@ export interface AaPace {
   perHourActive: number | null
   /** points per hour of ACTIVE time, or null when the window has none. MEASURED. */
   pointsPerHourActive: number | null
+  /** completions per hour of ELAPSED time, or null when the window is entirely offline. MEASURED.
+   *  The elapsed half of the pair — the app's default reading since JOS-288. */
+  perHourWall: number | null
+  /** points per hour of ELAPSED time, or null when the window is entirely offline. MEASURED. */
+  pointsPerHourWall: number | null
   /** the next completion, or the reason there is no estimate. INFERRED. */
   eta: AaEta
   potion: AaPotionState
@@ -241,10 +252,13 @@ export function aaPace(args: AaPaceArgs): AaPace {
   const lastGainTs = gains.length > 0 ? gains[gains.length - 1].ts : null
   return {
     activeMs: window.activeMs,
+    wallMs: wallMs(window),
     events: window.aaGainEvents,
     points: window.aaGained,
     perHourActive: window.aaPerHourActive,
     pointsPerHourActive: window.aaPointsPerHourActive,
+    perHourWall: window.aaPerHourWall,
+    pointsPerHourWall: window.aaPointsPerHourWall,
     eta: aaEta(window, lastGainTs, prog, prog.lastTs),
     potion: aaPotionState(gains, leveling.aaPotions)
   }

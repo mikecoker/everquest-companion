@@ -3,14 +3,14 @@
 //
 // `initial` is null for "add", or an existing def for "edit" (including a seeded
 // built-in — no special casing beyond keeping its id stable).
+//
+// THIS FILE IS THE RENDERING. The form model it drives — which fields exist, how they are
+// hydrated from `initial`, and how they turn back into an `AlertDef` — lives in alertForm.ts,
+// which is where JOS-122's hydration rule is stated: hydration answers an OPENING, never a prop
+// identity, because `packs` is re-listed on every window focus and re-hydrating on it wiped
+// whatever the user had typed. Read that header before touching either half.
 
-import {
-  type Dispatch,
-  type JSX,
-  type SetStateAction,
-  useEffect,
-  useState
-} from 'react'
+import { type Dispatch, type JSX, type SetStateAction } from 'react'
 import {
   Box,
   Button,
@@ -30,168 +30,25 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
-import type { AlertDef, AlertTrigger, SoundPack } from '@shared/types'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import type { AlertDef, SoundPack } from '@shared/types'
+import { captureNamesIn } from '@shared/alertCaptures'
+import { autoTokenNamesFor } from '@shared/alertTargets'
+import { MAX_EARLY_WARN_SEC, breakTriggerKinds } from '@shared/earlyWarning'
+import { blankCondition, type CombineMode, type ConditionDraft } from './conditionDraft'
 import {
-  blankCondition,
-  type CombineMode,
-  type ConditionDraft,
-  conditionFieldValErr,
-  conditionRawErr,
-  draftFromPrimitive,
-  primitiveFromDraft
-} from './conditionDraft'
+  type AlertForm,
+  type CooldownScope,
+  defFromForm,
+  formCanSave,
+  triggerFromForm,
+  useAlertForm
+} from './alertForm'
 import ConditionEditor from './ConditionEditor'
-import SoundPicker, { fallbackPack, firstSoundId } from './SoundPicker'
-import SpeechBlock, { type SpeechForm, speechFieldsFor, useSpeechForm } from './SpeechBlock'
+import SoundPicker from './SoundPicker'
+import SpeechBlock from './SpeechBlock'
+import BannerBlock from './BannerBlock'
 import type { VoiceSetupNotice } from './VoiceSetupLink'
-import { DEFAULT_PACK_ID } from './suggestions'
-import { Tooltip } from '../../lib/Tooltip'
-
-const DEFAULT_COOLDOWN_MS = 2000
-
-function newId(name: string): string {
-  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'alert'
-  return `${base}-${Math.random().toString(36).slice(2, 6)}`
-}
-
-/** Everything the dialog's form owns; `useAlertForm` hydrates it from `initial`. */
-interface AlertForm {
-  name: string
-  setName: (v: string) => void
-  mode: CombineMode
-  changeMode: (next: CombineMode) => void
-  conditions: ConditionDraft[]
-  setConditions: Dispatch<SetStateAction<ConditionDraft[]>>
-  packId: string
-  soundId: string
-  setSound: (packId: string, soundId: string) => void
-  volume: number
-  setVolume: (v: number) => void
-  cooldownMs: number
-  setCooldownMs: (v: number) => void
-  /** What the cooldown is measured per — one clock for the alert, or one per mob. */
-  cooldownScope: CooldownScope
-  setCooldownScope: (v: CooldownScope) => void
-  /** The Speech block's own sub-form (voice-alerts §4) — see SpeechBlock.tsx. */
-  speech: SpeechForm
-}
-
-/** Local alias for the def field, so the form and the def can never drift apart. */
-type CooldownScope = NonNullable<AlertDef['cooldownScope']>
-
-function useAlertForm(open: boolean, initial: AlertDef | null, packs: SoundPack[]): AlertForm {
-  const [name, setName] = useState('')
-  const [mode, setMode] = useState<CombineMode>('single')
-  const [conditions, setConditions] = useState<ConditionDraft[]>([blankCondition()])
-  const [packId, setPackId] = useState(fallbackPack(packs)?.id ?? DEFAULT_PACK_ID)
-  const [soundId, setSoundId] = useState(firstSoundId(fallbackPack(packs)))
-  const [volume, setVolume] = useState(1)
-  const [cooldownMs, setCooldownMs] = useState(DEFAULT_COOLDOWN_MS)
-  const [cooldownScope, setCooldownScope] = useState<CooldownScope>('alert')
-  // The Speech block hydrates itself from the same `open`/`initial` pair.
-  const speech = useSpeechForm(open, initial)
-
-  // Hydrate the form from `initial` (edit) or blanks (add) whenever it opens.
-  useEffect(() => {
-    if (!open) return
-    if (initial) {
-      setName(initial.name)
-      const t = initial.trigger
-      if ('conditions' in t) {
-        setMode(t.type)
-        setConditions(t.conditions.length ? t.conditions.map(draftFromPrimitive) : [blankCondition()])
-      } else {
-        setMode('single')
-        setConditions([draftFromPrimitive(t)])
-      }
-      setPackId(initial.sound.packId)
-      setSoundId(initial.sound.soundId)
-      setVolume(initial.volume ?? 1)
-      setCooldownMs(initial.cooldownMs ?? DEFAULT_COOLDOWN_MS)
-      setCooldownScope(initial.cooldownScope ?? 'alert')
-    } else {
-      setName('')
-      setMode('single')
-      setConditions([blankCondition()])
-      const preset = fallbackPack(packs)
-      setPackId(preset?.id ?? DEFAULT_PACK_ID)
-      setSoundId(firstSoundId(preset))
-      setVolume(1)
-      setCooldownMs(DEFAULT_COOLDOWN_MS)
-      setCooldownScope('alert')
-    }
-  }, [open, initial, packs])
-
-  // Switching INTO a composite from single keeps the existing condition and adds a second so
-  // the OR/AND is meaningful; switching back to single collapses to the first condition.
-  const changeMode = (next: CombineMode): void => {
-    setMode(next)
-    if (next === 'single') setConditions((prev) => prev.slice(0, 1))
-    else setConditions((prev) => (prev.length >= 2 ? prev : [...prev, blankCondition()]))
-  }
-
-  const setSound = (p: string, s: string): void => {
-    setPackId(p)
-    setSoundId(s)
-  }
-
-  return {
-    name,
-    setName,
-    mode,
-    changeMode,
-    conditions,
-    setConditions,
-    packId,
-    soundId,
-    setSound,
-    volume,
-    setVolume,
-    cooldownMs,
-    setCooldownMs,
-    cooldownScope,
-    setCooldownScope,
-    speech
-  }
-}
-
-function triggerFromForm(mode: CombineMode, conditions: ConditionDraft[]): AlertTrigger {
-  if (mode === 'single') return primitiveFromDraft(conditions[0])
-  return { type: mode, conditions: conditions.map(primitiveFromDraft) }
-}
-
-function formCanSave(f: AlertForm): boolean {
-  const conditionsValid = f.conditions.every(
-    (c) => conditionRawErr(c) == null && conditionFieldValErr(c) == null
-  )
-  return (
-    f.name.trim().length > 0 &&
-    f.conditions.length > 0 &&
-    conditionsValid &&
-    f.packId.length > 0 &&
-    f.soundId.length > 0
-  )
-}
-
-function defFromForm(f: AlertForm, initial: AlertDef | null): AlertDef {
-  return {
-    // Preserve id + note on edit (stable ids for built-ins); mint on add.
-    id: initial?.id ?? newId(f.name),
-    name: f.name.trim(),
-    enabled: initial?.enabled ?? true,
-    trigger: triggerFromForm(f.mode, f.conditions),
-    sound: { packId: f.packId, soundId: f.soundId },
-    volume: f.volume,
-    cooldownMs: f.cooldownMs,
-    // Omitted at its default, like the speech fields below: a def that never asked for per-mob
-    // scope saves byte-identically to how it always did, so import dedupe keeps matching it.
-    ...(f.cooldownScope === 'target' ? { cooldownScope: 'target' as const } : {}),
-    note: initial?.note,
-    // audio / speech / alwaysPlay, each omitted at its default so a sound-only alert saves
-    // byte-identically to how it always did (SpeechBlock.speechFieldsFor).
-    ...speechFieldsFor(f.speech)
-  }
-}
 
 /** "Fire when…" — the single/any/all combine-mode picker plus the same-event caveat. */
 function CombineModeSection({
@@ -209,6 +66,7 @@ function CombineModeSection({
       <Select
         size="small"
         fullWidth
+        data-testid="alert-combine-mode"
         value={mode}
         onChange={(e) => onChange(e.target.value as CombineMode)}
       >
@@ -247,13 +105,20 @@ function ConditionRow({
           Condition {index + 1}
         </Typography>
         <Box sx={{ flexGrow: 1 }} />
-        <Tooltip title="Remove condition">
-          <span>
-            <IconButton size="small" color="error" disabled={!canRemove} onClick={onRemove}>
-              <DeleteOutlineIcon fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
+        {/* No popper (JOS-143): this button sits on the card's header line, directly above the
+            ConditionEditor's three Selects, and a default-placement tooltip opens DOWNWARD — onto
+            them. The span outlives it because a disabled button swallows mouse events. */}
+        <span title="Remove condition">
+          <IconButton
+            size="small"
+            aria-label="Remove condition"
+            color="error"
+            disabled={!canRemove}
+            onClick={onRemove}
+          >
+            <DeleteOutlineIcon fontSize="small" />
+          </IconButton>
+        </span>
       </Stack>
       <ConditionEditor draft={draft} onChange={onChange} />
     </Paper>
@@ -320,6 +185,7 @@ function VolumeCooldownSection({ f }: { f: AlertForm }): JSX.Element {
         size="small"
         type="number"
         label="Cooldown (ms)"
+        data-testid="alert-cooldown"
         value={f.cooldownMs}
         onChange={(e) => f.setCooldownMs(Math.max(0, Number(e.target.value) || 0))}
         sx={{ width: 140 }}
@@ -350,33 +216,115 @@ function VolumeCooldownSection({ f }: { f: AlertForm }): JSX.Element {
   )
 }
 
+/**
+ * "Warn N seconds early" (JOS-216) — the offset, in the plainest words the feature has.
+ *
+ * DELIBERATELY SMALL, and the owner's ruling says why: this is one option add, not a lecture. The
+ * caveat that belongs to it — the timing leans on a duration the app is still learning — is the
+ * MOUSEOVER, two short sentences, because it is a thing to know once rather than a thing to read on
+ * every visit. The one caption below it states what the number changes and nothing else.
+ */
+/**
+ * True when this alert's trigger is an ENDING rather than a landing (JOS-235) — asked of the SAME
+ * classifier main schedules by, over the trigger the form would save right now.
+ *
+ * It changes one caption, and the caption was a lie for exactly these defs: a mez-break alert with
+ * an offset does not fire "instead of when it lands" (it never fired on a landing), and the thing
+ * a user needs told is the half that is new — an early break still speaks at the break.
+ */
+function isBreakForm(f: AlertForm): boolean {
+  return breakTriggerKinds(triggerFromForm(f.mode, f.conditions)).length > 0
+}
+
+function EarlyWarnSection({ f }: { f: AlertForm }): JSX.Element {
+  return (
+    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <TextField
+        size="small"
+        type="number"
+        label="Warn early (sec)"
+        data-testid="alert-early-warn"
+        value={f.earlyWarnSec || ''}
+        placeholder="0"
+        onChange={(e) => f.setEarlyWarnSec(Math.max(0, Number(e.target.value) || 0))}
+        slotProps={{ htmlInput: { min: 0, max: MAX_EARLY_WARN_SEC } }}
+        sx={{ width: 150 }}
+      />
+      {/* A NATIVE title, not a popper (JOS-143): this dialog renders Selects, and the rule is that
+          no file mounting a dropdown may also mount a hover card that could open over its option
+          list. Same spelling the Remove-condition button above already uses. */}
+      <span
+        title="Timing uses the duration the app has learned for that spell, so it can be off at first. It gets accurate once your logs have been running a while."
+        data-testid="alert-early-warn-help"
+      >
+        <InfoOutlinedIcon fontSize="small" color="disabled" />
+      </span>
+      {f.earlyWarnSec > 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ flexBasis: '100%' }}>
+          {isBreakForm(f)
+            ? `Fires ${String(f.earlyWarnSec)}s before it is due to end. If it ends sooner than that, you still hear the alert then.`
+            : `Fires ${String(f.earlyWarnSec)}s before it is due to wear off, instead of when it lands.`}
+        </Typography>
+      )}
+    </Stack>
+  )
+}
+
 export default function AlertDialog({
   open,
   initial,
   packs,
+  defaultPackId,
   voiceSetup,
+  allAlwaysPlay = false,
+  bannerOverlayOn = false,
+  onOpenOverlayPrefs,
   onClose,
   onSave
 }: {
   open: boolean
   initial: AlertDef | null
   packs: SoundPack[]
+  /**
+   * The user's default sound pack (JOS-273). A NEW alert opens on it; an EDIT is untouched by it,
+   * because the def already states which pack it plays. Optional so a caller without the prefs
+   * (and every test that mounts this dialog bare) still compiles onto the shipped default.
+   */
+  defaultPackId?: string
   /** Whether there is a voice to speak with, and how to go set one up (VoiceSetupLink.tsx). */
   voiceSetup: VoiceSetupNotice
+  /**
+   * `AlertPrefs.alwaysPlayAll` (JOS-222) — passed straight through to the Speech block, which is
+   * the only thing in this dialog the global preference has an opinion about. Optional and false
+   * by default for the same reason `onOpenVoicePrefs` is on the view: a caller without the prefs
+   * must still compile, and the safe rendering is the editable one.
+   */
+  allAlwaysPlay?: boolean
+  /**
+   * Is the ALERT BANNER overlay switched on (JOS-378)? The owner's ruling is that the on-screen
+   * controls are visible only while it is, so this decides whether the Banner block renders its
+   * three controls or the one quiet line naming the switch. Optional and false by default for
+   * `allAlwaysPlay`'s reason: a caller without the state must still compile, and OFF is the
+   * shipped default, so false is also the honest guess.
+   */
+  bannerOverlayOn?: boolean
+  /** Navigate to Preferences → Overlays. Absent ⇒ the quiet line renders without a link. */
+  onOpenOverlayPrefs?: () => void
   onClose: () => void
   onSave: (def: AlertDef) => void
 }): JSX.Element {
-  const f = useAlertForm(open, initial, packs)
+  const f = useAlertForm(open, initial, packs, defaultPackId)
   const editing = initial != null
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth data-testid="alert-dialog">
-      <DialogTitle>{editing ? `Edit alert — ${initial?.name}` : 'Add alert'}</DialogTitle>
+      <DialogTitle>{editing ? `Edit alert - ${initial?.name}` : 'Add alert'}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           <TextField
             size="small"
             label="Name"
+            data-testid="alert-name"
             value={f.name}
             onChange={(e) => f.setName(e.target.value)}
             autoFocus
@@ -398,14 +346,39 @@ export default function AlertDialog({
               packs={packs}
               packId={f.packId}
               soundId={f.soundId}
+              defaultPackId={defaultPackId}
               onChange={f.setSound}
             />
           </Box>
 
           <VolumeCooldownSection f={f} />
+          <EarlyWarnSection f={f} />
 
           <Divider />
-          <SpeechBlock name={f.name} form={f.speech} voiceSetup={voiceSetup} />
+          {/* Recomputed from the LIVE form, not from `initial`: the user can add `(?<player>…)`
+              to the pattern and the token list has to follow them, in the same dialog, before
+              they type the phrase that uses it. `autoNames` follows the same live trigger for the
+              same reason (JOS-353) — switching a condition's event kind is exactly how a user
+              discovers that `{target}` is available here and not there. */}
+          <SpeechBlock
+            name={f.name}
+            form={f.speech}
+            voiceSetup={voiceSetup}
+            captureNames={captureNamesIn(triggerFromForm(f.mode, f.conditions))}
+            autoNames={autoTokenNamesFor(triggerFromForm(f.mode, f.conditions))}
+            allAlwaysPlay={allAlwaysPlay}
+          />
+
+          {/* THE ON-SCREEN CHANNEL (JOS-378), beside the spoken one because it is the same
+              question about a third channel. The placeholder is the NAME being typed above
+              (JOS-380), because that is what an empty override prints — one derivation, and not a
+              promise two files make separately. */}
+          <BannerBlock
+            alertName={f.name}
+            form={f.banner}
+            enabled={bannerOverlayOn}
+            onOpenPrefs={onOpenOverlayPrefs}
+          />
         </Stack>
       </DialogContent>
       <DialogActions>

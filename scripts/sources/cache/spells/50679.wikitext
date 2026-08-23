@@ -41,9 +41,7 @@
 </li></ul>
 | where_to_obtain = 
 
-{{SpellWhereTable|
-{{SpellWhereRowB | [[Highpass Keep|High Keep]] | [[Justin Ryhmes]] | First Floor | (62,-218) }}
-}}
-| TableLocations = Highkeep
-| TableEra = Classic
+<ul>
+<li>[[Bard#Song_Vendors|Bard Song Vendors]]</li>
+</ul>
 }}

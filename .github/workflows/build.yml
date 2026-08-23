@@ -163,6 +163,34 @@ jobs:
             release/**/*.yml
           if-no-files-found: warn
 
+      # SOURCEMAPS (JOS-100) — a WORKFLOW ARTIFACT, deliberately not a release asset.
+      #
+      # An `errorReport` names a bundle position (`out/renderer/assets/index-a1b2.js:1:48213`).
+      # Turning that into `src/renderer/…/CombatView.tsx:214:9` needs the map for THAT EXACT
+      # BUILD — a map from any other commit resolves to a plausible wrong line — so the maps
+      # have to be kept, keyed by what identifies the build, for as long as reports about it
+      # can arrive. `scripts/symbolicate.mts` is what consumes them.
+      #
+      # WHY NOT A RELEASE ASSET: a release asset is public and permanent. A published `.map`
+      # is the entire source tree, which for THIS repo is already public and therefore not a
+      # leak — but it is also not a download anybody asked for, it would sit in the release
+      # list next to the installer inviting confusion about what to install, and the day this
+      # tree gains one closed dependency the decision would have to be unwound retroactively,
+      # which for a published artifact is not possible. An artifact is private to the repo,
+      # expires on its own, and is exactly as available to the person triaging as a release
+      # asset would be.
+      #
+      # 90 DAYS is the maximum a public repo may set, and the useful minimum: the fleet
+      # auto-updates within days, so reports naming a version older than that are rare — and
+      # the honest answer for one is "the maps for that build are gone", not a wrong line.
+      - name: Upload sourcemaps (private, for symbolicating error reports)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        with:
+          name: sourcemaps-main-${{ github.run_number }}
+          path: out/**/*.map
+          retention-days: 90
+          if-no-files-found: warn
+
   # =========================================================================
   # TAG REFS ONLY: the publish path. The ONLY job that holds a write token.
   # =========================================================================
@@ -383,4 +411,20 @@ jobs:
             release/**/*.blockmap
             release/**/*.yml
             SHA256SUMS.txt
+          if-no-files-found: warn
+
+      # THE ONE THAT MATTERS (JOS-100). Keyed by the TAG, because the tag is the version an
+      # `errorReport` carries — so "which maps do I need for v0.11.0" is answered by the name of
+      # the artifact rather than by matching run numbers to releases. The long note on the same
+      # step in the `build` job above says why this is an artifact and not a release asset.
+      #
+      # Deliberately NOT gated on the signing secrets or on anything else: a release whose maps
+      # were skipped is a release whose crashes cannot be read, and that would be discovered
+      # months later by somebody trying to read one.
+      - name: Upload sourcemaps (private, for symbolicating error reports)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        with:
+          name: sourcemaps-${{ github.ref_name }}
+          path: out/**/*.map
+          retention-days: 90
           if-no-files-found: warn

@@ -77,11 +77,11 @@ function hourStats(snap: ProgressionSnap): RangeStats {
 
 // ── the value/unit split ───────────────────────────────────────────────────────────────
 
-test('splitRate recovers the two halves of the ONE rate wording, em-dash included', () => {
+test('splitRate recovers the two halves of the ONE rate wording, the dash included', () => {
   assert.deepEqual(splitRate('1.42 lvl/hr'), { value: '1.42', unit: 'lvl/hr' })
   assert.deepEqual(splitRate('240 kills/hr'), { value: '240', unit: 'kills/hr' })
   // The unknown answer has no unit to split off, and must not gain one.
-  assert.deepEqual(splitRate('—'), { value: '—', unit: '' })
+  assert.deepEqual(splitRate('-'), { value: '-', unit: '' })
 })
 
 // ── the tiles ──────────────────────────────────────────────────────────────────────────
@@ -120,12 +120,44 @@ test('no ding folded ⇒ NO level tile, never a guessed or em-dash one', () => {
   )
 })
 
-test('at cap: the pace tile is an em-dash, and it is still a tile', () => {
+test('the level tile takes your own /who over the ding tail, and the ETA stands down', () => {
+  // JOS-192, both halves in one window. The ding series states your level only when it CHANGES,
+  // and a loadout swap changes it with no line at all — so the card takes the STATED fact
+  // (`CharacterSnap.level`) when one is in hand, and degrades to the ding tail when it is not.
+  // A row naming a DIFFERENT level than the last ding is also the sixth ETA gate: every
+  // percentage since that ding belongs to a bar the swap restarted, so "~2h to level 51" beside a
+  // header reading 11 is not a rounding error. `tests/currentLevel.test.mts` pins the fact itself.
+  const snap = farming({ pct: 1 })
+  snap.levelTs.push(T0 - 30 * MIN)
+  snap.levelValue.push(50)
+  const bare = overviewLeveling(snap)
+  assert.equal(bare.level, 50, 'no stated fact ⇒ the ding tail, exactly as before')
+  assert.ok(bare.eta, 'and an estimate')
+
+  const swapped = overviewLeveling(snap, { level: 11, ts: T0 - 10 * MIN, source: 'who' })
+  assert.equal(swapped.level, 11)
+  assert.equal(swapped.levelCue, '/who')
+  assert.equal(swapped.levelTitle, 'Your own /who row stated this level, 10m ago.')
+  const tile = swapped.tiles.find((t) => t.id === 'level')
+  assert.equal(tile?.value, '11', 'the tile is the same one fact')
+  assert.equal(tile.label, 'level · /who')
+  assert.equal(tile.title, swapped.levelTitle)
+  assert.equal(swapped.eta, null)
+  assert.match(swapped.etaTitle, /different level than your last level-up/)
+  assert.equal(swapped.tiles.some((t) => t.id === 'eta'), false, 'and no tile pretends otherwise')
+
+  // A row AGREEING with the ding is not a contradiction, and an OLDER row cannot overrule a
+  // newer ding at all.
+  assert.ok(overviewLeveling(snap, { level: 50, ts: T0 - 10 * MIN, source: 'who' }).eta)
+  assert.ok(overviewLeveling(snap, { level: 11, ts: T0 - 40 * MIN, source: 'who' }).eta)
+})
+
+test('at cap: the pace tile is a dash, and it is still a tile', () => {
   const snap = farming({ pct: 0, unstated: true })
   const state = overviewLeveling(snap)
   const rateTile = state.tiles.find((t) => t.id === 'rate')
   assert.ok(rateTile)
-  assert.equal(rateTile.value, '—', 'unknown, never 0.00')
+  assert.equal(rateTile.value, '-', 'unknown, never 0.00')
   assert.equal(rateTile.unit, 'lvl/hr', 'the unit survives the unknown — it says WHAT is unknown')
 })
 
@@ -133,6 +165,8 @@ test('the AA tile reports a measured zero rather than disappearing', () => {
   const snap = farming({ pct: 1 })
   const aa = levelingTiles({
     level: null,
+    levelTitle: '',
+    levelCue: '',
     hour: hourStats(snap),
     eta: { blocked: 'no-ding' },
     rateText: '1.00 lvl/hr'
@@ -144,6 +178,8 @@ test('the AA tile reports a measured zero rather than disappearing', () => {
 test('an absurd horizon says so in the tile instead of pretending to minutes', () => {
   const tiles = levelingTiles({
     level: 43,
+    levelTitle: 'Your last level-up reported this level, 30m ago.',
+    levelCue: '',
     hour: hourStats(farming({ pct: 1 })),
     eta: { blocked: null, ms: 50 * 60 * 60_000, toLevel: 44, progress: 0.1, offlineMs: 0 },
     rateText: '0.01 lvl/hr'

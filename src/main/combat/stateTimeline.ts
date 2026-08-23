@@ -99,6 +99,7 @@ export class StateTimeline {
     this.open.clear()
   }
 
+
   /**
    * Open a span, closing whatever open span shares its exclusivity group as 'inferred' — the
    * only honest verdict when the game never printed an end. Callers that can be re-asserted

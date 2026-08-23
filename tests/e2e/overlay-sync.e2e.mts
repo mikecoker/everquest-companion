@@ -7,6 +7,20 @@
  * `disableHardwareAcceleration` is decided before Electron is ready). Both live here because
  * both are claims about the window this spec already owns.
  *
+ * SINCE JOS-121 it also owns the meter title bar's BUDGET. The scope word left that row for the
+ * panel floor, and "the freed width went to the fight selector and to the drag surface" is a
+ * geometry claim about a real window at a real width with a real mob name in its title — so
+ * `stepTitleBarRoom` MEASURES it, reconstructing the old row in place to have something to
+ * measure against.
+ *
+ * NOT HERE, AND DELIBERATELY: the overlays' TEXT SIZE (JOS-405) and their TRANSPARENCY (JOS-407),
+ * which is the same arrangement one field over. This spec is the natural place to
+ * look for either — it owns "two overlay windows agree about something" — and it has never asserted
+ * anything about them, including under the retired fan-out. The cross-window claims (a control in
+ * Preferences moves both meters, a control on one meter moves the other, and with the matching
+ * switch on it stops doing that) live in tests/e2e/text-size.e2e.mts beside the CONTROLS, which is
+ * where both are now set. This sentence is here so the next reader stops looking.
+ *
  * WHAT ONLY THE REAL APP CAN SHOW. The pure halves are pinned elsewhere: the value model and the
  * one-seam wiring in tests/fightSelection.test.mts, the locked-selector mechanism in
  * tests/overlayLockedSelector.test.mts. What no unit test can claim is that the PIECES ARE WIRED
@@ -50,6 +64,26 @@ import {
 } from './appHarness.mjs'
 import { mainWindow, makeUserData, overlayWindow, removeUserData } from './appWindow.mjs'
 import { launchOnFixture, stageFixture, type FixtureLog } from './logFixture.mjs'
+// The scope word's own two steps — where it lives (JOS-115/121) and what the title bar did with
+// the room it gave back — in their own module, because this file is at the max-lines budget.
+import { stepOverlayScope, stepTitleBarRoom } from './overlayScopeSteps.mjs'
+// …and JOS-158's: the aggregate left that row too, for the panel's own header row, and what the
+// fight NAME did with the pixels is measured in characters there.
+import { stepTotalOnPanel } from './overlayTotalSteps.mjs'
+// …and the pinned pane's scroll grip (JOS-138), in its own module for the same reason.
+import { stepPinnedScroll } from './overlayScrollSteps.mjs'
+// …and JOS-381's: the capture that has to end itself when the cursor walks off under the alt-tab
+// switcher, plus the timer that may only exist while it is held.
+import { stepPointerWatch } from './overlayPointerWatchSteps.mjs'
+// THE FLOOR A WINDOW CAN BE DRAGGED DOWN TO (JOS-278) — its own module, beside the other steps,
+// because the claim is about the window rather than about this spec's subject.
+import { stepMinimumSize } from './overlayMinSizeSteps.mjs'
+// …and JOS-187's: an overlay whose monitor went away, and the rule that the store keeps the
+// rectangle the user chose while the screen gets the one that fits.
+import { stepOverlayDisplay } from './overlayDisplaySteps.mjs'
+// …and JOS-258's: the one-sentence nudge for a summoned pet nothing has bound, which lives on this
+// same window's content background and takes itself off again.
+import { stepPetNudge } from './overlayPetNudgeSteps.mjs'
 
 /** The overlay open-state this spec's second launch runs against (`overlays.fight` in the store). */
 interface OverlayBridge {
@@ -114,6 +148,17 @@ async function writeAndSync(
 async function someFinalizedFight(page: Page): Promise<string | null> {
   const snap = await snapshot(page)
   return snap.segments.find((s) => s.kind === 'fight')?.id ?? null
+}
+
+/**
+ * The LONGEST fight name the staged fixture produced — the hardest title this window will ever be
+ * asked to print, and the subject of JOS-158's measurement. A real name from a real replay rather
+ * than a hand-authored one, so what is measured is a title bar doing its actual job.
+ */
+async function longestFightName(page: Page): Promise<string> {
+  const snap = await snapshot(page)
+  const names = snap.segments.filter((s) => s.kind === 'fight').map((s) => s.name)
+  return names.sort((a, b) => b.length - a.length)[0] ?? ''
 }
 
 // ── P4/P5/P6: the selection crosses windows ─────────────────────────────────────────────
@@ -186,14 +231,24 @@ async function stepStaleId(app: Page, overlay: Page): Promise<void> {
 /** The selector trigger, by the ARIA contract OverlayHeader renders. */
 const TRIGGER = '[aria-haspopup="listbox"]'
 
+/**
+ * The footer's background-opacity slider — the piece of chrome that is present IFF the overlay is
+ * interactive, and therefore the observable of the lock flip.
+ *
+ * It used to be the header's scope readout, which JOS-121 moved to the panel floor and (unlike a
+ * lock/close button) deliberately does NOT hide while locked: it is a watermark you read, not
+ * chrome you reach for, and a pinned meter is exactly the one with nothing else left to explain a
+ * missing name. So the lock needed a different tell, and the footer is the honest one — it holds
+ * the controls that only an interactive window can use.
+ */
+const FOOTER_SLIDER = 'input[type="range"]'
+
 /** Set the lock and wait for the overlay's own chrome to reflect it — the observable of the flip. */
 async function setLocked(overlay: Page, locked: boolean): Promise<void> {
   await overlay.evaluate((v) => {
     ;(window as unknown as { eqOverlay: { setLocked: (b: boolean) => void } }).eqOverlay.setLocked(v)
   }, locked)
-  // The scope chip is the one piece of chrome that is present iff the overlay is INTERACTIVE, so
-  // its presence is exactly "the lock has taken effect in this renderer".
-  await settle(() => countOf(overlay, '[data-testid="overlay-scope-chip"]'), (n) => (locked ? n === 0 : n === 1), {
+  await settle(() => countOf(overlay, FOOTER_SLIDER), (n) => (locked ? n === 0 : n === 1), {
     timeoutMs: 10_000
   })
 }
@@ -243,49 +298,21 @@ async function stepLockedSelector(overlay: Page): Promise<void> {
     `${before} → ${after} control(s)`
   )
 
+  // AND IT GIVES THE MOUSE BACK. The release is half the sensor — a reason left behind would keep
+  // this window capturing for every step below it, which is exactly what a `mouseover` with no
+  // matching `mouseout` used to do here (JOS-138 found it: the scroll step read a captured window
+  // and blamed its own grip).
+  await overlay.evaluate(() => {
+    const row = document.querySelector('[aria-haspopup="listbox"]')?.parentElement
+    row?.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }))
+  })
+  const released = await settle(countButtons, (n) => n === 0, { timeoutMs: 8_000 })
+  check('…and moving off the row gives it back', released === 0, `${released} control(s)`)
+
   await setLocked(overlay, false)
 }
 
-/**
- * THE OVERLAY'S SCOPE CHIP (docs/plans/group-model.md §3) — the second half of "on the combat
- * toolbar AND overlay headers", and the half with a rule of its own.
- *
- * The overlay gets a one-click CYCLE and no popover: two inches of transparent chrome pinned
- * over a running game is not where a name-entry box belongs. And it must vanish while LOCKED —
- * a click-through window may not show an affordance it cannot deliver, which is the same
- * discipline the bars are held to just above.
- */
-async function stepOverlayScope(overlay: Page): Promise<void> {
-  const CHIP = '[data-testid="overlay-scope-chip"]'
-  await setLocked(overlay, false)
 
-  check('an INTERACTIVE overlay header carries the scope chip', (await countOf(overlay, CHIP)) === 1)
-  const label = async (): Promise<string> => (await overlay.textContent(CHIP))?.trim() ?? ''
-  const first = await label()
-  // The SAME phrasing the Combat tab shows, because both go through `chipLabel` — one wording,
-  // two renderers. Which of the two Group states the live log leaves behind is not this spec's
-  // business; that both windows would spell it identically is.
-  check(
-    'it defaults to Group, stating any fallback in the chip rather than switching scope for you',
-    first === 'Group' || first === 'Group (no roster yet)',
-    first
-  )
-
-  await overlay.click(CHIP)
-  const cycled = await settle(label, (t) => t === 'Everyone', { timeoutMs: 8_000 })
-  check('one click cycles it — the overlay control is the cycle, with no popover', cycled === 'Everyone', cycled)
-  // …and no roster editor came with it: that is the Combat tab's job.
-  check('the overlay offers no roster popover', (await countOf(overlay, '[data-testid="roster-open"]')) === 0)
-
-  await setLocked(overlay, true)
-  check('a LOCKED overlay hides the chip — no affordance it cannot deliver', (await countOf(overlay, CHIP)) === 0)
-
-  await setLocked(overlay, false)
-  // PERSISTED PER SURFACE: the cycle above survived the lock round trip, because it is a stored
-  // preference rather than component state — and it is the overlay's OWN key, so the Combat tab
-  // is still on whatever the user left it on.
-  check('the overlay remembers its own scope across the lock round trip', (await label()) === 'Everyone', await label())
-}
 
 // ── JOS-35: the overlay meter's levels, driven for real ────────────────────────────────
 //
@@ -298,6 +325,8 @@ async function stepOverlayScope(overlay: Page): Promise<void> {
 
 const CRUMB = '[data-testid="overlay-crumb"]'
 const BAR = '[data-testid="overlay-bar"]'
+/** The rejected JOS-105 damage-type strip — asserted ABSENT now (JOS-113: one bar per ability). */
+const CATEGORY_CHIP = '[data-testid="overlay-category"]'
 
 /** The crumb row's text — the drill subject, if any, and the fight clock. */
 async function crumbText(overlay: Page): Promise<string> {
@@ -309,7 +338,8 @@ async function stepOverlayDrill(overlay: Page): Promise<void> {
   // Start from level 1 however the persisted drill left this window — the drill outlives a run,
   // by design (it is remembered state, like window position). Backing out with the chevron is
   // also the only way to reach level 1, so this loop is the affordance proving itself: bounded at
-  // two, because a nested pet is the deepest the model goes.
+  // two, because a nested pet (a level-2 subject inside your level-2 row) is the deepest the model
+  // goes now (JOS-113 removed the level-3 damage type) — pet → your row → sources.
   for (let i = 0; i < 2 && (await crumbText(overlay)).includes('‹'); i++) {
     const was = await crumbText(overlay)
     await overlay.click(CRUMB)
@@ -335,6 +365,24 @@ async function stepOverlayDrill(overlay: Page): Promise<void> {
   check('…and the zoom-out chevron is offered on it (it was not, before JOS-35)', level2.includes('‹'), level2)
   check('…and the fight timer is still on the row', /\d+:\d\d/.test(level2), level2)
 
+  // NO CATEGORY CHIP (JOS-113). JOS-105 put a damage-type strip here and a third drill level; the
+  // owner rejected the grouping, so the drilled overlay is ONE BAR PER ABILITY with no strip. What
+  // is asserted here is that the rejected chip is gone rather than a new level opening.
+  check('the drilled overlay shows NO damage-type chip — one bar per ability, flat', (await countOf(overlay, CATEGORY_CHIP)) === 0)
+
+  // …AND NO HOVER ON ANY OF THEM (JOS-358, owner ruling from hands-on testing). The per-ability
+  // stats used to ride each bar's native `title`; the overlay windows keep tooltips only in the
+  // title bar now, and the fully-labeled figures are on the Combat tab. Asserted on the DRILLED
+  // level because that is where the longest of those strings lived.
+  const barTitles = await overlay.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>('[data-testid="overlay-bar"]')].map((e) => e.title)
+  )
+  check(
+    '…and no bar hovers a stat run over the game any more',
+    barTitles.length > 0 && barTitles.every((t) => t === ''),
+    JSON.stringify(barTitles.slice(0, 3))
+  )
+
   await overlay.click(CRUMB)
   const back = await settle(() => crumbText(overlay), (t) => t !== level2, { timeoutMs: 8_000 })
   check('…and the chevron really goes back out to the source list', back === level1, back)
@@ -352,11 +400,20 @@ async function stepOverlayDrill(overlay: Page): Promise<void> {
 // unlocks, and its open-state persists — in BOTH modes. A compatibility switch that quietly
 // broke the window it was compensating for would be worse than the artifacting.
 
+// JOS-31 made each switch THREE-STATE ('auto' | 'on' | 'off'), because the app now detects a Wine
+// prefix and takes the compatibility path by itself — and "the user refused" had to become
+// sayable. On this Windows CI box the detection must answer NO, so `auto` resolves exactly the way
+// `false` used to: that is the no-regression half, and it is asserted here rather than assumed.
 interface GraphicsPrefsBridge {
-  getGraphicsPrefs: () => Promise<{ safeMode: boolean; opaqueOverlays: boolean }>
-  setGraphicsPrefs: (patch: Record<string, boolean>) => Promise<{
-    safeMode: boolean
-    opaqueOverlays: boolean
+  getGraphicsPrefs: () => Promise<{ safeMode: string; opaqueOverlays: string }>
+  setGraphicsPrefs: (patch: Record<string, string>) => Promise<{
+    safeMode: string
+    opaqueOverlays: string
+  }>
+  getGraphicsEnvironment: () => Promise<{
+    wine: boolean
+    signals: string[]
+    auto: { safeMode: boolean; opaqueOverlays: boolean }
   }>
 }
 
@@ -404,17 +461,30 @@ async function stepOpaqueOverlays(app: ElectronApplication, page: Page): Promise
   const prefs = await page.evaluate(() =>
     (window as unknown as { eq: GraphicsPrefsBridge }).eq.getGraphicsPrefs()
   )
-  check('a fresh install carries both graphics switches OFF', prefs.safeMode === false && prefs.opaqueOverlays === false,
+  check('a fresh install carries both graphics switches on AUTO', prefs.safeMode === 'auto' && prefs.opaqueOverlays === 'auto',
     JSON.stringify(prefs))
+
+  // THE NO-REGRESSION ASSERTION FOR EVERY WINDOWS USER (JOS-31). The detection runs on this real
+  // Windows machine, through the real filesystem and the real environment, and it must find
+  // NOTHING — so `auto` means off, the overlay below is transparent, and the whole ticket is
+  // invisible here. A false positive would turn every Windows install's overlays opaque and its
+  // renderer to software, and this is the line that would go red first.
+  const environment = await page.evaluate(() =>
+    (window as unknown as { eq: GraphicsPrefsBridge }).eq.getGraphicsEnvironment()
+  )
+  check('this Windows machine is NOT detected as Wine, and recommends no compatibility path',
+    environment.wine === false && environment.signals.length === 0 &&
+      environment.auto.safeMode === false && environment.auto.opaqueOverlays === false,
+    JSON.stringify(environment))
 
   const transparentBg = await overlayBackground(app)
   note(`transparent overlay background: ${transparentBg || '(none)'}`)
 
   const written = await page.evaluate(() =>
-    (window as unknown as { eq: GraphicsPrefsBridge }).eq.setGraphicsPrefs({ opaqueOverlays: true })
+    (window as unknown as { eq: GraphicsPrefsBridge }).eq.setGraphicsPrefs({ opaqueOverlays: 'on' })
   )
   check('flipping the opaque-overlay switch persists it (main answers with what it stored)',
-    written.opaqueOverlays === true && written.safeMode === false, JSON.stringify(written))
+    written.opaqueOverlays === 'on' && written.safeMode === 'auto', JSON.stringify(written))
 
   const opaque = await reopenFightOverlay(app, page)
   if (!check('the fight overlay reopens in opaque mode', opaque !== null)) return
@@ -429,9 +499,12 @@ async function stepOpaqueOverlays(app: ElectronApplication, page: Page): Promise
     opaqueBg.toLowerCase() === '#0e1115' && opaqueBg !== transparentBg, `${transparentBg} → ${opaqueBg}`)
   await checkOverlayStillWorks(page, opaque as Page, 'opaque')
 
-  // …and back. The switch is a switch, not a one-way door.
+  // …and back. The switch is a switch, not a one-way door — and since JOS-31 the way back is an
+  // EXPLICIT 'off' rather than a return to 'auto', which is the same round trip a Wine user makes
+  // when they want their see-through overlays despite the detection. This machine cannot exercise
+  // the detected half, but it exercises the override that has to beat it.
   await page.evaluate(() =>
-    (window as unknown as { eq: GraphicsPrefsBridge }).eq.setGraphicsPrefs({ opaqueOverlays: false })
+    (window as unknown as { eq: GraphicsPrefsBridge }).eq.setGraphicsPrefs({ opaqueOverlays: 'off' })
   )
   const clear = await reopenFightOverlay(app, page)
   if (!check('the fight overlay reopens transparent again', clear !== null)) return
@@ -466,10 +539,10 @@ async function stepOpaqueOverlays(app: ElectronApplication, page: Page): Promise
  * between attempts, so asking again once the loop is free is asking the same question, not a
  * different one.
  */
-async function hasDisableGpuSwitch(app: ElectronApplication): Promise<boolean> {
+async function hasCommandLineSwitch(app: ElectronApplication, name: string): Promise<boolean> {
   for (let i = 0; i < 4; i++) {
     try {
-      return await app.evaluate(({ app: a }) => a.commandLine.hasSwitch('disable-gpu'))
+      return await app.evaluate(({ app: a }, sw) => a.commandLine.hasSwitch(sw), name)
     } catch {
       await sleep(2_000)
     }
@@ -488,8 +561,21 @@ async function checkSafeModeLaunch(log: FixtureLog): Promise<void> {
     await waitHydrated(page)
     check(
       '…and the launch really is in software rendering (Chromium has --disable-gpu)',
-      await hasDisableGpuSwitch(app)
+      await hasCommandLineSwitch(app, 'disable-gpu')
     )
+    // JOS-352, and the only machine that can make this statement is this one: the two Wine flags
+    // are gated on the DETECTION, so a real Windows launch must append neither — not even the
+    // launch that has every other compatibility path engaged. `--in-process-gpu` in particular
+    // trades away GPU crash containment for every user it reaches, so "reaches nobody here" is
+    // the claim worth proving in Chromium's own terms rather than in a unit test's. (A negative
+    // read is only as good as the channel it came over, which is why it follows the positive one
+    // above: that check having passed is what says `hasCommandLineSwitch` is answering at all.)
+    for (const flag of ['disable-direct-composition', 'in-process-gpu']) {
+      check(
+        `…and this Windows machine appends none of the Wine flags (--${flag})`,
+        !(await hasCommandLineSwitch(app, flag))
+      )
+    }
   } finally {
     await close()
   }
@@ -579,8 +665,24 @@ async function main(): Promise<void> {
     await stepStaleId(page, ov)
     await stepOverlayDrill(ov)
     await stepLockedSelector(ov)
-    await stepOverlayScope(ov)
-    // LAST, because it closes and reopens the very window every step above holds a page for.
+    await stepPinnedScroll(app, ov, setLocked)
+    await stepPointerWatch(app, ov, setLocked)
+    await stepOverlayScope(page, ov, setLocked)
+    // Unlocked is a precondition of the measurement (a locked window has no drag region at all),
+    // and stepOverlayScope leaves it that way.
+    await setLocked(ov, false)
+    await stepTitleBarRoom(ov)
+    // …and the same header, at the smallest window the app allows. UNLOCKED is the demanding case
+    // and the one this must run in: a locked meter draws no lock/close pair at all, so a floor
+    // measured pinned would be measuring an empty row.
+    await stepMinimumSize(app, ov, 'fight', 'the fight meter')
+    await stepTotalOnPanel(ov, await longestFightName(page))
+    // LAST of the steps that APPEND to the tailed log, deliberately: every measurement above is
+    // taken against the staged fixture exactly as committed, and this one writes a line into it.
+    await stepPetNudge(log, ov)
+    // Everything below closes and reopens the very window every step above holds `ov` for, so `ov`
+    // is dead from here on — both of these find their own overlay page.
+    await stepOverlayDisplay(app, page)
     await stepOpaqueOverlays(app, page)
 
     check('no renderer console errors', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))

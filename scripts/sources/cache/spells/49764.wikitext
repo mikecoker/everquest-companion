@@ -3,7 +3,7 @@
 
 | spellname = Augmentation
 | spellicon = R
-| description = Fills your target with energy, increasing their attack speed, agility, and stamina regeneration.
+| description = Fills your target with energy, increasing their attack speed, agility, and stamina regeneration. NOTE: Does not stack with haste line of spells (e.g. Alacrity)
 
 | classes = * [[Enchanter]] - Level 28
 | slots = 

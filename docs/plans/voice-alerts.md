@@ -98,3 +98,33 @@ config later — not this wave.
 
 Verification per wave: typecheck + lint (zero ratchet) + npm test (+ e2e where
 renderer changes; + dist:dir smoke in W3). Migration fixtures same-commit.
+
+## 6. What the fallback forgot to say (JOS-247, 2026-08-12)
+
+The never-silent seam (D1/§3) worked exactly as designed and was, for one class of
+user, indistinguishable from the feature being broken: a 0.22.0 reporter downloaded
+a natural voice and heard the default Microsoft voice for every selection, with
+nothing on any screen saying why.
+
+Three things combined, and all three are now closed:
+
+1. **Every failure claimed to be "not installed".** `engine.ts` answered
+   `reason:'engine-not-installed'` for a worker that died with 115 MB of verified
+   model on disk. The reason is now the state: `engine-not-installed` only from the
+   install check, `engine-unloadable` when the thread dies with `ERR_DLOPEN_FAILED`,
+   `engine-failed` otherwise.
+2. **Nothing derived from the INVENTORY can see this failure.** `speech:voices`
+   reads the downloaded pack file, not the engine — so a broken tier lists all 54
+   voices and `speechSetupGap` correctly has nothing to say. The fault is therefore
+   LATCHED in `lib/speech.ts` from the first failed utterance and merged into
+   `useSpeechSetup`, which is what the Preferences picker and every speaking alert
+   row render from.
+3. **The only trace was a `console.warn`** in a packaged window that has no console.
+
+The measured cause of the field report, for the record: the shipped
+`onnxruntime_binding.node` and `onnxruntime.dll` import VCRUNTIME140,
+VCRUNTIME140_1, MSVCP140 and MSVCP140_1, and Electron ships none of them — so the
+tier silently depends on the machine having the Microsoft Visual C++ x64
+redistributable. Shipping those DLLs app-local beside the binding is the candidate
+real fix and is an owner call (redistribution terms, and it makes the installer
+carry another vendor's runtime).

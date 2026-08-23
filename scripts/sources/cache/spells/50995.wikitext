@@ -1,5 +1,5 @@
 {{Classic Era}}
-{{Spellpage|
+{{Spellpagesmart|
 
 | spellname = Conjuration: Earth
 | spellicon = 38
@@ -11,18 +11,18 @@
 
 | slots = 
 
-{{SpellSlotRow | 1 | Summon Pet: [[Conjuration: Earth Summon|Conjuration: Earth]] }}
+{{SpellSlotRow | 1 | Summon Pet: Level 37 [[Conjuration: Earth Summon|Earth Elemental]] }}
 
 | skill = [[Skill Conjuration | Conjuration]]
 
 | mana = 200
 | range =  
 | casting_time = 10.00
-| fizzle_time = 2.25
+| fizzle_time = 1.50
 | recast_time = 1.50
 | duration = Instant
 | target_type = Self
-| spell_type = Beneficial
+| spell_type = Pet
 | resist = Unresistable
 
 | other = 

@@ -27,23 +27,26 @@ function createdCount(group: AlertGroup, existingIds: ReadonlySet<string>): numb
 
 /** The chip's tooltip: what the set is for, then every alert it would author. */
 function groupTooltip(group: AlertGroup): string {
-  return [group.subtitle, ...group.defs.map((d) => `${d.name} — ${d.line}`)].join('\n')
+  return [group.subtitle, ...group.defs.map((d) => `${d.name} - ${d.line}`)].join('\n')
 }
 
 function GroupChip({
   group,
   existingIds,
+  defaultPackId,
   onCreate
 }: {
   group: AlertGroup
   existingIds: ReadonlySet<string>
+  /** The user's default sound pack (JOS-273) — a set AUTHORS alerts, so it honours it. */
+  defaultPackId?: string
   onCreate: (group: AlertGroup, defs: AlertDef[]) => void
 }): JSX.Element {
   const have = createdCount(group, existingIds)
   const total = group.defs.length
   const done = have === total
   // Top-up only: an alert the user already has is never re-written by a group click.
-  const missing = alertGroupDefs(group).filter((d) => !existingIds.has(d.id))
+  const missing = alertGroupDefs(group, defaultPackId).filter((d) => !existingIds.has(d.id))
   return (
     <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{groupTooltip(group)}</span>}>
       {/* The span is load-bearing: a DISABLED child fires no events, so MUI warns (and the
@@ -68,17 +71,26 @@ function GroupChip({
 export default function AlertGroupsPanel({
   groups,
   existingIds,
+  defaultPackId,
   onCreate
 }: {
   /** the sets to show — the dialog narrows them with the search box (suggestResults.ts). */
   groups: readonly AlertGroup[]
   existingIds: ReadonlySet<string>
+  /** The user's default sound pack (JOS-273), passed straight to every chip. */
+  defaultPackId?: string
   onCreate: (group: AlertGroup, defs: AlertDef[]) => void
 }): JSX.Element {
   return (
     <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ px: 0.5, py: 0.25 }}>
       {groups.map((g) => (
-        <GroupChip key={g.id} group={g} existingIds={existingIds} onCreate={onCreate} />
+        <GroupChip
+          key={g.id}
+          group={g}
+          existingIds={existingIds}
+          defaultPackId={defaultPackId}
+          onCreate={onCreate}
+        />
       ))}
     </Stack>
   )

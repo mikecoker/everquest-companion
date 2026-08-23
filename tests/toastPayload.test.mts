@@ -24,6 +24,7 @@ import {
   TOAST_MIN_DURATION_MS,
   introToastPayload,
   normalizeToastConfig,
+  toastActionLabel,
   toastItemCard,
   validateToastRequest
 } from '../src/shared/toast'
@@ -118,6 +119,32 @@ test('the leveling anchor is a small positive integer, or it is dropped', () => 
   // A fractional level FLOORS rather than being dropped — the same coercion `durationMs` gets
   // from the same helper. There is no level 24.5, and 24 is the honest reading of one.
   assert.equal(validateToastRequest({ ...ding, focus: { view: 'leveling', level: 24.5 } })?.focus?.level, 24)
+})
+
+// ---- the card's call to action (JOS-334) ---------------------------------------------
+//
+// A LABEL IS A PROMISE, AND A PROMISE IS TESTABLE. The level-up card is the whole click target
+// (no reward block to hang an affordance on) and shipped advertising that with a pointer cursor
+// alone. The words it prints instead are pinned here rather than in a screenshot, which is the
+// same reason TOAST_INTRO_BODY is a constant in a pure module: what the app SAYS to a player is
+// a contract, and the overlay window is the hardest place in the app to look at.
+
+test('a level-up card names its destination AND the level, so the click is not a mystery', () => {
+  assert.equal(toastActionLabel({ view: 'leveling', level: 24 }), 'See what’s new at 24')
+  // The panel this lands on is titled "New at this level"; the label is a sentence it finishes.
+  assert.match(toastActionLabel({ view: 'leveling', level: 24 }) ?? '', /new at 24$/)
+})
+
+test('…falling back to the un-numbered promise when the focus names no level', () => {
+  assert.equal(toastActionLabel({ view: 'leveling' }), 'See what’s new')
+})
+
+test('…and printing NOTHING for a destination it cannot name, rather than inventing one', () => {
+  // Both of these are legal focuses; neither is a place this label knows how to describe, and an
+  // unlabelled card is exactly as clickable as it was before — under-promise, never fabricate.
+  assert.equal(toastActionLabel({ view: 'mobs', mob: 'Lord Nagafen' }), undefined)
+  assert.equal(toastActionLabel({ view: 'posky', quest: 'Paladin::Test of Spirit' }), undefined)
+  assert.equal(toastActionLabel(undefined), undefined)
 })
 
 test('the per-quest anchor rides the posky focus as capped text', () => {

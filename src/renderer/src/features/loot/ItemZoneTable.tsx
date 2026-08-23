@@ -22,7 +22,7 @@ import { Box, Chip, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typ
 import type { ItemZoneRow } from '@shared/lootRates'
 import { formatDropRate } from '../../lib/formatRate'
 import { fmtDuration } from '../leveling/levelChartGeometry'
-import { NONE } from '../leveling/rangeStatsRows'
+import { ACTIVE_TIME_TITLE, NONE } from '../leveling/rangeStatsRows'
 import { zoneColor } from '../leveling/zoneBands'
 import { ObservedChip } from './ItemDbSources'
 
@@ -81,7 +81,10 @@ export function ItemZoneTable({ rows, clipped, looted }: ItemZoneTableProps): JS
     <Box sx={{ flex: 1.4, minWidth: 0 }} data-testid="item-zone-table">
       <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.5 }} flexWrap="wrap" useFlexGap>
         <Typography variant="subtitle2">Where it drops</Typography>
-        <Typography component="span" variant="caption" color="text.secondary">
+        {/* The caption that names the denominator now says what it MEANS on hover (JOS-249) —
+            a native title, never a popper, and no new element on a header that is already three
+            things wide. */}
+        <Typography component="span" variant="caption" color="text.secondary" title={ACTIVE_TIME_TITLE}>
           (per hour of active time)
         </Typography>
         <ObservedChip />
@@ -106,7 +109,7 @@ export function ItemZoneTable({ rows, clipped, looted }: ItemZoneTableProps): JS
                 <TableCell align="right" sx={HEAD_SX}>
                   Rate
                 </TableCell>
-                <TableCell align="right" sx={HEAD_SX}>
+                <TableCell align="right" sx={HEAD_SX} title={ACTIVE_TIME_TITLE}>
                   Active
                 </TableCell>
               </TableRow>

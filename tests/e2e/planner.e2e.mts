@@ -1,44 +1,56 @@
 /**
- * Headless Electron integration test for the EXALTATIONS tab (docs/plans/exaltation-planner.md §9,
- * wave 3). The tab is LABELLED Exaltations since JOS-42; every id, route, store key and testid in
- * here still says `planner`, because the rename was a label and not a refactor.
+ * Headless Electron integration test for THE EXALTATIONS TAB AND THE WISH LIST — two tabs of the
+ * gear area, one feature, one launch (JOS-326; docs/plans/exaltation-planner.md §9).
  *
- * WHY ITS OWN FILE: one spec per surface, all of them sharing `appHarness.mts` and running back
- * to back from `npm run test:e2e`. `EQ_E2E=1` (src/main/e2e.ts) shows no window, skips the
- * single-instance lock and points `userData` at a throwaway temp dir, so this runs invisibly
- * beside the user's game and dev app.
+ * WHAT THIS SPEC BECAME. It used to drive a planner with three modes over a selected SET: Effects
+ * picked what you wanted, Inventory laid it over the gear you were wearing, Farm turned what was
+ * missing into a route. JOS-326 removed the set switcher, the mode toggle, the board and the Farm
+ * tab: Exaltations is a SEARCH SURFACE now, and what you found there goes on a flat WISH LIST one
+ * tab over, which inherited the zone rollup. So this spec walks the feature the way a player does
+ * — browse, add, cross to the list, and see the route.
  *
- * WHY `userData` IS WIPED FIRST: the first assertion is the EMPTY STATE — a character with no
- * saved sets is invited to create one. The sets live in the store and the selected set/mode live
- * in `localStorage`, both inside `userData`, so a dir left behind by an earlier run would make
- * that assertion vacuous (and would land the pane in whichever mode the last run left open).
+ * THE PLAN BOARD'S CLAIMS WENT WITH THE PLAN BOARD, and the removals are stated rather than
+ * silently dropped: the board's cells and pairs, the host picker, the socket preset, the planned
+ * exaltation's hover line, the add button's Replace warning and the Farm rollup are gone from the
+ * product, so their steps are gone from here (plannerSteps.mts lists them, with what still covers
+ * the model underneath and the one assertion that wants re-homing).
  *
- * WHAT IT ASSERTS, against the REAL committed item DB: the nav row mounts the pane on its empty
- * state; creating a set from the UI produces a set chip and a toolbar; the effect browser lists
- * at least one effect row and expands it into at least one donor (the corpus is committed data,
- * so this is deterministic — but it is asserted as a FLOOR, never as today's count); adding that
- * donor to the set writes a socket that BOTH other modes can see — the Board draws it in a cell
- * with a state chip, and the Farm rollup lists it under some heading; the two growing lists are
- * BOUNDED scroll boxes (the Task-#56 law); the era filter is ON by default and actually
- * removes rows when it is switched off (the corpus is majority Kunark/Velious, so "off shows
- * more" is an identity, not a number); the Focus tab opens on FAMILIES with the best tier of
- * each crowned, which is the per-socket grouping default (V4/V5) rather than a global one; a
- * majority of the donor rows on screen state what their effect DOES, in one line joined from the
- * committed spell DB (V6 — a count, never today's wording); the
- * Inventory tab either fills its hosts from a real `/outputfile inventory` dump or teaches the
- * command, never both (V7 — whether this machine has a dump is not something a spec may assume);
- * clicking one of a host's sockets lands in the effect browser filtered to that socket, that slot
- * and that host, with a chip that can be cleared (V8); and the exaltation rules card is NOT up on a
- * first visit, comes up only from the toolbar's `?`, and closes for good when dismissed (V10 as
- * JOS-51 revised it — the rules are there when asked for, never by default).
+ * WHY ITS OWN FILE: one spec per surface, all of them sharing `appHarness.mts` and running back to
+ * back from `npm run test:e2e`. `EQ_E2E=1` (src/main/e2e.ts) shows no window, skips the
+ * single-instance lock and points `userData` at a throwaway temp dir, so this runs invisibly beside
+ * the user's game and dev app.
+ *
+ * WHY THE STORE IS WRITTEN BEFORE THE LAUNCH. The wish list SEEDS ITSELF ONCE from the exaltation
+ * sets a user had planned — that is how the board's removal keeps their work — and nothing in the
+ * product can create a set any more. So this spec owns its `userData` dir and writes one plan into
+ * it first. That is the only way an app can reach the import at all, and it is why the dir is
+ * `makeUserData()`'s rather than the launcher's.
+ *
+ * WHAT IT ASSERTS, against the REAL committed item DB: the Gear nav row plus the Exaltations tab
+ * mounts the pane; the pane is SEARCH-ONLY (no set chip, no mode toggle, no board, no rollup) and
+ * still carries the class filter over the effect list; the browser lists at least one effect row
+ * and expands it into at least one donor (asserted as a FLOOR, never as today's count); a majority
+ * of donor rows state what their effect DOES, in one line joined from the committed spell DB; the
+ * era filter is ON by default and actually removes rows when switched off; the non-equippable
+ * escape hatch is off by default and only ever adds; the Focus tab opens on FAMILIES with the best
+ * tier of each crowned; any item the DB carries can narrow the list, and that narrowing survives a
+ * switch between the effect kinds (JOS-210, both halves); ADDING a donor puts it on the wish list
+ * and turns its own row to `Wished`; the wish list carries the one-time plan import LABELLED, groups
+ * its rows by zone without ever heading a zone this era cannot reach, searches the WHOLE corpus
+ * from one add control (gear rows and donors together), refuses a second wish for the same item,
+ * searches its own rows, removes one, and deep-links every name into the Loot drill-down; and the
+ * exaltation rules card is NOT up on a first visit, comes up only from the toolbar's `?`, and
+ * closes for good when dismissed (V10 as JOS-51 revised it).
  *
  * The one thing it deliberately does NOT assert is which effects or donors are on screen: a
- * rescrape may re-word an effect, and a spec that pins today's proc names would rot (AGENTS.md:
+ * rescrape may re-word an effect, and a spec that pinned today's proc names would rot (AGENTS.md:
  * frozen numbers rot).
  *
- * Run: `npm run test:e2e`.
+ * Run: `npm run test:e2e -- planner`.
  */
-import type { Page } from 'playwright-core'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { ElectronApplication, Page } from 'playwright-core'
 import {
   buildIfStale,
   check,
@@ -47,24 +59,22 @@ import {
   failures,
   note,
   pageOverflow,
-  rectOf,
   reportRun,
   settleCount,
   settleGone,
   settleStable
 } from './appHarness.mjs'
 
+import { makeUserData, removeUserData } from './appWindow.mjs'
 import { mainWindow } from './appWindow.mjs'
 import { launchOnFixture } from './logFixture.mjs'
-// The cell list itself, so the board's own count is never restated here (JOS-67 moved it 18 → 21).
-import { PLAN_SLOTS } from '../../src/shared/planner/types'
-// Every `planner-*` selector, the DOM measurements, and the four steps that measure the EFFECT
-// LIST live next door — this spec sits at the repo's max-lines budget and the rule is to split,
-// never ratchet (drill.mts, combatSteps.mts). The ORDER is still owned here.
+import { CURRENT_SCHEMA_VERSION } from '../../src/main/storeMigrations'
+// Every `planner-*` selector, the DOM measurements, and the steps that measure the EFFECT LIST
+// live next door — this spec sits at the repo's max-lines budget and the rule is to split, never
+// ratchet (drill.mts, combatSteps.mts). The ORDER is still owned here.
 import {
   ADD_BUTTON,
-  BOARD,
-  BOARD_CELL,
+  ADD_WISHED,
   DONOR_NAME,
   DONOR_ROW,
   EFFECT_LIST,
@@ -72,37 +82,38 @@ import {
   EFFECT_SAYS,
   EXPLAINER,
   EXPLAINER_OPEN,
-  FARM_ALSO_ERA,
-  FARM_GROUP_OUT_OF_ERA,
-  FARM_LIST,
-  FARM_ROW,
-  HOST_HIT,
-  HOST_NAME,
-  HOST_SEARCH,
-  HOST_WORN,
-  INVENTORY_FRESH,
-  INVENTORY_HELP,
-  MODE_BOARD,
-  MODE_EFFECTS,
-  MODE_FARM,
   NAV,
-  NEW_SET_EMPTY,
-  PRESET_CHIP,
-  SET_CHIP,
-  SOCKET_BROWSE,
-  SOCKET_LINE,
-  STATE_CHIP,
+  TAB,
   VIEW,
+  WISHED_CHIP,
   boxOf,
   stepEra,
   stepFocusFamilies,
+  stepItemFilter,
   stepNonEquip,
-  stepOutputsRegistry,
+  stepSearchOnly,
   textOf,
   until
 } from './plannerSteps.mjs'
+import {
+  WISH_TAB,
+  stepAddFromCorpus,
+  stepDoneStrip,
+  stepEraOff,
+  stepNoDoubleWish,
+  stepRemove,
+  stepSearchWishes,
+  stepSeedImport,
+  stepWishDeepLink,
+  stepZoneGrouping
+} from './wishlistSteps.mjs'
+// JOS-329's away-and-back step for this browser, from the module the gear and character specs share.
+import { stepBrowseMemory } from './areaMemorySteps.mjs'
+// JOS-344 — the donor names got the Gear tab's comparison pair back. Its own module, and it
+// imports the Gear side's assertions rather than restating them: one card, one instrument.
+import { stepExaltCompare } from './exaltCompareSteps.mjs'
 
-/** The Loot tab's drill-down, where a donor name deep-links to. */
+/** The Loot tab's drill-down, where an item name deep-links to. */
 const LOOT_DETAIL = '[data-testid="loot-detail"]'
 const LOOT_TITLE = '[data-testid="loot-detail-title"]'
 const LOOT_DB_SOURCES = '[data-testid="loot-db-sources"]'
@@ -110,54 +121,108 @@ const LOOT_DB_SOURCES = '[data-testid="loot-db-sources"]'
 const LOOT_BACK = '[data-testid="loot-back"]'
 
 /**
- * 1. THE NAV ROW MOUNTS THE PANE. False on the no-logs machine, where no feature view mounts.
+ * THE PLAN THIS RUN INHERITS — one socket, written into the store before the app ever starts.
  *
- * The row's testid is `nav-planner` and always will be — the view id, the route and the store keys
- * are internal (JOS-42 renamed the LABEL, not the feature). So the label is asserted as TEXT: that
- * is the only place the rename is visible, and a spec that only clicked the testid would have let
- * it silently revert.
+ * `batfang headband` is this repo's standing corpus anchor (tests/plannerFarm.test.mts rests three
+ * zone claims on the same committed mob rows). The effect and socket are its real corpus values,
+ * so the imported row resolves to a real donor with a real merge tier — and if a rescrape ever
+ * re-words the effect, the seed still imports the item under the key it was stored with, which is
+ * exactly the fallback the collection is built to make (tests/wishFarm.test.mts pins it). Nothing
+ * below asserts the effect's spelling.
  */
+const PLANNED_DONOR = 'batfang headband'
 
+/**
+ * …AND ONE WISH FOR SOMETHING THIS CHARACTER ALREADY OWNS, so the DONE STRIP is reachable.
+ *
+ * The strip appears when the progress join says a wish is fulfilled, and for a GEAR wish that
+ * means "you hold one, or you have looted one". `Red Dragonscale Armor` is worn in the committed
+ * `/outputfile inventory` dump this launch stages into the install root (`Chest  Red Dragonscale
+ * Armor +1`, tests/fixtures/Primitive_freeport-Inventory.txt) and the gear index carries the row
+ * under that key — so the join has both witnesses and the strip is a deterministic assertion
+ * rather than a machine-dependent one.
+ *
+ * WRITTEN INTO THE STORE rather than added through the UI on purpose: what is under test is the
+ * JOIN, and a wish typed during the run would prove the same thing only on a machine whose dump
+ * happened to hold whatever the search returned first.
+ */
+const OWNED_WISH = { key: 'red dragonscale armor', name: 'Red Dragonscale Armor' }
+
+function seedStore(userData: string): void {
+  const now = Date.now()
+  const store = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    byCharacter: {
+      primitive_freeport: {
+        inventory: {},
+        completedQuests: [],
+        exaltPlans: [
+          {
+            id: 'e2e-seeded-set',
+            name: 'Set 1',
+            classes: [],
+            createdAt: now,
+            updatedAt: now,
+            slots: { HEAD: { sockets: { focus: { effect: 'Extended Enhancement II', donorKey: PLANNED_DONOR } } } }
+          }
+        ],
+        wishlist: {
+          entries: [
+            { itemKey: OWNED_WISH.key, name: OWNED_WISH.name, kind: 'gear', addedAt: now, source: 'user' }
+          ],
+          clearedDone: []
+        }
+      }
+    }
+  }
+  writeFileSync(join(userData, 'everquest-companion-progress.json'), `${JSON.stringify(store, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * 1. THE GEAR ROW, THEN THE EXALTATIONS TAB, MOUNTS THE PANE. False on the no-logs machine, where
+ *    no feature view mounts.
+ *
+ * TWO CLICKS SINCE JOS-324, and the change was only to the door. Exaltations used to own a nav row
+ * (`nav-planner`); it is the second TAB of the gear area, which hangs off the one `nav-gear` row.
+ * The view id, the route, the store keys and every surviving `planner-*` testid are what they
+ * always were — JOS-42 renamed the LABEL and JOS-324 moved the DOOR, and neither was a refactor.
+ *
+ * THE PANE MOUNTS STRAIGHT ONTO ITS BROWSE NOW. There is no create-a-set empty state to pass
+ * through: a search surface has nothing to create, which is itself the first thing JOS-326 changed
+ * about arriving here.
+ */
 async function stepMount(page: Page): Promise<boolean> {
   const hasRow = await page.waitForSelector(NAV, { timeout: 60_000 }).then(
     () => true,
     () => false
   )
-  if (!check('the nav drawer has an Exaltations row', hasRow)) return false
-  const label = (await textOf(page, NAV)).replace(/\s+/g, ' ').trim()
-  check('…and it is called Exaltations, the name the game uses', label.includes('Exaltations'), `reads "${label}"`)
+  if (!check('the nav drawer has a Gear row — the one door to all four gear tabs', hasRow)) return false
+  const rowLabel = (await textOf(page, NAV)).replace(/\s+/g, ' ').trim()
+  check('…and the row is called Gear, the area rather than the tab', rowLabel.includes('Gear'), `reads "${rowLabel}"`)
   await page.click(NAV, { timeout: 15_000 })
 
-  // A character with no sets gets the invitation; one with sets gets the toolbar. Either is a
-  // mounted pane — on a wiped userData it is always the first.
-  const mounted = await until(
-    async () => (await countOf(page, NEW_SET_EMPTY)) > 0 || (await countOf(page, VIEW)) > 0,
-    30_000
+  const hasTab = await page.waitForSelector(TAB, { timeout: 30_000 }).then(
+    () => true,
+    () => false
   )
+  if (!check('…and it opens an area whose tab bar offers Exaltations', hasTab)) return false
+  const tabLabel = (await textOf(page, TAB)).replace(/\s+/g, ' ').trim()
+  check('…called Exaltations, the name the game uses', tabLabel.includes('Exaltations'), `reads "${tabLabel}"`)
+  await page.click(TAB, { timeout: 15_000 })
+
+  const mounted = await until(async () => (await countOf(page, VIEW)) > 0, 30_000)
   if (!mounted) {
     const noLogs = (await textOf(page, 'main')).includes('No EverQuest logs found')
     check('clicking Exaltations mounts the pane (or the no-logs empty state explains why not)', noLogs)
     if (noLogs) note('no character logs on this machine — the app shows its fresh-machine empty state')
     return false
   }
-  check(
-    'clicking the Exaltations nav row mounts the pane on its create-a-set empty state',
-    (await countOf(page, NEW_SET_EMPTY)) > 0,
-    `${String(await countOf(page, SET_CHIP))} sets already stored`
-  )
+  check('clicking the Exaltations tab mounts the pane straight onto its browse', true)
   return true
 }
 
-/** 2. CREATING A SET FROM THE UI GIVES THE PANE ITS TOOLBAR. */
-async function stepCreateSet(page: Page): Promise<boolean> {
-  if ((await countOf(page, NEW_SET_EMPTY)) > 0) await page.click(NEW_SET_EMPTY, { timeout: 15_000 })
-  const made = await until(async () => (await countOf(page, SET_CHIP)) > 0, 15_000)
-  check('creating a set from the empty state produces a set chip and the toolbar', made)
-  return made
-}
-
 /**
- * 2b. THE RULES CARD WAITS TO BE ASKED, AND DISMISSING IT STICKS (V10, revised by JOS-51).
+ * 2. THE RULES CARD WAITS TO BE ASKED, AND DISMISSING IT STICKS (V10, revised by JOS-51).
  *
  * The one collaborative explainer this app allows — but the owner overturned the "meet the rules on
  * your first visit" argument it used to open on (2026-08-06): the card is CLOSED on a fresh install
@@ -165,9 +230,7 @@ async function stepCreateSet(page: Page): Promise<boolean> {
  * settle way: wait for the toolbar's own reading to STOP CHANGING (the pane legitimately remounts
  * while the app is still reading the log) and only then assert nothing is up. Never a sleep.
  *
- * The three facts after it are unchanged in substance: asking puts it up, dismissing puts it away,
- * and asking again brings it back. It ends dismissed so every measurement below sees the pane at
- * the height a returning player sees.
+ * It ends dismissed so every measurement below sees the pane at the height a returning player sees.
  */
 async function stepExplainer(page: Page): Promise<void> {
   const first = await settleStable(
@@ -244,270 +307,177 @@ async function stepEffectSays(page: Page): Promise<void> {
   )
 }
 
+/** The wish control of the donor row bearing a given name — `DonorName` puts it in the `title`. */
+const controlOfDonor = (name: string): string =>
+  `${DONOR_ROW}:has([data-testid="planner-donor-name"][title="${name}"]) [data-testid="planner-add"]`
+
 /**
- * 5. ADDING A DONOR WRITES A SOCKET THE INVENTORY TAB DRAWS.
+ * 5. ADDING A DONOR IS ONE CLICK, AND IT WRITES A WISH (JOS-326) — AND CLICKING IT AGAIN TAKES THE
+ *    WISH BACK OFF (JOS-343, owner ruling 2026-08-13).
  *
- * The tab is called Inventory since V7 — it fills its cells from the character's own
- * `/outputfile inventory` dump — but what is asserted here is unchanged: eighteen cells whatever
- * the dump says, and the socket the browser just wrote drawn in one of them. Nothing here can
- * assume a dump exists (a fresh e2e userData has no gear knowledge at all), so the auto-fill is
- * checked by `stepInventoryFill` as an identity: either it filled cells or it says how to.
+ * The button used to say "Add to set", could open a slot menu when the donor fit more than one
+ * cell, and turned into a warning-coloured "Replace" over an occupied socket. All three came from
+ * the plan board, and all three are gone.
+ *
+ * WHAT THIS STEP USED TO CLAIM AND NO LONGER DOES: "the add control goes quiet rather than
+ * accepting a click that would change nothing". That was true of a one-way add and the owner
+ * overruled the one-way add. The control is enabled in both states now and a second click REMOVES,
+ * so the claim it is replaced by is the opposite one — the toggle flips, both ways, in place.
+ *
+ * THE RE-ADD AT THE END IS NOT DECORATION. Everything downstream (`wishlistSteps`) reads this
+ * donor's row off the ROUTE, which is what proves the ADD reached the store; the store half of the
+ * REMOVE is proven at the end of the run by `stepUnwishFromBrowse`, where taking it off costs
+ * nothing. Toggling here and putting it back is what lets both be asserted in one launch.
+ *
+ * Returns the donor's NAME so the wish-list half can find the row it just made.
  */
-async function stepAddAndInventory(page: Page): Promise<boolean> {
+async function stepAddWish(page: Page): Promise<string | null> {
   if (!check('an effect row expands into at least one donor', await ensureDonorRow(page), `${String(await countOf(page, ADD_BUTTON))} donors`)) {
-    return false
+    return null
   }
   await stepEffectSays(page)
+  const name = (await textOf(page, DONOR_NAME)).trim()
+  const label = (await textOf(page, ADD_BUTTON)).replace(/\s+/g, ' ').trim()
+  check('the add control names where the click sends it', label.toLowerCase().includes('wish'), `reads "${label}"`)
+
   await page.click(ADD_BUTTON, { timeout: 15_000 })
-  // A donor that occupies more than one slot opens a slot menu instead of writing directly. Which
-  // of the two happened is the CONDITION: wait briefly for a menu, and if one came, choose from
-  // it and wait for it to go. Neither branch is a failure; guessing at 400ms twice was.
-  const menu = '.MuiMenu-root .MuiMenuItem-root'
-  if ((await settleCount(page, menu, 1, { timeoutMs: 3_000 })) > 0) {
-    await page.click(menu, { timeout: 15_000 })
-    await settleGone(page, menu, { timeoutMs: 8_000 })
-  }
+  // No slot menu can open any more — the flat list has no cell to disambiguate. Asserted as an
+  // absence the settle way, because a menu that opened would only be visible for a moment.
+  const menu = await settleCount(page, '.MuiMenu-root .MuiMenuItem-root', 0, { timeoutMs: 3_000 })
+  check('adding never asks which cell — a flat wish has none to ask about', menu === 0, `${String(menu)} menu items`)
 
-  await page.click(MODE_BOARD, { timeout: 15_000 })
-  const drawn = await until(async () => (await countOf(page, SOCKET_LINE)) > 0, 15_000)
-  const cells = await countOf(page, BOARD_CELL)
-  check('the Inventory tab draws every equipment cell, planned or not', cells >= PLAN_SLOTS.length, `${String(cells)} cells`)
-  // JOS-67 — reported as "only allows one finger slot focus effect": BOTH ring cells must be here.
-  const rings = await countOf(page, `${BOARD_CELL}[data-slot="FINGER"], ${BOARD_CELL}[data-slot="FINGER2"]`)
-  check('both ring cells are on the board — you wear two rings', rings === 2, `${String(rings)} ring cells`)
-  check('adding a donor from the browser writes a socket the Inventory tab draws', drawn, `${String(await countOf(page, SOCKET_LINE))} socket lines`)
+  const marked = await until(async () => (await countOf(page, WISHED_CHIP)) > 0, 10_000)
+  check(`adding "${name}" chips its own row as wished`, marked)
   check(
-    'each planned socket carries exactly one state chip',
-    (await countOf(page, STATE_CHIP)) === (await countOf(page, SOCKET_LINE)),
-    `${String(await countOf(page, STATE_CHIP))} chips for ${String(await countOf(page, SOCKET_LINE))} sockets`
+    '…and the control reads its added state rather than staying an add (JOS-343)',
+    (await countOf(page, ADD_WISHED)) > 0
   )
-  const rect = await rectOf(page, BOARD)
-  check('the board has real height', !!rect && rect.h > 0, rect ? `${String(rect.w)}×${String(rect.h)}px` : 'absent')
-  return drawn
+  if (!marked) return null
+
+  // THE TOGGLE, IN PLACE. Same control, same row, no tab in between: the second click is a REMOVE.
+  const control = controlOfDonor(name)
+  if (!check(`the wished donor's own control is findable by name — "${name}"`, (await countOf(page, control)) === 1)) {
+    return name
+  }
+  await page.click(control, { timeout: 15_000 })
+  check(
+    'a second click on a wished donor removes the wish — the lit no-op is overruled',
+    await until(async () => (await countOf(page, `${control}[data-wished="true"]`)) === 0, 10_000)
+  )
+  check('…and its row drops the wished chip with it', (await countOf(page, `${DONOR_ROW}:has([data-testid="planner-donor-name"][title="${name}"]) ${WISHED_CHIP}`)) === 0)
+
+  // …and back on, because the route half of the run is built on this wish existing.
+  await page.click(control, { timeout: 15_000 })
+  const readded = await until(async () => (await countOf(page, `${control}[data-wished="true"]`)) === 1, 10_000)
+  check('a third click puts it back — the toggle is a toggle, not a one-shot', readded)
+  return readded ? name : null
 }
 
 /**
- * 6. THE HOST PICKER SEARCHES MAIN'S ITEM INDEX AND NARROWS IT TO THE CELL.
+ * Two donor rows on screen, unadded, whose names are unique among the mounted rows — so a selector
+ * built from either name addresses exactly one control.
  *
- * Both outcomes are correct: a query that yields a slot- and class-compatible item picks it, and
- * one that does not says so in a sentence. Only a picker that opens onto nothing is a failure.
+ * NO NAMED INNER FUNCTION IN THE `evaluate` BODY, deliberately. tsx's esbuild transform keeps
+ * function names by wrapping them in a `__name` helper that exists in the SPEC's module scope and
+ * not in the page's, so a `const nameOf = …` inside here dies with `__name is not defined` the
+ * moment the browser runs it. Measured on the first run of this step.
  */
-async function stepHostPicker(page: Page): Promise<void> {
-  const cell = `${BOARD_CELL}[data-slot="PRIMARY"] [data-testid="planner-host-pick"]`
-  if ((await countOf(page, cell)) === 0) {
-    note('the PRIMARY cell already has a host — the picker step is skipped this run')
-    return
-  }
-  await page.click(cell, { timeout: 15_000 })
-  const opened = await until(async () => (await countOf(page, HOST_SEARCH)) > 0, 10_000)
-  if (!check('the host line opens a search popover', opened)) return
-
-  await page.fill(HOST_SEARCH, 'sword', { timeout: 15_000 })
-  await until(async () => (await countOf(page, HOST_HIT)) > 0, 8000)
-  const hits = await countOf(page, HOST_HIT)
-  if (hits === 0) {
-    note('no item matching "sword" can go in PRIMARY for this set — the picker states that, which is the correct answer')
-    await page.keyboard.press('Escape')
-    return
-  }
-  await page.click(HOST_HIT, { timeout: 15_000 })
-  const named = await until(async () => (await countOf(page, HOST_NAME)) > 0, 8000)
-  check('picking a hit sets that cell’s host item', named, `${String(hits)} compatible hits`)
-}
-
-/**
- * 6b. THE INVENTORY TAB EITHER FILLS ITSELF OR TEACHES THE COMMAND (V7).
- *
- * An identity, because the machine running this may or may not have a dump: a character whose
- * `/outputfile inventory` exists gets `worn` hosts in its cells, and one whose does not gets the
- * instructions card. Exactly one of those must be on screen — neither is the failure, and BOTH
- * would mean the card is lying to someone who already ran it.
- */
-async function stepInventoryFill(page: Page): Promise<void> {
-  // POLLED, because the dump is read over IPC when the tab mounts: sampling the instant after the
-  // switch reads "neither", which is the pre-answer state and not a third outcome.
-  await until(async () => (await countOf(page, INVENTORY_HELP)) > 0 || (await countOf(page, HOST_WORN)) > 0, 20_000)
-  const help = await countOf(page, INVENTORY_HELP)
-  const worn = await countOf(page, HOST_WORN)
-  check(
-    'the Inventory tab either fills its hosts from the dump, or says how to make one',
-    (help > 0) !== (worn > 0),
-    help > 0 ? 'no dump on this machine — the instructions card is up' : `${String(worn)} hosts filled from the dump`
-  )
-
-  // JOS-42 refinement 5 — and when a dump DOES exist, the freshness line is up instead: the same
-  // command, one clause of why, and how old the file is. Exactly one of the two, always: the card
-  // teaches a command to someone who has never run it, the line tells someone who has when they
-  // last did. A tab rendering gear with no age on it is the failure this closes.
-  const fresh = await countOf(page, INVENTORY_FRESH)
-  check(
-    'a filled Inventory tab states the command and how old the dump is; an empty one teaches it',
-    (help > 0) !== (fresh > 0),
-    `${String(help)} instruction cards · ${String(fresh)} freshness lines`
-  )
-  if (fresh > 0) {
-    const line = (await textOf(page, INVENTORY_FRESH)).replace(/\s+/g, ' ').trim()
-    check(
-      '…and that line names the command and dates the FILE, not the read',
-      line.includes('/outputfile inventory') && /updated (just now|\d+[mhd] ago)/.test(line),
-      line.slice(0, 120)
-    )
-  }
-
-  // …and the same facts, live over the registry's own channel (JOS-44). Next door, with the rest
-  // of the measurements this spec only orders.
-  await stepOutputsRegistry(page, fresh > 0)
-}
-
-/**
- * 6c-i. ADD SAYS REPLACE WHEN IT WOULD REPLACE (JOS-42 refinement 3).
- *
- * Asserted UNDER A PRESET, because that is the only place the target socket is unambiguous: you
- * clicked one socket of one item, so every row on screen would write to exactly that socket, and
- * the button can therefore be checked against the socket's own state.
- *
- * The direction that matters is the FALSE REPLACE — a button warning about an overwrite that
- * would not happen teaches the user to ignore the warning — so "empty socket ⇒ nothing says
- * Replace" is asserted flat. The other direction allows one honest exception: a row whose donor
- * and effect are ALREADY what sits there replaces nothing (it is chipped "in set"), so a preset
- * showing only that row legitimately offers no Replace at all.
- */
-async function checkReplaceLabels(page: Page, occupied: boolean): Promise<void> {
-  const labels = await page.evaluate(
-    (s) => Array.from(document.querySelectorAll(s)).map((b) => (b as HTMLElement).innerText.trim()),
-    ADD_BUTTON
-  )
-  if (labels.length === 0) {
-    note('the preset matched no addable donor — the replace-label step is skipped this run')
-    return
-  }
-  const replace = labels.filter((l) => l.toLowerCase() === 'replace').length
-  if (!occupied) {
-    check(
-      'an empty socket is never offered as a Replace — the add button only warns about a real overwrite',
-      replace === 0,
-      `${String(replace)} of ${String(labels.length)} buttons said Replace over an empty socket`
-    )
-    return
-  }
-  const inSet = await page.evaluate(
-    () => Array.from(document.querySelectorAll('.MuiChip-label')).filter((e) => e.textContent === 'in set').length
-  )
-  if (replace === 0 && inSet >= labels.length) {
-    note('every donor the preset offers is already the one in this socket — nothing here would replace anything')
-    return
-  }
-  check(
-    'browsing an OCCUPIED socket, the add button says Replace instead of Add to set',
-    replace > 0,
-    `${String(replace)} of ${String(labels.length)} buttons said Replace (${String(inSet)} already in set)`
-  )
-}
-
-/**
- * 6c. A HOST'S SOCKETS ARE BROWSABLE ONE AT A TIME (V8).
- *
- * The item-focused way in: a cell with a host draws all four of its sockets, and clicking one
- * takes you to the effect browser already narrowed to that socket, that slot and that host. What
- * is asserted is the trip and the narrowing — the preset chip is on screen, and the socket tab it
- * forced is the socket that was clicked. Which effects come back is the corpus's business.
- */
-async function stepSocketView(page: Page): Promise<void> {
-  if ((await countOf(page, SOCKET_BROWSE)) === 0) {
-    note('no cell has a host yet — the socket view step is skipped this run')
-    return
-  }
-  // The socket's own row says whether it is FILLED: `planner-socket-line` is a planned socket,
-  // `planner-socket-open` is an empty one. That is the fact the ADD control has to reflect.
-  const target = await page.evaluate((s) => {
-    const line = document.querySelector(s)?.closest('[data-socket]')
-    return {
-      socket: line?.getAttribute('data-socket') ?? '',
-      occupied: line?.getAttribute('data-testid') === 'planner-socket-line'
+function pickTwoUnwished(page: Page): Promise<[string, string] | null> {
+  return page.evaluate((rowSel) => {
+    const names = Array.from(document.querySelectorAll(rowSel)).map((row) => ({
+      row,
+      name: (row.querySelector('[data-testid="planner-donor-name"]') as HTMLElement | null)?.innerText.trim() ?? ''
+    }))
+    const seen = new Map<string, number>()
+    for (const n of names) seen.set(n.name, (seen.get(n.name) ?? 0) + 1)
+    const picked: string[] = []
+    for (const n of names) {
+      const control = n.row.querySelector('[data-testid="planner-add"]')
+      if (n.name === '' || seen.get(n.name) !== 1) continue
+      if (control === null || control.hasAttribute('disabled') || control.hasAttribute('data-wished')) continue
+      picked.push(n.name)
+      if (picked.length === 2) return [picked[0], picked[1]] as [string, string]
     }
-  }, SOCKET_BROWSE)
-  await page.click(SOCKET_BROWSE, { timeout: 15_000 })
-
-  const filtered = await until(async () => (await countOf(page, PRESET_CHIP)) > 0, 15_000)
-  if (!check('clicking a socket on a host opens the effect browser filtered to it', filtered)) return
-  const label = (await textOf(page, PRESET_CHIP)).replace(/\s+/g, ' ').trim()
-  check(
-    '…and the browser is on that socket, for that slot and that host',
-    label.toLowerCase().includes(target.socket.toLowerCase()),
-    `preset "${label}" for socket ${target.socket}`
-  )
-  await checkReplaceLabels(page, target.occupied)
-
-  // Under a preset, haste-locked donors are OUT, not chipped (owner verdict 2026-08-05): the
-  // preset promises only-legal-fits and R3 says haste never moves. The chip only exists in the
-  // free browser, where it teaches the rule.
-  const hasteChips = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('.MuiChip-label')).filter((el) =>
-      (el.textContent ?? '').includes('haste — can')
-    ).length
-  )
-  check('…and no haste-locked donor is offered under the preset', hasteChips === 0, `${String(hasteChips)} haste chips`)
-
-  // Clearing hands the browser back — the preset is a filter, never a mode you get stuck in.
-  await page.click(`${PRESET_CHIP} .MuiChip-deleteIcon`, { timeout: 15_000 })
-  check('clearing the preset gives the browser back', await until(async () => (await countOf(page, PRESET_CHIP)) === 0, 10_000))
+    return null
+  }, DONOR_ROW)
 }
 
-/** 7. THE FARM ROLLUP LISTS WHAT IS LEFT — or says, honestly, that nothing is. */
-async function stepFarm(page: Page): Promise<void> {
-  await page.click(MODE_FARM, { timeout: 15_000 })
-  const mounted = await until(async () => (await countOf(page, FARM_LIST)) > 0, 15_000)
-  if (!check('the Farm mode mounts its rollup', mounted)) return
-
-  const rows = await countOf(page, FARM_ROW)
-  const text = (await textOf(page, FARM_LIST)).replace(/\s+/g, ' ').trim()
-  check(
-    'the rollup either lists the planned donor under a heading, or states why it lists nothing',
-    rows > 0 || text.length > 0,
-    rows > 0 ? `${String(rows)} rows` : text.slice(0, 120)
-  )
-  if (rows === 0) {
-    note('the planned donor is out of era (or already merged to its extraction tier), so the rollup is legitimately empty')
+/**
+ * 9. THE BROWSE'S TOGGLE REACHES THE DOCUMENT, BOTH WAYS (JOS-343) — the half `stepAddWish` cannot
+ *    see, because a control's own state is not a store.
+ *
+ * IT IS A DIFFERENTIAL, AND THE SHAPE IS THE WHOLE POINT. Two donors are picked off the screen. One
+ * is ADDED and left. The other is ADDED and then CLICKED AGAIN. Then the Wish list tab is opened
+ * ONCE and asked about both: the first is on it, the second is not. "Add then remove leaves nothing
+ * behind" on its own would also pass a build where neither click did anything at all — the donor
+ * that stayed is what rules that out, in the same launch, off the same document.
+ *
+ * WHY IT IS SHAPED THIS WAY RATHER THAN AS A ROUND TRIP. The obvious version — add, go look, come
+ * back, click again, go look again — needs the SAME donor row to still be windowed after two
+ * remounts of a virtualised list whose era filter `stepEraOff` has since changed underneath it. It
+ * was written that way first and it skipped itself on the first run ("Bloodclaw Battle Axe is not
+ * windowed on the way out"), which is a spec measuring `useWindowedRows` rather than the toggle.
+ * One trip, taken after both clicks, needs nothing to survive anything.
+ *
+ * RUNS LAST for the reason every destructive step in this spec runs last: nothing after it needs
+ * the wishes it leaves behind, and it ends on the Wish list tab.
+ */
+async function stepBrowseToggleReachesStore(page: Page): Promise<void> {
+  if (!(await ensureDonorRow(page))) {
+    note('no donor rows on screen on the way out — the browse-side store step is skipped this run')
     return
   }
-  const box = await boxOf(page, FARM_LIST)
-  check(
-    'the farm list is its own scroller',
-    box !== null && box.h > 0 && box.scrollH >= box.clientH,
-    box ? `${String(box.h)}px tall` : 'absent'
-  )
-  // JOS-42 refinement 4, THE TRUST INVARIANT, measured on the real corpus in the real app: with
-  // the era filter on (its default, and where this run is), no heading may name a zone from an
-  // expansion the server has not opened. A route that sends you to Dragon Necropolis is not a
-  // partial answer, it is a wrong one — and it is the bug the owner reported.
-  const unreachable = await countOf(page, FARM_GROUP_OUT_OF_ERA)
-  check(
-    'no farm heading sends you to a zone this era cannot reach',
-    unreachable === 0,
-    `${String(unreachable)} out-of-era headings`
-  )
-  // Those zones are not deleted — they drop into the row's "also:" tail, each naming its own
-  // expansion. Present or not depends on what is planned, so this only checks the WORDING.
-  const alsoEras = await page.evaluate(
-    (s) => Array.from(document.querySelectorAll(s)).map((e) => (e as HTMLElement).innerText.trim()),
-    FARM_ALSO_ERA
-  )
-  if (alsoEras.length > 0) {
-    check(
-      'an out-of-era camp survives in the "also:" tail, naming the expansion it belongs to',
-      alsoEras.every((t) => /^\((Classic|Kunark|Velious|Luclin)\)$/.test(t)),
-      alsoEras.slice(0, 3).join(' ')
+  // THE PRECONDITION THE FIRST DRAFT OF THIS STEP DID NOT HAVE, and it cost a red run. The browse
+  // was remounted by the trip through Loot, and its controls used to render BEFORE the wish
+  // document came back — so every row read unadded and the pick chose a donor that was on the list.
+  // The product answer is `PlannerView`'s `donorToggle` (no control at all until `ready`); this is
+  // the spec's half of the same fact, and it is a real claim rather than a wait: the run reaches
+  // here with wishes on the list, so a browse showing none of them has not re-read the store.
+  if (!check(
+    'the remounted browse has re-read the wish document before a row is picked off it',
+    await until(async () => (await countOf(page, ADD_WISHED)) > 0, 20_000)
+  )) return
+  const pair = await pickTwoUnwished(page)
+  if (!check('two unwished donor rows are on screen to toggle against each other', pair !== null)) return
+  const [kept, undone] = pair as [string, string]
+
+  const keptControl = controlOfDonor(kept)
+  const undoneControl = controlOfDonor(undone)
+  await page.click(keptControl, { timeout: 15_000 })
+  if (!check(`"${kept}" is added and stays added`, await until(async () => (await countOf(page, `${keptControl}[data-wished="true"]`)) === 1, 10_000))) return
+
+  await page.click(undoneControl, { timeout: 15_000 })
+  if (!check(`"${undone}" is added too`, await until(async () => (await countOf(page, `${undoneControl}[data-wished="true"]`)) === 1, 10_000))) return
+  await page.click(undoneControl, { timeout: 15_000 })
+  if (!check(`…and a second click on "${undone}" reads as removed`, await until(async () => (await countOf(page, `${undoneControl}[data-wished="true"]`)) === 0, 10_000))) return
+
+  await page.click(WISH_TAB, { timeout: 15_000 })
+  if (!check('the Wish list tab mounts to be asked about both', await until(async () => (await countOf(page, '[data-testid="wishlist-view"]')) > 0, 20_000))) return
+  // Both row kinds, because a wish the progress join calls fulfilled is filed in the done strip
+  // rather than the route and is still very much ON the list.
+  const WISH_ROWS = '[data-testid="wishlist-row"], [data-testid="wishlist-done-row"]'
+  const readNames = (): Promise<string[]> =>
+    page.evaluate(
+      (s) => Array.from(document.querySelectorAll(s)).map((e) => (e as HTMLElement).innerText.split('\n')[0].trim()),
+      WISH_ROWS
     )
-  }
+  // AND THE MOUNT IS NOT THE ROWS. The route is a fold over BOTH corpus indices and the progress
+  // join, so a freshly mounted pane draws its shell with nothing under it for a beat — read at the
+  // mount, this step got an EMPTY list and reported the added donor missing (its first red run).
+  // So it waits for the condition rather than for the pane (AGENTS.md), and reads the final list
+  // afterwards either way — a list that never fills fails on the claim below, not on a timeout.
+  await until(async () => (await readNames()).includes(kept), 20_000)
+  const listed = await readNames()
+  check(`the donor left added is on the wish list — "${kept}"`, listed.includes(kept), listed.slice(0, 6).join(', '))
   check(
-    'every farm row states the merge cost in the shared vocabulary ("needs +N — ≈X D0 merges")',
-    /needs \+\d+ — ≈\d+ D0 merges/.test(text),
-    text.slice(0, 140)
+    `…and the one clicked twice is not — the browse's second click used the wish list's own delete — "${undone}"`,
+    !listed.includes(undone),
+    listed.slice(0, 6).join(', ')
   )
 }
 
 /**
- * 8. A DONOR NAME DEEP-LINKS INTO THE LOOT DRILL-DOWN — and the drill is worth the trip.
+ * 6. A DONOR NAME DEEP-LINKS INTO THE LOOT DRILL-DOWN — and the drill is worth the trip.
  *
  * The click is the app's standing link idiom (`openLoot`, appRouting.ts): it takes the Loot pane
  * over with that item's detail. The second half of the check is the one that matters — the drill
@@ -517,15 +487,11 @@ async function stepFarm(page: Page): Promise<void> {
  * contract this link depends on.
  *
  * AND IT IS A ROUND TRIP (JOS-43). The reported bug was the return leg: Back on that drill meant
- * the top of the loot ledger, so reading one donor cost you your place in the plan. The arrow now
- * names the tab that sent you and goes there, which is asserted both by its accessible name
- * (before the click) and by the Exaltations tab being on screen after it.
- *
- * Runs LAST: it leaves the app on Exaltations having passed through the Loot tab, so every
- * planner-scoped measurement above it must already have been taken.
+ * the top of the loot ledger, so reading one donor cost you your place. The arrow names the tab
+ * that sent you and goes there, which is asserted both by its accessible name (before the click)
+ * and by the Exaltations tab being on screen after it.
  */
 async function stepDeepLink(page: Page): Promise<void> {
-  await page.click(MODE_EFFECTS, { timeout: 15_000 })
   if (!(await ensureDonorRow(page))) {
     note('no donor row on screen to click through — the deep-link step is skipped this run')
     return
@@ -543,51 +509,99 @@ async function stepDeepLink(page: Page): Promise<void> {
   )
 
   // THE RETURN LEG (JOS-43). The arrow says where it goes before you press it — one string feeds
-  // the tooltip and the accessible name — and then it goes there. "Back to the loot list" here
-  // would be the exact bug this ticket was filed for.
+  // the tooltip and the accessible name — and then it goes there.
   const label = await page.getAttribute(LOOT_BACK, 'aria-label')
   check('the drill’s back arrow names Exaltations, not the loot list', label === 'Back to Exaltations', String(label))
   await page.click(LOOT_BACK, { timeout: 15_000 })
   const home = await until(async () => (await countOf(page, VIEW)) > 0, 20_000)
   check('…and pressing Back returns to the Exaltations tab you were reading', home)
-  check('…with the plan still on screen, not the loot ledger', (await countOf(page, LOOT_DETAIL)) === 0)
-  check(
-    '…and the nav agreeing about where we are',
-    (await countOf(page, `${NAV}.Mui-selected`)) === 1
-  )
+  check('…with the browse still on screen, not the loot ledger', (await countOf(page, LOOT_DETAIL)) === 0)
+  // BOTH HALVES OF "WHERE AM I" SINCE JOS-324. The nav row stands for the whole gear area, so it
+  // reads selected on any of the four tabs and cannot by itself say we came back to Exaltations —
+  // the TAB is what says that.
+  check('…and the nav agreeing about where we are', (await countOf(page, `${NAV}.Mui-selected`)) === 1)
+  check('…down to which of the area’s tabs is up', (await countOf(page, `${TAB}.Mui-selected`)) === 1)
 }
 
-/** Everything downstream of "there is a set to plan into", in order. */
-async function steps(page: Page): Promise<void> {
+/** Everything the EXALTATIONS tab owns, in order. */
+async function exaltationSteps(app: ElectronApplication, page: Page): Promise<string | null> {
   await stepExplainer(page)
-  if (await stepEffects(page)) {
-    await stepEra(page)
-    await stepNonEquip(page)
-    await stepFocusFamilies(page)
-    if (await stepAddAndInventory(page)) {
-      await stepInventoryFill(page)
-      await stepHostPicker(page)
-      await stepSocketView(page)
-      await stepFarm(page)
-    }
+  await stepSearchOnly(page)
+  if (!(await stepEffects(page))) return null
+  await stepEra(page)
+  await stepNonEquip(page)
+  await stepFocusFamilies(page)
+  await stepItemFilter(page)
+  // JOS-329. It runs BEFORE the add step and after every measuring step: it needs a browse it can
+  // put into a non-default state (a socket tab, the escape hatch, an expanded group) and it hands
+  // all of that back, so `stepAddWish` still finds the proc tab it was written against.
+  await stepBrowseMemory(page)
+  // JOS-344 runs HERE, before the add step, on a browse nothing has written to yet: it hovers a
+  // donor NAME and hit-tests that row's own wish control with the card up, and reading that control
+  // in the state the surface opens in is the honest reading. (It would survive running after
+  // `stepAddWish` too, since JOS-343 made the control a TOGGLE that stays enabled once lit — but
+  // that is a fact about a sibling ticket's design, not a dependency worth taking.) It resizes the
+  // window and puts it back, parks the pointer, and touches no filter.
+  await stepExaltCompare(app, page)
+  return stepAddWish(page)
+}
+
+/**
+ * Everything the WISH LIST owns, in order — entered by its own tab of the same area.
+ *
+ * The order is the test in two places. `stepSeedImport` must run FIRST, because the seed is
+ * one-shot and every step after it edits the list; and `stepRemove` must run LAST of the edits, so
+ * the row the corpus search added is still there for the search and deep-link steps to find.
+ */
+async function wishlistSteps(page: Page, addedFromBrowse: string | null): Promise<void> {
+  await page.click(WISH_TAB, { timeout: 15_000 })
+  if (!(await stepSeedImport(page))) return
+  if (addedFromBrowse !== null) {
+    const names = await page.evaluate(
+      (s) => Array.from(document.querySelectorAll(s)).map((e) => (e as HTMLElement).innerText.split('\n')[0].trim()),
+      '[data-testid="wishlist-row"]'
+    )
+    check(
+      `the donor added on the Exaltations tab is on the wish list — "${addedFromBrowse}"`,
+      names.includes(addedFromBrowse),
+      names.slice(0, 5).join(', ')
+    )
   }
-  const over = await pageOverflow(page)
-  check(
-    'Exaltations never scrolls the page (its lists clip inside their own boxes)',
-    over.doc === 0 && over.content === 0,
-    `document +${String(over.doc)}px · content area +${String(over.content)}px`
-  )
-  await stepDeepLink(page)
+  await stepZoneGrouping(page)
+  // …and it leaves the era filter OFF, so every row-level step below can find what it just made.
+  await stepEraOff(page)
+  const added = await stepAddFromCorpus(page)
+  if (added !== null) {
+    await stepNoDoubleWish(page, added)
+    await stepSearchWishes(page, added)
+  }
+  await stepDoneStrip(page, OWNED_WISH.name)
+  await stepWishDeepLink(page, LOOT_DETAIL, LOOT_TITLE)
+  await page.click(LOOT_BACK, { timeout: 15_000 }).catch(() => {
+    /* the deep-link step may have skipped itself; the tab click below is the recovery either way */
+  })
+  await page.click(WISH_TAB, { timeout: 15_000 })
+  await until(async () => (await countOf(page, '[data-testid="wishlist-view"]')) > 0, 20_000)
+  if (added !== null) await stepRemove(page, added)
 }
 
 async function main(): Promise<void> {
   buildIfStale()
 
-  // See the header: a stored set (or a remembered mode) would make the empty-state assertion
-  // vacuous — this launch's userData dir has never held either.
+  // A userData dir this spec OWNS, because the wish list's one-time seed has to have something to
+  // import and nothing in the product can plan a socket any more (see `seedStore`). `launchApp`
+  // only deletes a dir it created, so the teardown below is ours to run.
+  const userData = makeUserData()
+  seedStore(userData)
 
   console.log('launch: hidden Electron (EQ_E2E=1) against tests/fixtures/e2e-planner.log…')
-  const { app, close } = await launchOnFixture('e2e-planner.log')
+  // …and a real `/outputfile inventory` dump in the install root beside it (JOS-185), so the
+  // progress join the wish list reads has a dump to answer from rather than taking its never-run
+  // branch on every launch.
+  const { app, close } = await launchOnFixture('e2e-planner.log', {
+    inventory: 'Primitive_freeport-Inventory.txt',
+    userData
+  })
 
   let page: Page | null = null
   try {
@@ -598,7 +612,30 @@ async function main(): Promise<void> {
     })
     page.on('pageerror', (e) => consoleErrors.push(String(e)))
 
-    if ((await stepMount(page)) && (await stepCreateSet(page))) await steps(page)
+    if (await stepMount(page)) {
+      const added = await exaltationSteps(app, page)
+      const over = await pageOverflow(page)
+      check(
+        'Exaltations never scrolls the page (its lists clip inside their own boxes)',
+        over.doc === 0 && over.content === 0,
+        `document +${String(over.doc)}px · content area +${String(over.content)}px`
+      )
+      await wishlistSteps(page, added)
+      const wishOver = await pageOverflow(page)
+      check(
+        'the Wish list never scrolls the page either',
+        wishOver.doc === 0 && wishOver.content === 0,
+        `document +${String(wishOver.doc)}px · content area +${String(wishOver.content)}px`
+      )
+      // Runs LAST: it leaves the app on Exaltations having passed through the Loot tab, so every
+      // pane-scoped measurement above it has already been taken.
+      await page.click(TAB, { timeout: 15_000 })
+      await until(async () => (await countOf(page as Page, VIEW)) > 0, 20_000)
+      await stepDeepLink(page)
+      // …and then the claim the browse's toggle owns (JOS-343): that both of its clicks reach the
+      // document. It ends on the Wish list tab, which is why nothing follows it.
+      await stepBrowseToggleReachesStore(page)
+    }
 
     check('no renderer console errors', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))
 
@@ -606,6 +643,7 @@ async function main(): Promise<void> {
     else await dumpArtifacts(page, 'planner-pass')
   } finally {
     await close()
+    await removeUserData(userData)
   }
 
   reportRun()

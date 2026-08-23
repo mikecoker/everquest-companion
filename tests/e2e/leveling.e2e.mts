@@ -16,6 +16,10 @@
  * WHAT IT ASSERTS, against whatever the real log holds right now:
  *   1. the nav row mounts the view (or the no-logs empty state honestly explains why not);
  *   2. a chart is drawn, and the ZONE-BAND STRIP is mounted inside it with real bands;
+ *   2b. (JOS-292) the level chart draws the FRACTIONAL CURVE - denser than the ding series it is
+ *      anchored on, inside its own plot, with an uncertainty band over every stretch the log did
+ *      not state, no vertex inside one, and a readout that says so rather than naming a bar
+ *      position there. Step 2b lives in `curveSteps.mts`;
  *   3. the range-stats panel is mounted with the view and scoped to the TIMESCALE'S WINDOW
  *      (JOS-75 — it used to exist only while a drag did);
  *   4. a real pointer DRAG across the chart narrows that scope to the selection, and the panel
@@ -33,10 +37,32 @@
  *      (a window inside another can never count more), and come back BYTE-IDENTICAL at `All`;
  *   6. the "New at this level" panel is mounted with its stepper — and, once the combo module
  *      has resolved a loadout, draws real unlock rows for it (floors, never today's counts);
- *   7. the tab never scrolls the page, and there are no renderer console errors;
+ *   6a. (JOS-391) and each spell row says what the spell is WORTH: compact damage/heal figures per
+ *      mana, the `already yours (CLS N)` claim naming a level below the one on screen, the spell it
+ *      replaces from the shipped line research, and the word `directional` said exactly ONCE on
+ *      the panel rather than footnoted per row. Step 6a lives in `unlockRowSteps.mts`;
+ *   6c. (JOS-392) the spell a row says it REPLACES is a hover target of its own, and the card that
+ *      opens is that spell's - carrying the figures main read for it;
+ *   6d. (JOS-392) and typing `27-28 cleric shaman` turns the panel into the matching spells, each
+ *      row's chips stating the level each class gets it at, in any word order - then clearing the
+ *      box gives the level view back. Steps 6c/6d live in `unlockRowSteps.mts` too;
+ *   6e. (JOS-393) and a spell the wiki badges out of era is FOUND by that search and MARKED - the
+ *      chip on the row, the same words on its card - while its in-era sibling one rung down the
+ *      same ladder wears nothing;
+ *   7. (JOS-289) THE WHOLE PAGE SCROLLS AND NO PANEL DOES: the window itself never scrolls, no
+ *      panel on the tab shows an internal vertical scrollbar except the drops list whose row count
+ *      earns one, and the deepest panel is reached by scrolling the PAGE. No renderer console
+ *      errors either;
+ *   7b. and at the narrowest window the app allows, the two columns STACK instead of sharing one
+ *      height (JOS-151's collision, which JOS-289 removed the cause of): no panel draws over
+ *      another, the stack is not a scroller, and both the timeslice control and the unlock stepper
+ *      are still the thing at their own centre;
+ *   7c. and a spell name in the per-level readout opens the full spell card. Steps 7/7b/7c live in
+ *      `levelingLayoutSteps.mts`;
  *   8. (JOS-78) the IN-WINDOW DROPS panel is mounted with the tab, states its empty window rather
  *      than drawing a blank box, and fills from loot the harness plays into the tailed file —
- *      ordered by observed drops, each row stating a count and a rate over a STATED active span;
+ *      ordered by observed drops, each row stating a count and a rate over a STATED span that
+ *      names its hour (JOS-288: elapsed by default, active behind the tab's basis toggle);
  *   9. and clicking a row opens that item's Loot drill-down (with its own per-zone drop-rate
  *      table) through the app's ONE navigation seam, so Back NAMES the Leveling tab and returns
  *      here (the JOS-43 law, on the app's newest cross-view link). Steps 8/9 live in
@@ -62,7 +88,6 @@ import {
   failures,
   hoverAt,
   note,
-  pageOverflow,
   rectOf,
   reportRun,
   settle,
@@ -71,11 +96,32 @@ import {
   waitHydrated
 } from './appHarness.mjs'
 import { mainWindow } from './appWindow.mjs'
-import { playWho } from './gameplay.mjs'
-import { launchOnFixture, type FixtureLog } from './logFixture.mjs'
+import { launchOnFixture } from './logFixture.mjs'
 // The in-window drops panel and its round trip into the item drill-down (JOS-78) — next door
 // because this spec sits AT the repo max-lines budget; see that file's header.
 import { stepDrops } from './dropSteps.mjs'
+import { stepScopeDefaults, stepZoneSlice } from './sliceSteps.mjs'
+// The layout contract, the spell card in the per-level readout and the narrow window (JOS-289,
+// which inverted JOS-151's claim here) — next door for the same reason, and see that file's header
+// for what the reporter's 1073x937 did to this tab and what the owner overturned afterwards.
+import { dismissFirstRunNotice, stepNarrowLayout, stepPageScroll, stepSpellCard } from './levelingLayoutSteps.mjs'
+// WHAT A POINTERMOVE COSTS (JOS-290) — the drag-responsiveness pin, next door because this file
+// is at the repo's line budget. It measures inside the same gesture it asserts about.
+import { stepDragCost } from './dragPerfSteps.mjs'
+// THE FRACTIONAL CURVE (JOS-292) — the vertices, the uncertainty bands, and the readout standing
+// on one. Next door for the same line-budget reason; see that file's header.
+// …and (JOS-339) THE CAMERA beside them: three PNGs of the chart column at three window shapes,
+// for an owner who has to rule on how the plots LOOK. Same file — same two plots.
+import { stepChartShots, stepLevelCurve } from './curveSteps.mjs'
+// THE "NEW AT THIS LEVEL" PANEL, both halves — the join (step 6) and what a row is WORTH beside
+// it (step 6a, JOS-391: the figures, `already yours`, `replaces`, and the one `directional` in
+// the header). Next door for the same line-budget reason; the pair is one question about one
+// panel, and this spec still owns the order and the launch.
+import { shootUnlockPanel, stepNewAtLevel, stepUnlockEra, stepUnlockSearch } from './unlockRowSteps.mjs'
+// THE RIGHT COLUMN'S READOUT (JOS-445) — best damage by dps, best healing by hps, at the level the
+// tab is showing. Next door for the same line-budget reason; it asserts the SEAM the unit suite
+// cannot reach (the lines crossing IPC, one stepper driving two columns, a header click re-ranking).
+import { shootBestSpells, stepBestSpells } from './bestSpellsSteps.mjs'
 
 const NAV = '[data-testid="nav-leveling"]'
 const VIEW = '[data-testid="leveling-view"]'
@@ -89,14 +135,20 @@ const PANEL = '[data-testid="leveling-range-stats"]'
 /** The panel's stated stretch — the two instants its numbers cover (JOS-75). */
 const PANEL_RANGE = '[data-testid="leveling-range-window"]'
 const AA_PACE = '[data-testid="leveling-aa-pace"]'
-const NEW_AT_LEVEL = '[data-testid="new-at-level"]'
-const LEVEL_VALUE = '[data-testid="new-at-level-value"]'
-const LEVEL_NEXT = '[data-testid="new-at-level-next"]'
-const UNLOCK_ROW = '[data-testid="unlock-row"]'
-const COMBO_CHIP = '[data-testid="new-at-level-combo-chip"]'
-const UNKNOWN_COMBO = '[data-testid="new-at-level-unknown"]'
-const TIMESCALE = '[data-testid="leveling-timescale"]'
-const TS_WINDOW = '[data-testid="leveling-timescale-window"]'
+// The "New at this level" selectors moved with steps 6/6a into `unlockRowSteps.mts`.
+// The app-wide TIMESLICE control (JOS-130) — it absorbed the tab's own timescale, so the duration
+// rungs are four ids among nine and the testid prefix names the surface rather than the feature.
+const TIMESCALE = '[data-testid="leveling-slice"]'
+const TS_WINDOW = '[data-testid="leveling-slice-window"]'
+/**
+ * The narrowest slice that REPLACES THE DRAWN WINDOW, most-narrow first — which is what step 5b
+ * is about (a new time base: the strip re-cuts, a stale selection is dropped, the hover re-maps).
+ *
+ * `Zone` is deliberately not a candidate: it narrows the NUMBERS and leaves the window alone by
+ * design, so it would fail assertions that are correct about every other slice. It gets its own
+ * step (`stepZoneSlice`) that asserts exactly the opposite pair.
+ */
+const NARROW_ORDER = ['h1', 'h6', 'h24', 'd7', 'session'] as const
 const TOOLTIP = '[data-testid="chart-tooltip"]'
 const HERO = '[data-testid="leveling-range-hero"]'
 const ZONE_ROW = '[data-testid="leveling-range-zone-row"]'
@@ -161,12 +213,15 @@ async function dragRange(page: Page, sel: string): Promise<boolean> {
   return true
 }
 
-/** The scale ids the control is offering — `full` plus whatever this character's span can fill. */
+/** The slice ids the control is offering — `all` and `custom` always, plus whatever this
+ *  character's log can define. The caption (`-window`) and the custom range's two inputs
+ *  (`-custom-from` / `-custom-to`) share the prefix and are not ids; no SliceId carries a hyphen,
+ *  which is what that filter is reading. */
 function offeredScales(page: Page): Promise<string[]> {
   return page.evaluate(() =>
-    Array.from(document.querySelectorAll('[data-testid^="leveling-timescale-"]'))
-      .map((e) => (e.getAttribute('data-testid') ?? '').replace('leveling-timescale-', ''))
-      .filter((id) => id.length > 0 && id !== 'window')
+    Array.from(document.querySelectorAll('[data-testid^="leveling-slice-"]'))
+      .map((e) => (e.getAttribute('data-testid') ?? '').replace('leveling-slice-', ''))
+      .filter((id) => id.length > 0 && id !== 'window' && !id.includes('-'))
   )
 }
 
@@ -461,13 +516,15 @@ async function stepTimescale(page: Page, chart: string): Promise<void> {
   check('…and it states the window on screen', before.includes('→'), before.replace(/\s+/g, ' '))
 
   const offered = await offeredScales(page)
-  if (offered.length < 2) {
-    note(
-      `this log spans too little to fill a second scale — the control offers only [${offered.join(', ')}] and states the window instead of drawing a one-button choice, which is the honest surface`
-    )
+  check('the slices offered are the ones this log can define', offered[0] === 'all', `[${offered.join(', ')}]`)
+  // The narrowest slice this log can actually offer. `custom` is always in the list and is not a
+  // change of base until somebody types two instants into it, so it is deliberately not a
+  // candidate here — this step is about the control replacing the time base in one click.
+  const narrow = NARROW_ORDER.find((id) => offered.includes(id))
+  if (!narrow) {
+    note(`this log defines no slice narrower than All — it offers only [${offered.join(', ')}] and states the slice`)
     return
   }
-  check('the scales offered are the ones this history can fill', offered[0] === 'full', `[${offered.join(', ')}]`)
 
   // The full-history dashboard, read BEFORE anything is touched — the state `All` must restore.
   const allReadout = await dashboardReadout(page)
@@ -479,9 +536,7 @@ async function stepTimescale(page: Page, chart: string): Promise<void> {
   await settleCount(page, PANEL, 1, { timeoutMs: 8000 })
   const bandsBefore = await bandSignature(page)
 
-  // The narrowest offered scale — the strongest zoom this data supports.
-  const narrow = offered[offered.length - 1]
-  await page.click(`[data-testid="leveling-timescale-${narrow}"]`, { timeout: 10_000 })
+  await page.click(`[data-testid="leveling-slice-${narrow}"]`, { timeout: 10_000 })
   const after = await settle(() => textOf(page, TS_WINDOW), (t) => t !== before, { timeoutMs: 8000 })
   check(`picking "${narrow}" replaces the window wholesale`, after !== before, `${before} → ${after}`.replace(/\s+/g, ' '))
   check(
@@ -523,7 +578,7 @@ async function stepTimescale(page: Page, chart: string): Promise<void> {
   }
 
   // Back to the default: the control is a view, not a trapdoor.
-  await page.click('[data-testid="leveling-timescale-full"]', { timeout: 10_000 })
+  await page.click('[data-testid="leveling-slice-all"]', { timeout: 10_000 })
   const back = await settle(() => textOf(page, TS_WINDOW), (t) => t === before, { timeoutMs: 8000 })
   check('returning to All restores the full-history window exactly', back === before, `${back}`.replace(/\s+/g, ' '))
   // THE PROMISE, IN PIXELS: not just the drawn window but every number under it. A user who
@@ -534,52 +589,6 @@ async function stepTimescale(page: Page, chart: string): Promise<void> {
     restored === allReadout,
     restored === allReadout ? '' : `${allReadout.slice(0, 160)} ≠ ${restored.slice(0, 160)}`
   )
-}
-
-/**
- * 6. "NEW AT THIS LEVEL" (docs/plans/levelup-whats-new.md) — the panel the level-up toast links
- * to, and the one surface here that does NOT depend on the log having any dings in it: it is
- * computed from the committed spells.json + classes.json against the inferred loadout.
- *
- * FLOORS, and the honest branch. With a resolved loadout the panel must draw class chips and
- * find SOME level with an unlock (stepping up to 10 always crosses one — every class in the game
- * gains skills at 1 and again by 10). With no loadout inferred yet it must say so in words
- * instead of drawing empty lists, which is the same claim from the other side.
- */
-async function stepNewAtLevel(page: Page, log: FixtureLog): Promise<void> {
-  const mounted = await page.waitForSelector(NEW_AT_LEVEL, { timeout: 20_000 }).then(
-    () => true,
-    () => false
-  )
-  if (!check('the "New at this level" panel is mounted on the Leveling tab', mounted)) return
-  const label = await textOf(page, LEVEL_VALUE)
-  check('…with a level stepper that states the level it is showing', /Level \d+/.test(label), label)
-
-  // The loadout comes from a `/who`, and a fixture cut for the CHART carries one from five days
-  // before its last event. So the harness types `/who` — the append driver plays the row live and
-  // the combo module folds it like any other evidence. This is the difference between asserting
-  // the unlock join and noting that it could not be asserted.
-  playWho(log)
-  await settleGone(page, UNKNOWN_COMBO, { timeoutMs: 15_000 })
-  if ((await countOf(page, UNKNOWN_COMBO)) > 0) {
-    note('the combo module resolved no classes even after a live /who — the panel states that instead of drawing empty lists, which is the honest surface')
-    return
-  }
-  check('…and chips naming the loadout it computed against', (await countOf(page, COMBO_CHIP)) > 0)
-
-  // Walk up to level 10 and take the best reading: SOME level in 1..10 unlocks something for
-  // every class in the game, so a walk that finds nothing means the join is broken — not that
-  // this character is unusual. The exact level and count are deliberately not asserted.
-  let rows = await countOf(page, UNLOCK_ROW)
-  for (let i = 0; i < 10 && rows === 0; i++) {
-    const label = await textOf(page, LEVEL_VALUE)
-    await page.click(LEVEL_NEXT, { timeout: 10_000 })
-    // The step's own condition: the stepper is showing a DIFFERENT level. Reading the unlock
-    // rows before that lands would be reading the level we just left.
-    await settle(() => textOf(page, LEVEL_VALUE), (t) => t !== label, { timeoutMs: 8_000 })
-    rows = await countOf(page, UNLOCK_ROW)
-  }
-  check('…and at least one unlock row across the first ten levels', rows > 0, `${String(rows)} rows at ${await textOf(page, LEVEL_VALUE)}`)
 }
 
 /**
@@ -628,16 +637,6 @@ async function stepAaLedger(page: Page): Promise<void> {
   check('…and clicking it opens its rungs', rungs > 0, `${String(rungs)} rungs`)
 }
 
-/** 7. THE LAYOUT CONTRACT: the app's content area owns the scroll; a view never grows the page. */
-async function stepOverflow(page: Page): Promise<void> {
-  const over = await pageOverflow(page)
-  check(
-    'the Leveling tab never scrolls the page (its panels scroll inside themselves)',
-    over.doc === 0 && over.content === 0,
-    `document +${String(over.doc)}px · content area +${String(over.content)}px`
-  )
-}
-
 async function main(): Promise<void> {
   buildIfStale()
 
@@ -656,10 +655,20 @@ async function main(): Promise<void> {
     page.on('pageerror', (e) => consoleErrors.push(String(e)))
 
     if (await stepMount(page)) {
+      // FIRST, because it is a fixed overlay across the bottom of the window and every hover and
+      // hit test below asks `elementFromPoint` (see the helper — since JOS-289 the page scrolls
+      // and a plot can legitimately park underneath it).
+      await dismissFirstRunNotice(page)
       await waitReplayed(page)
       const chart = await stepChart(page)
       if (chart) {
+        // FIRST OF THE SCOPE STEPS, and it has to be: it reads what the tab OPENED on (JOS-332,
+        // this tier + elapsed), so anything that presses a control has to come after it.
+        await stepScopeDefaults(page)
         await stepBands(page)
+        // The curve itself (JOS-292), read before any gesture has been made: its vertices, its
+        // refusals, and the readout standing on one. It leaves no selection and no tooltip.
+        await stepLevelCurve(page, LEVEL_CHART)
         // BEFORE the selection step: that one leaves a range-stats panel mounted in the charts
         // column, and the ledger assertions want the tab in the state a user first sees.
         await stepAaLedger(page)
@@ -667,10 +676,22 @@ async function main(): Promise<void> {
         // AFTER the selection step, which proves the panel works on the default (full-history)
         // window — this one then proves the same gestures survive a wholesale window change.
         await stepTimescale(page, chart)
+        // STRAIGHT AFTER IT (JOS-339): that step leaves the tab on `All` with no selection, which
+        // is the state the shots open from. It puts the window size and the slice back itself.
+        await stepChartShots(app, page)
+        // The other half of the same control (JOS-130, sliceSteps.mts): the preset that moves the
+        // arithmetic and not the window. It runs AFTER stepTimescale, which leaves the tab on
+        // `All`, and takes the spec's own dashboard readout so "byte for byte" means one thing.
+        await stepZoneSlice(page, () => dashboardReadout(page))
         // LAST among the chart steps (JOS-78): it APPENDS loot, and loot is one of the three
         // columns the idle classifier walks — so every byte-identical reading above must already
         // be behind us. See dropSteps.mts.
         await stepDrops(page, log)
+        // LAST of all: it PROFILES, so anything that runs after it would be measuring this step's
+        // leftovers, and it wants the tab in the fullest state the spec ever puts it in (the
+        // drops panel is populated by the step above) — which is the state a move used to have
+        // to re-render. It commits its own selection and leaves it; nothing below reads one.
+        await stepDragCost(page, LEVEL_CHART)
       } else {
         // The empty-state half of the headline assertion still holds, and is the honest thing
         // to assert on a log with no chart: there is no domain, so there is no scope, so there
@@ -680,7 +701,38 @@ async function main(): Promise<void> {
       // Deliberately OUTSIDE the chart branch: the unlock panel is computed from the committed
       // DBs, so it must be there whether or not this log has enough dings to draw a chart.
       await stepNewAtLevel(page, log)
-      await stepOverflow(page)
+      // …and the OTHER question the same panel answers (JOS-392): typing turns it into a spell
+      // finder. It runs here because the step above has resolved the loadout and walked to a level
+      // with rows on it, which is the state "clearing restores the level view" is a claim about;
+      // it puts the box back empty itself, so everything below still sees the level view.
+      await stepUnlockSearch(page)
+      // …and (JOS-393) the era verdict on the rows that search returns: `Sloths Healing` is found
+      // and MARKED out of era, its card says the same, and `Snails Healing` one rung down the same
+      // ladder wears nothing. It runs on the search rather than the level list because the loadout
+      // here is whatever this machine's log resolved and a shaman is not guaranteed; the fold
+      // itself is pinned over the committed data by tests/spellEra.test.mts. It leaves the box
+      // empty, like the step above it.
+      await stepUnlockEra(page)
+      // Straight after it, on the level that step walked to: the readout's spell names now carry
+      // the full card (JOS-293's `SpellTooltip`), which is only usable because the list stopped
+      // being a 120px porthole — the two halves of JOS-289 proving each other.
+      await stepSpellCard(page)
+      // AFTER the whole unlock-panel sequence (JOS-445): those steps resolve the loadout and walk
+      // the stepper to a level with rows on it, which is the state this readout is a claim about —
+      // and they leave the search box empty, so the stepper is live. It presses the stepper once
+      // and presses it back, so nothing below sees a level the steps above did not leave.
+      await stepBestSpells(page)
+      await stepPageScroll(page)
+      // LAST, because it moves the window: it puts the size and the minimum back before it
+      // returns, but nothing after it should have to trust that.
+      await stepNarrowLayout(app, page)
+      // AFTER EVEN THAT (JOS-391): the camera SHOWS the window, and showing it moves the scroll
+      // position and stalls compositing — measured, it broke three of the layout checks above
+      // when it sat in place after step 6a. It asserts nothing, so it costs nothing here.
+      await shootUnlockPanel(app, page)
+      // …and the new readout beside it (JOS-445), for the same reason and in the same place: a
+      // surface the owner asked for gets a picture. Both cameras run after every measurement.
+      await shootBestSpells(app, page)
     }
 
     check('no renderer console errors', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))

@@ -38,6 +38,13 @@ const TARGETS: Curated[] = [
   { name: 'Lord Nagafen', category: 'Open World', match: ['Lord Nagafen'], zone: "Nagafen's Lair" },
   { name: 'Lady Vox', category: 'Open World', match: ['Lady Vox'], zone: 'Permafrost Keep' },
   { name: 'Master Yael', category: 'Open World', match: ['Master Yael'], zone: 'The Hole' },
+  // Kedge Keep's dragon-fish (level 53), reported missing from the roster by a 0.12.0 user
+  // (JOS-101). Log-form name verified TWICE against sources already in the repo/on disk:
+  // mobs.json carries `{ page: 'Phinigel Autropos', name: 'Phinigel Autropos', level: '53',
+  // zones: ['Kedge Keep'] }` (scraped from eqlwiki), and the owner's own log prints
+  // `Your faction standing with Phinigel Autropos has been adjusted by ...` 17 times — the
+  // faction is named for him, so the spelling is the game's, not the wiki's.
+  { name: 'Phinigel Autropos', category: 'Open World', match: ['Phinigel Autropos'], zone: 'Kedge Keep' },
 
   // Plane of Fear
   { name: 'Cazic Thule', category: 'Plane of Fear', p99: 'Cazic Thule (God)', match: ['Cazic Thule', 'Cazic-Thule'], zone: 'Plane of Fear' },

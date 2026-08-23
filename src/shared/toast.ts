@@ -200,10 +200,46 @@ export function introToastPayload(): ToastPayload {
   return {
     id: TOAST_INTRO_ID,
     kind: 'intro',
-    title: 'EQ Legends Companion — celebration overlay',
+    title: 'EQ Legends Companion - celebration overlay',
     subtitle: 'Boss kills, Sky quest completions and level-ups will appear here.',
     durationMs: TOAST_INTRO_MS
   }
+}
+
+// ---- the card's own call to action (JOS-334) ------------------------------------------
+//
+// THE CARD WAS CLICKABLE AND SAID SO TO NOBODY. The level-up toast (the first kind whose whole
+// card is the click target, because a level carries no reward block to hang the affordance on)
+// shipped as a title and a subtitle over a pointer cursor — and a pointer cursor is not an
+// affordance in a window a player almost never hovers before deciding to ignore it. The card now
+// prints the promise it was already keeping.
+//
+// THE WORDS LIVE HERE, NOT IN THE COMPONENT, for the reason TOAST_INTRO_BODY does: a string this
+// small is still a PROMISE the app makes, and `npm test` can pin a promise in a pure module
+// without Electron, a window or a screenshot.
+//
+// WHY THESE WORDS. "See what's new" is already the app's voice for "go read the thing that
+// changed" — WhatsNewTeaser.tsx says exactly that about a release — and the destination this link
+// lands on is literally titled "New at this level" (NewAtLevelPanel.tsx), so the label is a
+// sentence the panel finishes rather than a generic "Open". The LEVEL is named because the card
+// may be the second one in a stack and because a ding is about a number: "See what's new at 24"
+// tells the reader both where they are going and which of the two cards they are answering.
+//
+// AND IT SPEAKS ONLY FOR DESTINATIONS IT CAN NAME. An unnamed view gets NO label rather than an
+// invented one: the whole-card click keeps working exactly as before, and a card would rather
+// under-promise than print a sentence about a place this function is guessing at (law 1's habit,
+// applied to prose). Today that means the leveling anchor and nothing else — the Sky reward's
+// destination is already visible as its reward block, and a boss kill names no destination at all.
+
+/**
+ * The visible label for a card whose OWN body is the deep link, or undefined when there is
+ * nothing honest to print. Pure: the wording is a test's business, not a screenshot's.
+ */
+export function toastActionLabel(focus: AppFocus | undefined): string | undefined {
+  if (focus?.view !== 'leveling') return undefined
+  // A leveling focus with no level anchors the panel on the character's own — still "what's new",
+  // just not new AT anything this card can name.
+  return focus.level === undefined ? 'See what’s new' : `See what’s new at ${String(focus.level)}`
 }
 
 /** The deep-link destinations a toast may name. Mirrors the AppFocusView union (closed set). */

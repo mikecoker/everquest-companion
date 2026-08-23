@@ -18,6 +18,8 @@ import {
 import DownloadIcon from '@mui/icons-material/Download'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import StarIcon from '@mui/icons-material/Star'
+import StarBorderIcon from '@mui/icons-material/StarBorder'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
@@ -43,10 +45,16 @@ function phaseLabel(p: PackInstallProgress): string {
       return 'Extracting…'
     case 'converting':
       return 'Converting…'
+    // A backoff between attempts (JOS-420). The message carries the length and the reason; without
+    // one it is still worth saying that the row is waiting rather than stuck.
+    case 'waiting':
+      return p.message ?? 'Waiting to retry…'
     case 'done':
       return 'Installed'
     case 'error':
-      return `Error: ${p.message ?? 'install failed'}`
+      // A RETRYABLE END IS NOT AN "Error:" (JOS-420). "Error: Rate limited by the download host"
+      // reads as a broken pack; the sentence itself already says what happened and what to do.
+      return p.retryable ? (p.message ?? 'Not installed - try again shortly') : `Error: ${p.message ?? 'install failed'}`
     default:
       return ''
   }
@@ -62,9 +70,11 @@ function PackProgress({
 }): JSX.Element | null {
   if (!prog) return null
   const installing = isBusy && prog.phase !== 'done' && prog.phase !== 'error'
+  // Red is reserved for something that went WRONG. A rate limit did not (JOS-420).
+  const isError = prog.phase === 'error' && prog.retryable !== true
   return (
     <Box sx={{ mt: 0.75 }}>
-      <Typography variant="caption" color={prog.phase === 'error' ? 'error' : 'text.secondary'}>
+      <Typography variant="caption" color={isError ? 'error' : 'text.secondary'}>
         {phaseLabel(prog)}
       </Typography>
       {installing && (
@@ -199,11 +209,14 @@ function PackPreviewPanel({
 function PackMeta({
   p,
   prog,
-  isBusy
+  isBusy,
+  isDefault
 }: {
   p: RegistryPackView
   prog: PackInstallProgress | undefined
   isBusy: boolean
+  /** Is this the user's default pack (JOS-273)? */
+  isDefault: boolean
 }): JSX.Element {
   return (
     <Box sx={{ flexGrow: 1, minWidth: 0 }}>
@@ -218,6 +231,16 @@ function PackMeta({
             variant="outlined"
             icon={<CheckCircleIcon />}
             label="Installed"
+          />
+        )}
+        {isDefault && (
+          <Chip
+            size="small"
+            color="primary"
+            variant="outlined"
+            icon={<StarIcon />}
+            label="Default"
+            data-testid="pack-default-chip"
           />
         )}
         <Typography variant="caption" color="text.secondary">
@@ -239,20 +262,46 @@ function PackMeta({
   )
 }
 
-/** Install button / uninstall icon, whichever applies. */
+/**
+ * Install button / uninstall icon, whichever applies — plus, for an INSTALLED pack, the star that
+ * makes it the user's default (JOS-273).
+ *
+ * THE STAR IS THE WHOLE FEATURE'S ENTRY POINT, and it lives beside Uninstall on purpose: the
+ * reporter's loop was "delete the pack I don't want, every update, forever", and the answer to it
+ * is one click away from the delete they were reaching for. Only an installed pack can be made
+ * default — a preference naming something that has never been on this machine would be a setting
+ * that does nothing until some later day.
+ */
 function PackAction({
   p,
   isBusy,
+  isDefault,
   onInstall,
-  onUninstall
+  onUninstall,
+  onMakeDefault
 }: {
   p: RegistryPackView
   isBusy: boolean
+  isDefault: boolean
   onInstall: () => void
   onUninstall: () => void
+  onMakeDefault: () => void
 }): JSX.Element {
   return (
     <Box sx={{ flexShrink: 0 }}>
+      {p.installed && (
+        <IconButton
+          size="small"
+          color={isDefault ? 'primary' : 'default'}
+          disabled={isBusy || isDefault}
+          onClick={onMakeDefault}
+          aria-label={isDefault ? 'Your default pack' : 'Make this my default pack'}
+          title={isDefault ? 'Your default pack' : 'Make this my default pack'}
+          data-testid="pack-make-default"
+        >
+          {isDefault ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
+        </IconButton>
+      )}
       {p.installed ? (
         <IconButton
           size="small"
@@ -283,6 +332,8 @@ export interface SoundPackRowProps {
   p: RegistryPackView
   prog: PackInstallProgress | undefined
   isBusy: boolean
+  /** Is this the user's default pack (JOS-273)? */
+  isDefault: boolean
   isExpanded: boolean
   preview: PreviewState | undefined
   playingKey: string | null
@@ -290,6 +341,8 @@ export interface SoundPackRowProps {
   onToggleExpand: (name: string) => void
   onInstall: (name: string) => void
   onUninstall: (name: string) => void
+  /** "Make this pack my default" — the persisted preference, not a session choice. */
+  onMakeDefault: (name: string) => void
   onPlay: (name: string, file: string) => void
 }
 
@@ -297,6 +350,7 @@ export default function SoundPackRow({
   p,
   prog,
   isBusy,
+  isDefault,
   isExpanded,
   preview,
   playingKey,
@@ -304,6 +358,7 @@ export default function SoundPackRow({
   onToggleExpand,
   onInstall,
   onUninstall,
+  onMakeDefault,
   onPlay
 }: SoundPackRowProps): JSX.Element {
   return (
@@ -324,12 +379,14 @@ export default function SoundPackRow({
         >
           {isExpanded ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
         </IconButton>
-        <PackMeta p={p} prog={prog} isBusy={isBusy} />
+        <PackMeta p={p} prog={prog} isBusy={isBusy} isDefault={isDefault} />
         <PackAction
           p={p}
           isBusy={isBusy}
+          isDefault={isDefault}
           onInstall={() => onInstall(p.name)}
           onUninstall={() => onUninstall(p.name)}
+          onMakeDefault={() => onMakeDefault(p.name)}
         />
       </Stack>
 

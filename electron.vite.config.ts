@@ -31,21 +31,50 @@ export default defineConfig({
     // startup parse the day items.json (6.8 MB raw) landed.
     json: { stringify: true },
     build: {
+      // ---- SOURCEMAPS (JOS-100) --------------------------------------------------------
+      // ON FOR ALL THREE BUNDLES, so an `errorReport`'s `out/…:line:col` frames can be turned
+      // back into source terms by `scripts/symbolicate.mts`. Without them a frame names a
+      // minified file and a column, which is a fingerprint and not a diagnosis.
+      //
+      // THE MAPS DO NOT SHIP, AND THAT IS ENFORCED BY THE PACKAGER RATHER THAN BY THIS FLAG:
+      // `files:` in electron-builder.yml already excludes `**/*.map`, so they are emitted into
+      // `out/` and left behind. CI uploads them as a PRIVATE WORKFLOW ARTIFACT keyed by version
+      // (.github/workflows/build.yml) and never as a release asset — a public `.map` is the
+      // whole source tree, which for this repo is not a leak but is also not a download anyone
+      // asked for, and for a future closed dependency it would be.
+      sourcemap: true,
       externalizeDeps: {
         include: ['pg', '@aws-sdk/client-s3', '@aws-sdk/credential-providers', '@aws-sdk/dsql-signer']
       },
       rollupOptions: {
-        // TWO main-process bundles. `index` is the app; `speechWorker` is the Kokoro
-        // synthesis worker_thread (docs/plans/voice-alerts.md D2 — inference must never run
-        // on the thread that tails the log). It has to be a separate entry because
-        // `new Worker(path)` loads a FILE: rolling it into index.js would give the worker no
-        // file to load, and bundling it as a data-url string would put onnxruntime's native
-        // require inside an eval. Emitted as out/main/speechWorker.js, beside index.js, which
-        // is what `join(__dirname, 'speechWorker.js')` in ipc/speech.ts resolves in dev AND
-        // inside the packaged asar.
+        // FOUR main-process bundles. `index` is the app; the other three are worker_threads,
+        // and each is a separate entry for the same reason: `new Worker(path)` loads a FILE, so
+        // rolling one into index.js would give the worker no file to load, and bundling it as a
+        // data-url string would put a native `require` inside an eval. Each is emitted beside
+        // index.js, which is what `join(__dirname, '<name>.js')` resolves in dev AND inside the
+        // packaged asar.
+        //
+        //   * speechWorker — Kokoro synthesis (docs/plans/voice-alerts.md D2: inference must
+        //     never run on the thread that tails the log).
+        //   * presenceWorker — the game-presence poll (JOS-182). Same rule, different number:
+        //     its 5 s process scan is a measured 8.4 ms of `EnumProcesses`, which main cannot
+        //     spend. It replaced a `powershell.exe` child, and this entry is what lets that
+        //     child's job move in-process without moving onto main's thread.
+        //   * resistTableWorker — the client's spells_us.txt (JOS-382). 38 MB and 73,963 rows,
+        //     parsed once per game patch. Same rule as speechWorker's: the thread that tails the
+        //     log cannot spend a few hundred milliseconds of uninterruptible splitting, and
+        //     JOS-371 says so in general terms.
+        //   * perfProbeWorker — the SECOND CLOCK (JOS-367). Not offloaded work: it is a 250 ms
+        //     timer measuring its own lateness, and its whole value is that it runs somewhere
+        //     main does not. Two threads late in the same half second means the MACHINE stalled;
+        //     only main late means we did. A rollup into index.js would leave the verdict
+        //     unmeasurable, which is the strongest form of "this needs its own entry".
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
-          speechWorker: resolve(__dirname, 'src/main/speech/worker.ts')
+          speechWorker: resolve(__dirname, 'src/main/speech/worker.ts'),
+          presenceWorker: resolve(__dirname, 'src/main/presenceWorker.ts'),
+          perfProbeWorker: resolve(__dirname, 'src/main/perfProbeWorker.ts'),
+          resistTableWorker: resolve(__dirname, 'src/main/resistTableWorker.ts')
         }
       }
     }
@@ -54,15 +83,20 @@ export default defineConfig({
     // No `externalizeDeps` line: electron-vite 5 defaults it to true, which is exactly what
     // the old bare `externalizeDepsPlugin()` did here.
     build: {
+      // Sourcemaps, for the reason spelled out on the main bundle above.
+      sourcemap: true,
       rollupOptions: {
-        // Three preloads: the full app bridge (index), a minimal overlay bridge (overlay)
-        // that exposes only the combat snapshot + overlay window controls (Task #52), and
+        // Four preloads: the full app bridge (index), a minimal overlay bridge (overlay)
+        // that exposes only the combat snapshot + overlay window controls (Task #52),
         // the receive-only cursor-ring bridge (cursor) — three methods, none of which can
-        // change anything. electron-vite emits out/preload/{index,overlay,cursor}.js.
+        // change anything — and the tray popover's send-only bridge (tray, JOS-139): three
+        // verbs and no reads at all. electron-vite emits
+        // out/preload/{index,overlay,cursor,tray}.js.
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
           overlay: resolve(__dirname, 'src/preload/overlay.ts'),
-          cursor: resolve(__dirname, 'src/preload/cursor.ts')
+          cursor: resolve(__dirname, 'src/preload/cursor.ts'),
+          tray: resolve(__dirname, 'src/preload/tray.ts')
         }
       }
     }
@@ -95,14 +129,19 @@ export default defineConfig({
     },
     plugins: [react()],
     build: {
+      // Sourcemaps, as above — and the renderer's are the ones that matter most, because its is
+      // the bundle a minifier renames and re-lines most aggressively.
+      sourcemap: true,
       rollupOptions: {
-        // Three HTML entries: the main app (index), the floating overlay meters (overlay,
-        // Task #52) and the cursor ring (cursor) — one <div> and no framework.
-        // electron-vite emits out/renderer/{index,overlay,cursor}.html.
+        // Four HTML entries: the main app (index), the floating overlay meters (overlay,
+        // Task #52), the cursor ring (cursor) — one <div> and no framework — and the tray
+        // popover (tray, JOS-139), one static card with no MUI.
+        // electron-vite emits out/renderer/{index,overlay,cursor,tray}.html.
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           overlay: resolve(__dirname, 'src/renderer/overlay.html'),
-          cursor: resolve(__dirname, 'src/renderer/cursor.html')
+          cursor: resolve(__dirname, 'src/renderer/cursor.html'),
+          tray: resolve(__dirname, 'src/renderer/tray.html')
         }
       }
     }

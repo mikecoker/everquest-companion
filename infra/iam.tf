@@ -52,11 +52,23 @@ data "aws_iam_policy_document" "lambda_inline" {
 
   # Only enough to SIGN the presigned POST. The handler never uploads anything
   # itself and can never read back what a client uploaded.
+  #
+  # THREE PREFIXES SINCE JOS-441, NOT A WILDCARD ON THE BUCKET. A presigned POST can only be
+  # signed for a key the signer itself may PUT, so this list IS the set of paths a client can be
+  # handed the right to write. Naming each one says exactly that; `${bucket}/*` would widen a
+  # public write endpoint's reach for the sake of one line — and the fact that this list has now
+  # grown twice without becoming a wildcard is the rule working, not friction.
   statement {
-    sid       = "PresignLogUploads"
-    effect    = "Allow"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.logs.arn}/logs/*"]
+    sid    = "PresignAttachmentUploads"
+    effect = "Allow"
+
+    actions = ["s3:PutObject"]
+
+    resources = [
+      "${aws_s3_bucket.logs.arn}/logs/*",
+      "${aws_s3_bucket.logs.arn}/inventory/*",
+      "${aws_s3_bucket.logs.arn}/achievements/*",
+    ]
   }
 }
 
@@ -142,9 +154,11 @@ data "aws_iam_policy_document" "triage_inline" {
     resources = [aws_dsql_cluster.feedback.arn]
   }
 
-  # DeleteObject is what makes `forget` / `wipe` real rather than a promise.
+  # DeleteObject is what makes `forget` / `wipe` real rather than a promise — and since JOS-441
+  # a report can carry THREE objects, so every prefix is listed here or `forget` would leave one
+  # of them behind while telling the requester it was destroyed.
   statement {
-    sid    = "TriageLogObjects"
+    sid    = "TriageAttachmentObjects"
     effect = "Allow"
 
     actions = [
@@ -152,11 +166,15 @@ data "aws_iam_policy_document" "triage_inline" {
       "s3:GetObject",
     ]
 
-    resources = ["${aws_s3_bucket.logs.arn}/logs/*"]
+    resources = [
+      "${aws_s3_bucket.logs.arn}/logs/*",
+      "${aws_s3_bucket.logs.arn}/inventory/*",
+      "${aws_s3_bucket.logs.arn}/achievements/*",
+    ]
   }
 
   statement {
-    sid       = "TriageListLogPrefix"
+    sid       = "TriageListAttachmentPrefixes"
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.logs.arn]
@@ -164,7 +182,7 @@ data "aws_iam_policy_document" "triage_inline" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["logs/*"]
+      values   = ["logs/*", "inventory/*", "achievements/*"]
     }
   }
 }

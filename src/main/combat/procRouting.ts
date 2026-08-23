@@ -9,7 +9,9 @@
 import { idKey } from '../log/parser'
 import { DISPEL_FAMILY, SLOW_STRIKE, coatLineKey } from '../../shared/poisons'
 import { procBuffInCandidates } from '../../shared/procBuffs'
+import { selfLandingProcIn } from './procDetect'
 import { stateKeyOf, type CloseStateArgs, type OpenStateArgs } from './stateTimeline'
+import type { SpellProcFold } from './procDetect'
 import type { EngineState } from './state'
 import type { CoatSlot } from '../../shared/combat'
 import type { PoisonCoatEvent, PoisonDryEvent, PoisonProcEvent } from '../../shared/logEvents'
@@ -120,6 +122,70 @@ export function routeDry(st: EngineState, ev: PoisonDryEvent): void {
 }
 
 /**
+ * WHY A SET OF BLADES WENT BARE WITHOUT THE GAME PRINTING A LINE (JOS-305).
+ *
+ * Both members are boundaries eqlwiki's Rogue page names in one breath — poisons "remain active
+ * until class swap or death" — and NEITHER prints a dry line, which is exactly why they have to
+ * be modeled instead of waited for.
+ */
+export type CoatClearReason = 'death' | 'classSwap' | 'epoch'
+
+/** The two exclusivity-group prefixes the coat slots write spans under (see stateTimeline.ts).
+ *  One list, so a clear can never strip a slot family whose spans it forgot to close. */
+const COAT_GROUP_PREFIXES = ['coat:utility', 'coat:combat:'] as const
+
+/**
+ * STRIP EVERY BLADE COAT, BOTH FAMILIES, AND END THEIR OPEN SPANS AT `ts` (JOS-305).
+ *
+ * THE DEFECT THIS EXISTS FOR, in the owner's words (2026-08-13): "the poisons shown in the combat
+ * module are from the last ROGUE session". Coats are SESSION-scoped and survive zoning by design
+ * (a coat really does outlive a zone line), so with only a dry line and a death able to remove
+ * one, a character who stopped being a rogue kept a header pill naming venoms that had not been
+ * on the blades for days — and `slowExpected` kept promising a slow that could never land.
+ *
+ * ONE DOOR FOR EVERY CLEARER, which is the whole reason this is a function and not three inline
+ * pairs of assignments. Before this, DEATH cleared the slots in ingest.ts while EPOCH censored
+ * the spans and left the slots standing — the same slot/span disagreement the death rule was
+ * written to cure, rebuilt one case over. Anything that can bare the blades comes through here.
+ *
+ * 'CENSORED', NEVER 'OBSERVED' OR 'INFERRED' (proc-analytics §3.1, law 1). No line printed an end
+ * for these spans. A death severs them at a known instant we did not see the poison leave; a class
+ * swap is not even dated — the combo model's boundary is a RANGE and this `ts` is the moment we
+ * NOTICED, not the moment it happened. 'censored' is precisely "our knowledge stops here", and it
+ * never renders as an end time.
+ *
+ * IT STAMPS THE WINDOW TRANSITION, exactly as `routeDry` does, and for the same reason: the minute
+ * a state changed in is DISCARDED from that state's Tier-B comparison, because the boundary minute
+ * carries the confound. A boundary that silently ended four coats is the strongest version of that
+ * and must not be the one minute the purity gate believes was clean.
+ *
+ * Returns whether anything was actually cleared, so a caller can log the boundary only when it
+ * meant something. Cheap to call on a set of bare blades: two field reads and a return.
+ */
+export function clearCoats(st: EngineState, ts: number, reason: CoatClearReason): boolean {
+  if (st.coatUtility === undefined && st.coatCombat.length === 0) return false
+  st.coatUtility = undefined
+  st.coatCombat = []
+  for (const prefix of COAT_GROUP_PREFIXES) {
+    st.stateTimeline.closeGroupPrefix(prefix, ts, 'censored')
+    noteStateTransition(st, prefix, ts)
+  }
+  // COATS COME BACK ONLY WHEN A NEW COAT LINE IS FOLDED. Nothing here re-arms anything, and no
+  // clear writes a coat observation anywhere — which is what keeps this one-directional against
+  // the class model that triggers it (a coat is ROG evidence at weight 3, comboEvidence.ts, so a
+  // clear that fed the inference back would be a loop).
+  st.log(ts, 'poison', 'info', `☠ blades bare - ${CLEAR_NOTE[reason]}`)
+  return true
+}
+
+/** The one sentence the classification ring shows for each boundary. */
+const CLEAR_NOTE: Record<CoatClearReason, string> = {
+  death: 'your death stripped every coat',
+  classSwap: 'the loadout no longer contains ROG',
+  epoch: 'a character rebirth - the coats were the previous character`s'
+}
+
+/**
  * A tracked PROC BUFF landed on you (proc-analytics §3.2). Gated to `PROC_BUFF_CATALOG` — the
  * same discipline `DISPEL_FAMILY` applies to dispel landings, and for the same reason: feeding
  * 1,926 spells into a span tracker would flood the model with irrelevant states and make every
@@ -135,6 +201,36 @@ export function routeProcBuffApply(st: EngineState, ts: number, target: string, 
   const def = procBuffInCandidates(candidates)
   if (!def) return
   commitState(st, { kind: 'buff', key: idKey(def.name), name: def.name, ts })
+}
+
+/**
+ * A PROC WHOSE ONLY PRINTED EVIDENCE IS THIS LANDING (JOS-246 — procDetect's header carries the
+ * slice evidence and the registry's entry bar).
+ *
+ * A THIRD disjoint gate over the same `buffApply` stream, and it consumes nothing the other two
+ * want: `DISPEL_FAMILY` names a lane on a MOB, `PROC_BUFF_CATALOG` opens a SELF-BUFF SPAN, and
+ * this one counts a FIRING. A spell could in principle sit in two of them; none of the three
+ * short-circuits the others, so that would be two true statements about one line rather than a
+ * conflict.
+ *
+ * IT PAYS THE SAME CAST JOIN EVERY OTHER PROC PAYS. Nothing in the registry is player-castable
+ * today, so the gate never fires on the shipped entry — it is here so the registry cannot grow a
+ * castable spell and start reporting the caster's own casts as procs, which is precisely the
+ * defect JOS-167 was filed for on the damage side.
+ */
+export function routeSelfLandingProc(st: EngineState, ts: number, target: string, candidates: string[]): void {
+  if (target !== 'self') return
+  const def = selfLandingProcIn(candidates)
+  if (!def) return
+  if (st.recentCasts.origin(def.name, ts) !== 'proc') return
+  // ANNOTATION, NEVER DAMAGE (this file's header, world-model law 8): a landing opens no
+  // encounter and extends none. It folds into the fight in progress only while that fight is
+  // FRESH, and always into the zone aggregate — the same two ledgers, in the same order, that
+  // ingest's own `foldBoth` writes.
+  const active = st.stateTimeline.active
+  const fold: SpellProcFold = { spell: def.name, side: 'landing', active }
+  st.zoneAgg.procs.addSpellProc(fold)
+  st.freshEncounter(ts)?.agg.procs.addSpellProc(fold)
 }
 
 /** A tracked proc buff's OWN wears-off line — the rare case where the end is printed, so the

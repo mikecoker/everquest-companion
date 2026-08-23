@@ -17,6 +17,8 @@ import ScienceIcon from '@mui/icons-material/Science'
 import type { AaPace } from '@shared/aaPace'
 import { Tooltip } from '../../lib/Tooltip'
 import { aaPaceCaption, aaPaceTiles, type AaPaceTile } from './aaPaceRows'
+import { BASIS_TITLE } from './rangeStatsRows'
+import { useRateBasis } from '../timeslice/useRateBasis'
 
 /** The leveling feature's existing hero hues, reused rather than re-invented. */
 const ACCENT: Record<AaPaceTile['id'], string> = {
@@ -79,12 +81,21 @@ export interface AaPacePanelProps {
  * rather than a row of em-dashes: the panel is a set of facts, and its presence is one of them.
  */
 export function AaPacePanel({ pace, windowLabel }: AaPacePanelProps): JSX.Element | null {
-  const tiles = aaPaceTiles(pace)
+  // WHICH HOUR (JOS-288), from the app-wide store this tab's basis control writes.
+  const { basis } = useRateBasis()
+  const tiles = aaPaceTiles(pace, basis)
   return (
     <Paper variant="outlined" sx={{ p: 2 }} data-testid="leveling-aa-pace">
       <Typography variant="subtitle2">AA pace</Typography>
-      <Typography variant="caption" color="text.secondary" gutterBottom display="block">
-        {windowLabel} — {aaPaceCaption(pace)}
+      {/* The caption ends in 'over 42m active' — a native title says what that span is (JOS-249). */}
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        gutterBottom
+        display="block"
+        title={BASIS_TITLE[basis]}
+      >
+        {windowLabel} - {aaPaceCaption(pace, basis)}
       </Typography>
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
         {tiles.map((t) => (

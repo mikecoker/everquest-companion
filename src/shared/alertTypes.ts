@@ -6,6 +6,11 @@
 // text is UNCHANGED and every name here is still exported from `shared/types` (which
 // re-exports this module), so no importer moved and no import path changed.
 
+// TYPE-ONLY, and the cycle it closes (alertBanner.ts imports `AlertDef` from here) is erased at
+// compile time — the `TimerGrouping` posture in shared/types.ts, applied. The banner's vocabulary
+// lives beside the code that gives it meaning; this file names the field.
+import type { AlertBannerColor } from './alertBanner'
+
 // ----- Alerts extension (Task #18) -----
 //
 // An alert = a trigger (matched against the live LogEvent stream, a raw log line,
@@ -57,6 +62,12 @@ export type LogEventKind =
   | 'epoch'
   | 'stanceChange'
   | 'invocationChange'
+  // WHAT IS IN YOUR GEMS (JOS-391). `spellMemorize` carries `{spell, done}` (so
+  // `where:{done:'true'}` is the gem actually loading), `spellForget` `{spell}`, and `spellSet`
+  // `{set, action}` — `where:{action:'loaded'}` is "I just swapped my whole bar".
+  | 'spellMemorize'
+  | 'spellForget'
+  | 'spellSet'
   | 'consider'
   // ROGUE POISONS (docs/plans/poison-slow-alerts.md §1). The parser has emitted these three
   // families since Task #64 and the matcher has always been a plain string compare on `kind`
@@ -145,16 +156,37 @@ export type SpeechMode = 'custom' | 'alertName' | 'spellName' | 'spellFirstWord'
  * WHICH audio channel a fired alert uses (decision D5). Absent ⇒ 'sound', which is exactly
  * what every alert written before voice alerts existed meant — so the field is optional and
  * no migration has to touch a def that never asked to speak.
- * 'both' plays the sound first and queues the speech after it; cooldowns are unchanged.
+ *
+ * 'both' IS RETIRED (owner, 2026-08-14: "also remove sound + spoken - too much garbage"). It
+ * stays in the union because it stays READABLE — a store written by an older build, a share
+ * string, an exported def — and `resolveAlertAudio` (shared/speechText.ts) is the one place it
+ * turns back into a channel the app still has. Nothing OFFERS it any more: the two pickers list
+ * `ALERT_AUDIO_CHOICES`, and every write goes through a value of that narrower type. See
+ * `AlertAudioChoice` below for the rule, and never widen a picker back onto this union.
  */
 export type AlertAudio = 'sound' | 'speech' | 'both'
+
+/**
+ * The channels a user can actually CHOOSE — the union every picker offers and every write
+ * produces (JOS-362). `AlertAudio` minus the retired member, expressed as a subtraction so a
+ * future member of the wider union is offered by default rather than silently dropped.
+ */
+export type AlertAudioChoice = Exclude<AlertAudio, 'both'>
 
 /** Per-alert speech configuration. Absent on a def ⇒ treated as `{ mode: 'alertName' }`. */
 export interface AlertSpeech {
   mode: SpeechMode
   /** Required iff mode === 'custom'; capped at MAX_SPEECH_CHARS (shared/speechText.ts). */
   phrase?: string
-  /** Voice override for this alert; absent ⇒ the global default voice (VoicePrefs.voiceId). */
+  /**
+   * RETIRED (JOS-362) — a per-alert voice override, now IGNORED everywhere it is read.
+   *
+   * The owner's ruling: "our settings shouldn't store which voice per alert, only the preferences
+   * should (within Voice (spoken))". A stored id is tolerated so old stores, exports and share
+   * strings still load, and it is dropped the next time that alert is saved (`speechFieldsFor`,
+   * `speechFieldsOf` — both rebuild this block without it). Nothing reads it: the voice comes from
+   * `VoicePrefs.voiceId` at speak time. Do not re-introduce a reader.
+   */
   voiceId?: string
 }
 
@@ -201,14 +233,30 @@ export interface SpeechVoice {
  * Why a speech request could not be served. These are STATES, not errors — the UI says
  * what is missing instead of failing silently:
  *  - 'engine-not-installed' → the selected tier has no model/voices on disk yet.
+ *  - 'engine-failed'        → the model IS on disk and synthesis still produced no audio.
+ *  - 'engine-unloadable'    → the model is on disk and the machine cannot LOAD the engine at
+ *                             all: the native module's `dlopen` failed (ERR_DLOPEN_FAILED).
  *  - 'not-implemented'      → this build ships the channel but not the engine behind it.
  *  - 'invalid-request'      → the handler rejected the payload (see ipc/speech.ts).
+ *
+ * THE LAST TWO ARE JOS-247, AND THEY EXIST BECAUSE ONE OF THEM WAS BEING TOLD AS THE FIRST.
+ * Every failure of the downloaded tier used to answer 'engine-not-installed', including a user
+ * whose 115 MB download had finished perfectly and whose worker thread then died on startup.
+ * The renderer degrades to a Windows voice on any of these (that seam is unchanged and is the
+ * point), but it can only SAY what happened if the reason is true — and "not downloaded" is a
+ * different sentence, with a different remedy, from "downloaded, and this PC cannot run it".
+ *
+ * They are separate members rather than one reason plus a message because a message is free
+ * text crossing IPC on an error path; a closed union carries the same fact and the renderer
+ * owns every word the user reads.
  *
  * There is no 'disabled' member any more: it meant "voice is switched off in preferences", and
  * that switch no longer exists (see VoicePrefs). Nothing ever returned it.
  */
 export type SpeechUnavailableReason =
   | 'engine-not-installed'
+  | 'engine-failed'
+  | 'engine-unloadable'
   | 'not-implemented'
   | 'invalid-request'
 
@@ -252,14 +300,16 @@ export type SpeechInstallResult =
  */
 export interface SpeechInstallProgress {
   engine: SpeechEngine
-  phase: 'checking' | 'downloading' | 'verifying' | 'done' | 'failed'
+  /** `waiting` is a rate-limited backoff (JOS-420) — minutes long, and a bar that is waiting looks
+   *  exactly like a bar that is stuck unless it says which it is. */
+  phase: 'checking' | 'downloading' | 'verifying' | 'waiting' | 'done' | 'failed'
   /** File currently being worked on, when one is ('kokoro-v1.0.int8.onnx'). */
   asset?: string
   /** Bytes secured across the whole install so far. */
   received: number
   /** Total bytes the install will move (0 while unknown). */
   total: number
-  /** Human-readable detail for a 'failed' phase. Never shown for the others. */
+  /** Human-readable detail for a 'failed' or 'waiting' phase. Never shown for the others. */
   message?: string
 }
 
@@ -311,6 +361,9 @@ export interface AlertDef {
    *
    * By default every alert's audio is throttled ACROSS alerts — three buffs fading at once is
    * one audio alert, not three — because a smear of simultaneous sounds carries less than one.
+   * Since JOS-347 that window folds by what would be HEARD (the pack sound plus the spoken
+   * words), so the three buffs are still one sound while four alerts carrying four different
+   * voice lines are four things to hear, each heard once inside the window.
    * `true` marks an alert that must never be swallowed by that window (a charm break, a raid
    * call): it always plays, and it does not itself occupy the window. Absent ⇒ throttled,
    * which is the default the owner asked for and the meaning every def written before this
@@ -318,6 +371,65 @@ export interface AlertDef {
    * round-trips the key untouched).
    */
   alwaysPlay?: boolean
+  /**
+   * THE EARLY WARNING OFFSET, IN SECONDS (JOS-216) — "warn me 10 seconds before the mez drops".
+   *
+   * It MOVES this alert's one fire; it does not add a second one. A def with an offset does not
+   * sound when its trigger matches: the match ARMS a warning against the timer row that landing
+   * produced, and the alert fires `earlyWarnSec` seconds before that row's estimated end. One
+   * landing is one warning, and a debuff that ends early (a break line, the mob dying, a zone)
+   * takes its pending warning with it — the row is gone, so there is nothing left to warn about.
+   *
+   * AND WHEN THE TRIGGER IS THE ENDING, THE OFFSET ARMS FROM THE ROW INSTEAD (JOS-235). For a
+   * break-family def — the per-spell `breaks`/`charmBreaks` alerts, the "Mez / root broke" and
+   * "Charm break" groups, a slow wearing off — the trigger and the end are the SAME line, so
+   * arming on it resolved against a world that line had already emptied and the alert went
+   * SILENT, both early and at the break. Such a def instead arms when a row it would announce the
+   * break of LANDS, and it still fires on its own trigger: one landing yields one firing, the
+   * warning when the hold survives to the deadline (the at-break firing for that landing is then
+   * suppressed), the break itself when it ends sooner. An early break is never silent.
+   *
+   * IT CONSUMES THE EXISTING ESTIMATE AND TRACKS NOTHING ITSELF. The end it counts back from is
+   * `shared/buffTimers.ts buildTimerRows`' countdown row — the same number the debuffs overlay
+   * draws — so a landing the model can state no duration for arms nothing at all rather than
+   * warning against an invented one (world-model law 1; the rule and its honest limits are in
+   * shared/earlyWarning.ts, the evaluator is main/modules/alerts.ts).
+   *
+   * Bounded by MIN/MAX_EARLY_WARN_SEC. Absent ⇒ fire on the trigger, which is what every def
+   * written before this existed already meant — so it is additive, needs no store migration, and
+   * an ordinary alert still saves byte-identically (import dedupe hashes these fields).
+   */
+  earlyWarnSec?: number
+  /**
+   * DOES THIS ALERT PUT A LINE ON THE ALERT BANNER OVERLAY (JOS-378)?
+   *
+   * ABSENT MEANS TRUE, AND THAT IS WHY THERE IS NO STORE MIGRATION. Every def in every existing
+   * install was written before this key existed, so an absent key has to mean the useful thing:
+   * switching the overlay on shows you your alerts rather than an empty strip you then have to
+   * tick eighty boxes to fill. `false` is the taming direction — the owner's ruling is that not
+   * every alert should show, and this switch is how you say which. Readers go through
+   * `alertShowsOnScreen` (shared/alertBanner.ts); the key is written only when it is false, so a
+   * def that shows saves the bytes it always did and import dedupe keeps matching it.
+   *
+   * IT IS NOT THE WHOLE GATE. The overlay being ON is the other half, checked in main — so an
+   * install that never turns the banner on has this field mean nothing at all.
+   */
+  showOnScreen?: boolean
+  /**
+   * WHAT THE BANNER PRINTS INSTEAD (JOS-378) — the optional "On-screen text" override.
+   *
+   * ABSENT OR EMPTY MEANS "print the alert's NAME" (JOS-380): `alertBannerText` falls back to
+   * `name`, which is the short thing the user wrote and already reads in the list. This field
+   * exists for the case where the name is not what you want on screen — a name written to be
+   * filed under ("Charm break - pet") against a line written to be seen ("CHARM BROKE").
+   */
+  bannerText?: string
+  /**
+   * WHICH SWATCH the banner line is drawn in (JOS-378) — the 2026-08-06 report's "controllable
+   * color". Absent ⇒ the overlay's default; the closed six-value union and its hexes live in
+   * shared/alertBanner.ts, which is also where the argument against a free colour picker is.
+   */
+  bannerColor?: AlertBannerColor
 }
 
 /** Global sound preferences (main-owned, persisted). */
@@ -326,6 +438,23 @@ export interface AlertPrefs {
   globalVolume: number
   /** When true, no alert sounds play (the player still receives deltas). */
   muted: boolean
+  /**
+   * ALWAYS PLAY EVERY ALERT — the per-alert `AlertDef.alwaysPlay` opt-out, raised to a global
+   * one (JOS-222, owner 2026-08-11: "a preference to always play for all alerts").
+   *
+   * It is the SAME bypass, applied to every def rather than to the ones the user ticked: the
+   * cross-alert coalescing window (renderer/features/alerts/audioThrottle.ts) is skipped and
+   * nothing occupies it, so four buffs fading together are four sounds — four copies of the SAME
+   * sound, which the window would have folded into one whatever they were named (JOS-347). That
+   * IS the smear the throttle exists to prevent — which is why it STARTS OFF and stays off
+   * unless the user says otherwise. Someone who would rather hear everything twice than miss one thing gets to say
+   * so in one place instead of ticking a box on every alert they ever add.
+   *
+   * Absent ⇒ false ⇒ today's behavior, which is why this is additive: the key is written only
+   * when it is true, so a store where the throttle is on is byte-identical to one written
+   * before this existed, and every def's own `alwaysPlay` still means exactly what it meant.
+   */
+  alwaysPlayAll?: boolean
 }
 
 /** One alert that fired, carried in the alerts module delta. */
@@ -334,6 +463,21 @@ export interface FiredAlert {
   ts: number
   /** The text that matched (raw line for raw/event triggers), for debugging/UI. */
   matchedText: string
+  /**
+   * WHERE THIS FIRE CAME FROM, when it did not come from the log (JOS-380).
+   *
+   * `'app'` marks the ECHO of a renderer-evaluated signal: the player fired the alert itself
+   * (`fireAppSignal`), told main so the recent-fires history stays the one source of truth, and
+   * main queued that record onto the same delta the log fires ride. Absent on every main-side
+   * fire, which is nearly all of them.
+   *
+   * IT EXISTS SO THE ECHO IS NOT A SECOND FIRING. The player skips playback — sound, speech AND
+   * banner — for a marked record, while history and the event feed still see it. Without the mark
+   * every app-signal alert plays twice; audio coalescing (same identity within 1.5 s) swallowed
+   * the second one for the life of the feature, and the banner, which is outside that gate by
+   * ruling, is what finally showed it: two lines for one raid target.
+   */
+  origin?: 'app'
   /**
    * SPELL CONTEXT for the speech modes (docs/plans/voice-alerts.md §1) — the triggering
    * spell's DISPLAY name with its rank suffix INTACT ("Mesmerization III"), exactly as the
@@ -346,6 +490,45 @@ export interface FiredAlert {
    * `SPELL_FIELD_BY_KIND` (main/modules/alerts.ts). Never synthesized, never guessed.
    */
   spell?: string
+  /**
+   * NAMED REGEX CAPTURES from the condition that matched (JOS-103) — the values a `custom`
+   * phrase's `{token}`s resolve to, so a spoken alert can say "Puma on Fail".
+   *
+   * PLUS THE ONE AUTO TOKEN (JOS-353): `target`, the entity the matched event says the spell is
+   * affecting, filled in with no capture group declared and no regex written. It is carried ONLY
+   * when the def's own phrase writes `{target}`, and a group the pattern declared under that name
+   * always wins. The closed table of which field of which event kind answers it, and the security
+   * argument for the one exemption to "a token is a declaration", are in shared/alertTargets.ts.
+   *
+   * ATTACKER-INFLUENCED BY CONSTRUCTION, and already defanged. The keys come from the def's own
+   * pattern (`(?<player>…)`) but the VALUES come out of a log line, which carries other players'
+   * chosen names and, for the chat families, text a stranger typed. Everything here has been
+   * through `sanitizeCapture` (shared/alertCaptures.ts): the shared sanitizers have removed ANSI
+   * sequences, control characters and the BiDi/invisible class, and each value is capped at
+   * MAX_CAPTURE_CHARS. Read shared/alertCaptures.ts's threat model before consuming this
+   * anywhere new — it is the enforcement point, and it explains why a consumer still must not
+   * treat these as trusted text.
+   *
+   * ABSENT whenever the matching condition declared no named group, or captured nothing that
+   * survived sanitization — an absent key is the honest JSON encoding of "this pattern named
+   * nothing", and it keeps the delta byte-identical for the alerts that capture nothing (which
+   * is nearly all of them).
+   */
+  captures?: Record<string, string>
+  /**
+   * WHEN THE THING THIS FIRING WARNS ABOUT IS DUE (ms epoch) — the countdown half of JOS-378.
+   *
+   * Present ONLY on an EARLY-WARNING firing (`AlertDef.earlyWarnSec`, JOS-216/235), and it is the
+   * deadline the scheduler counted back from rather than a number computed here: `nowMs + sec`
+   * would be a guess, and the row's own estimated end is what the debuffs overlay is already
+   * drawing. A consumer can therefore say "Celerity fades in 12s" without inventing anything.
+   *
+   * ABSENT on every ordinary firing, which is nearly all of them — and absent on an EARLY BREAK
+   * too (JOS-235: the hold ended before its warning, so the alert fires on its own trigger and
+   * there is no deadline left). That is the honest encoding of "there is nothing to count down",
+   * and it keeps the delta byte-identical for every alert without an offset.
+   */
+  dueAt?: number
 }
 
 /** One recorded fire in an alert's recent-fires ring buffer (Task #22). */
@@ -492,16 +675,23 @@ export interface RegistryListResult {
 /** Progress push over `packs:progress` while a pack installs. */
 export interface PackInstallProgress {
   name: string
-  phase: 'downloading' | 'extracting' | 'converting' | 'done' | 'error'
+  /** `waiting` is a retry's backoff (JOS-420) — a stopped bar and a bar waiting out a rate limit
+   *  look identical, so the wait says so and names its own length in `message`. */
+  phase: 'downloading' | 'extracting' | 'converting' | 'waiting' | 'done' | 'error'
   /** 0..100 during downloading, when a content-length is known. */
   percent?: number
   message?: string
+  /** This is a "later", not a "broken" — the row reads it as ordinary text rather than an error
+   *  (JOS-420: a rate limit is the host being busy, and the pack is fine). */
+  retryable?: boolean
 }
 
 /** Reply of packs:install / packs:uninstall. */
 export interface PackMutationResult {
   ok: boolean
   error?: string
+  /** The install can simply be clicked again — set when a rate limit ended the run (JOS-420). */
+  retryable?: boolean
 }
 
 // ----- Registry pack PREVIEW (Task #31) -----

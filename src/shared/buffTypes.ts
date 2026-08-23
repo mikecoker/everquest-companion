@@ -38,6 +38,31 @@ import type { ClassAbbr } from './classCombo'
  */
 export type BuffClass = 'buff' | 'debuff'
 
+/**
+ * WHERE A DURATION ESTIMATE CAME FROM — the provenance of every countdown this app draws
+ * (buffsStats.ts `estimateFor` is the one place that decides it).
+ *
+ *   'db'       — the spell-database baseline held: nothing observed beat it, and nothing
+ *                observed corroborated a shorter answer.
+ *   'observed' — a logged cycle ran LONGER than the baseline (AA/focus extension) and won.
+ *   'cluster'  — the app's own clean cycles agree the spell is SHORTER than the baseline says,
+ *                and there are enough of them to say so (JOS-212, owner ruling 2026-08-12).
+ *                It is a separate label from 'observed' on purpose: the two answers are read off
+ *                the same samples but they make opposite claims about the database row, and a UI
+ *                that said "longer than the baseline" for both would be lying about one of them.
+ *   'deathBound' — a mob DIED still carrying the debuff and the log never printed a wear-off for
+ *                it, so the app knows the spell lasted AT LEAST that long and does not know what
+ *                it would have lasted (JOS-379, owner ruling 2026-08-15). It is the only source
+ *                that is a BOUND rather than an answer, which is why it is not spelled
+ *                'observed': a surface that draws it must say "at least", the way
+ *                `shared/respawn.ts` prints its death-gap estimates with a `≤`.
+ *
+ * Every consumer that is not asking specifically about the DB floor should treat 'cluster' the
+ * way it treats 'observed' — both are this caster's own measured cycles. 'deathBound' is the one
+ * that needs its own sentence, because the claim it makes is weaker than either.
+ */
+export type EstimatorSource = 'db' | 'observed' | 'cluster' | 'deathBound'
+
 /** Per-spell mined duration statistics (milliseconds). */
 export interface BuffStat {
   /** spell name (display casing of the first observed cast/fade). */
@@ -62,13 +87,15 @@ export interface BuffStat {
    */
   dbDurationMs?: number | null
   /**
-   * The value the estimator uses for the remaining-time bar (Task #34): the DB duration
-   * when known, else the recency-weighted MAX of mined samples. Provenance in
-   * `estimatorSource`. Null when neither is available (n=0, no DB duration).
+   * The value the estimator uses for the remaining-time bar (JOS-117): max(DB baseline, recent
+   * observed max) — the DB is a FLOOR that below-base click-off samples cannot pull under, and a
+   * logged cast that beat the floor wins. Since JOS-212 the floor is no longer absolute: a
+   * corroborated cluster of clean below-floor cycles removes it (see {@link EstimatorSource}).
+   * Provenance in `estimatorSource`. Null when neither is available (n=0, no DB duration).
    */
   estimateMs?: number | null
-  /** Where `estimateMs` came from: 'db' | 'observed'. */
-  estimatorSource?: 'db' | 'observed'
+  /** Where `estimateMs` came from — see {@link EstimatorSource}. */
+  estimatorSource?: EstimatorSource
   /**
    * The newest event ts (ms epoch) this spell was seen — the last castBegin / apply / fade
    * involving it (Task #45). The RECENCY signal the suggested-alerts wizard sorts by (recent
@@ -79,9 +106,52 @@ export interface BuffStat {
 
 /** A currently-active (landed, not yet faded) buff INSTANCE = (spell, target entity). */
 export interface ActiveBuff {
+  /**
+   * THE SPELL'S IDENTITY, and since JOS-238 that means the DB's own display name whenever the
+   * model resolved which spell this is — never the ranked text one cast line happened to spell.
+   *
+   * It used to be the cast line's when a cast ANCHOR resolved an ambiguous landing, and the cost
+   * was the whole reason that ticket exists: `Swift Like the Wind IV` travelled from the anchor
+   * into this field, into the learner's display, and into the derived `buffExpired`, so a
+   * suggested wears-off alert — which pins the bare catalog name, `Swift Like The Wind` — could
+   * never fire for a spell cast at rank II or above. The rank is now {@link castName}.
+   *
+   * A FAMILY the anchors could not narrow still names every candidate here (`A / B`) and says so
+   * with `candidates`; that is an honest absence of an identity, not a second spelling of one.
+   */
   spell: string
+  /**
+   * The RANKED name the cast line spelled (`Swift Like the Wind IV`), when the model resolved this
+   * instance from a cast anchor AND the log's spelling says something `spell` does not (JOS-238).
+   *
+   * DISPLAY ONLY, and deliberately so: nothing keys, matches, learns or alerts off this field. It
+   * exists because the rank is genuinely information — the cast line is the ONLY line in the whole
+   * family that carries one — and losing it entirely would give back a fact JOS-126 asked for. A
+   * surface that wants to show "which rank is up" reads this; everything that wants to know WHICH
+   * SPELL is up reads `spell`.
+   */
+  castName?: string
   /** buff vs debuff — a SPELL property (Task #35), not who it's on. */
   cls: BuffClass
+  /**
+   * True when the spell CALMS its target — the calm/lull line (JOS-213): a spell whose effect
+   * happens to a MOB's aggression. Absent for every other spell.
+   *
+   * It is a SECOND, ORTHOGONAL fact about the spell, not a correction to `cls`. What it adds is
+   * that the thing the spell does is a mob-state effect, which is what routes its timer to the
+   * DEBUFFS overlay beside the slows and the mez holds (shared/buffTimers.ts `timerRowSurface`)
+   * instead of leaving an aggro clock among the player's own buffs. Filled by main from the DB
+   * roster (`data/spellDb.ts spellCalmsTarget`), and — like `cls` since JOS-140 ruling 8 — never
+   * resolved by looking at who the spell landed on.
+   *
+   * JOS-213 WROTE THIS FIELD FOR A `cls: 'buff'` ROW AND IT IS NO LONGER ONE. The owner ruled
+   * (JOS-413, 2026-08-19) that a lull is a DEBUFF, so the family's `cls` is 'debuff' now and the
+   * row reaches the debuffs window on its kind. The field is kept because it is a true, derived,
+   * audited statement about the spell, because it is the guard that keeps a friendly buff off that
+   * window, and because it is still the answer for a calm-line spell the polarity ruling has no row
+   * for — not because the routing still depends on it alone.
+   */
+  calmsTarget?: true
   /**
    * True when this instance is on the PLAYER (self). False when it's on some other
    * entity (a pet, another player, or — for a debuff — a hostile mob). The UI shows
@@ -90,8 +160,7 @@ export interface ActiveBuff {
   self: boolean
   /**
    * The bound entity disposition (Task #32), kept for the module's own censor logic:
-   * 'self' | 'summoned' | 'charmed' | 'hostile'. Undefined only for a provisional entry
-   * cast before its target was known. The UI groups by `self`/`target`, not by this.
+   * 'self' | 'summoned' | 'charmed' | 'hostile'. The UI groups by `self`/`target`, not by this.
    */
   disposition?: 'self' | 'summoned' | 'charmed' | 'hostile'
   /** ts (ms) the cast landed / was last refreshed. */
@@ -116,32 +185,75 @@ export interface ActiveBuff {
    */
   inferredTarget?: boolean
   /**
-   * True while this is an OPTIMISTIC (not-yet-confirmed) landing (Task #30): shown
-   * the instant `castBegin` fires so a buff is visible immediately, before the 15s
-   * land timeout / next-cast / fade confirms it. A fizzle/interrupt retracts a
-   * provisional entry; confirmation clears the flag. The UI dims provisional rows
-   * and shows a subtle "casting…" hint.
+   * Where `estimatedMs` came from (JOS-117) — see {@link EstimatorSource}. `undefined` means no
+   * estimate at all (n=0 and no DB duration).
    */
-  provisional?: boolean
+  durationSource?: EstimatorSource
   /**
-   * Where `estimatedMs` came from (Task #34):
-   *   'db'       — the authoritative wiki duration (spells.json). The prior/truth.
-   *   'observed' — the recency-weighted MAX of mined samples (no DB duration known).
-   *   undefined  — no estimate (n=0 and no DB duration).
+   * THE BUFFS/TIMER OVERLAY's countdown duration (ms). Since JOS-117 this is the SAME estimator the
+   * Buffs TAB uses — max(DB floor, recent observed max) — so both surfaces agree; a below-base
+   * click-off no longer becomes the overlay number (JOS-114's most-recent-sample rule did exactly
+   * that, showing Swift at ~28m for a 33:36 buff) and a focus-extended duration is honoured. Null
+   * for a permanent buff, or when there is no floor and no sample (the overlay counts UP). See
+   * buffsStats.ts `estimateFor` and shared/buffTimers.ts `timerModeOf`.
    */
-  durationSource?: 'db' | 'observed'
+  overlayDurationMs?: number | null
+  /** Where `overlayDurationMs` came from — see {@link EstimatorSource}. */
+  overlaySource?: EstimatorSource
   /**
-   * True when this buff is PERMANENT (Task #34): an illusion-flagged spell the player
-   * self-cast while the Permanent Illusion AA is owned (self-cast illusions last forever
-   * on the player). The UI shows "permanent · illusion AA" and no countdown.
+   * True when this buff NEVER EXPIRES, for either of the two reasons `permanentSource` names
+   * (Task #34's Permanent Illusion AA; JOS-215's permanent SPELLS). The UI draws no countdown, the
+   * hygiene sweep never retires it, and no duration sample is ever paired from it — only a
+   * wear-off, a death or a zone can take it off the board.
    */
   permanent?: boolean
   /**
+   * WHY it is permanent, so the row can say so without guessing (JOS-215).
+   *
+   *   'spell'       — the spell database states `Permanent` for this line. 62 rows, all Self:
+   *                   Yaulp, the Shielding ladder, the blade coats, Instrument of Nife, the wolf
+   *                   forms. Nothing about the player's AAs is involved.
+   *   'illusion-aa' — the Permanent Illusion AA (Task #34): an illusion-flagged spell the player
+   *                   self-cast at or after buying it, whose OWN duration is finite.
+   *
+   * Present only when `permanent` is true. It is DERIVED in main from the same DB row the
+   * permanence was read off (buffsView.ts), never plumbed through the landing, so the two can not
+   * disagree. The distinction is the whole of the JOS-215 copy fix: the row used to hardcode
+   * "permanent · illusion AA" and said it about a rogue's poison coat.
+   */
+  permanentSource?: 'spell' | 'illusion-aa'
+  /**
    * True when this active was applied by an EXACT chat MESSAGE match (Task #34) — a
-   * msg_cast_on_you / msg_cast_on_other / self-heal-by-buff line — rather than inferred
-   * from cast timing. Message-driven applies are confident (no provisional dimming).
+   * msg_cast_on_you / msg_cast_on_other / self-heal-by-buff line. Since JOS-118 this is the ONLY
+   * way an instance is opened, so it is true on every active the model produces; it is kept as
+   * the explicit statement that a row rests on a line the log actually printed.
    */
   messageDriven?: boolean
+  /**
+   * HOW MANY OF THAT NAME ARE HOLDING THIS SPELL (JOS-140 ruling 7). Absent or 1 for the ordinary
+   * case; 2+ when a round landed on several entities that share a display name.
+   *
+   * EQ stamps are second-resolution and print no instance identifier, so one AE cast landing on
+   * five mobs called `a wan ghoul knight` is five byte-identical lines in one second — the model
+   * cannot separate them and does not pretend to. It keeps a landing each and draws ONE row with a
+   * count chip, because five identical rows with five identical clocks is noise. `startedTs` is
+   * the OLDEST of them, which is the one the next anonymous wear-off will close.
+   */
+  count?: number
+  /**
+   * WHOSE cast this is: absent for your own (the overwhelming case), else the allowlisted external
+   * caster's name (shared/buffTrust.ts). It is what the row's countdown is keyed on — a duration
+   * is a fact about a caster's AAs and focus, so their estimate is theirs and never pooled with
+   * yours (JOS-140 ruling 4).
+   */
+  caster?: string
+  /**
+   * Present only when the landing sentence is shared by several spells and the anchor could not
+   * narrow it — a Quick Buff burst names no spell, so its landings can be admitted as YOURS
+   * without being resolvable to one (JOS-140). `spell` then reads as the joined family and the UI
+   * shows the ~ chip; a family instance mints nothing into the learner.
+   */
+  candidates?: string[]
 }
 
 // ----- Observed-message overlay (Task #36) -----
@@ -228,6 +340,13 @@ export interface SpellEntry {
   durationMs: number | null
   /** Casting time in ms (from casting_time seconds), when present. */
   castTimeMs?: number
+  /**
+   * Recast (re-use) time in ms (from `recast_time` seconds), when the page states one — schema 3
+   * (owner ask 2026-08-22: the re-use timer was invisible and absent from every dps figure; the
+   * template had carried the field all along, e.g. Garrison's Mighty Mana Shock `1.50 sec`, and
+   * the scrape simply never read it).
+   */
+  recastMs?: number
   /** target_type ("Single Friendly (or Self)", "Single Hostile", …). */
   targetType?: string
   /** spell_type ("Beneficial" / "Detrimental"). */
@@ -244,6 +363,46 @@ export interface SpellEntry {
   illusion: boolean
   /** mana cost, when present. */
   mana?: number
+  /**
+   * THE WIKI'S NUMBERED EFFECT LIST, VERBATIM (JOS-251) — one string per `{{SpellSlotRow}}` on
+   * the page, in the order the page prints them:
+   *
+   *   ["Charm (up to L37)", "Decrease Magic Resist by 4 (L27) to 8 (L60)"]
+   *
+   * RAW, and deliberately so. Wiki markup is stripped exactly the way every other field's text
+   * is (`clean()` in the scrape — links, bold, tags), and NOTHING else is normalised: no
+   * lower-casing, no re-ordering, no interpretation. The two phrasings the wiki uses for the same
+   * effect ("Charm up to level 37" and "Charm (up to L37)") both survive here as written, because
+   * the file's job is to record what the wiki said. What the strings MEAN is a separate,
+   * deletable layer — `src/main/data/spellEffectClass.ts` — for the reason the corrections overlay
+   * exists: a scrape rewrites this file wholesale, so anything we conclude must not live in it.
+   *
+   * Absent when the page carries no slot list at all. The slot NUMBER is not kept: it is the
+   * list's own ordinal for every page but the seven that write `?`, and no reader needs it.
+   */
+  effects?: string[]
+  /**
+   * The bard pages' `Enhanced by instrument?` row, verbatim ("Yes", "No", "Required",
+   * "Yes (just the resists debuff)"). It is a row of the same slot table but is not an effect, so
+   * it gets its own field rather than polluting `effects`. Absent on the ~95% of pages (every
+   * non-song) that have no such row.
+   */
+  instrumentEnhanced?: string
+  /**
+   * THE WIKI BADGES THIS SPELL'S PAGE OUT OF ERA (JOS-393) — DERIVED AT LOAD, never in spells.json.
+   *
+   * `src/main/data/spellEra.ts` joins it from the era sidecar (`pageEra.json`, written by
+   * `scripts/scrape-page-era.ts` off eqlwiki's own `action=eqlmetadata` predicate — the same one
+   * that decides whether the wiki draws its red pill on a link). The spell scrape rewrites
+   * `spells.json` wholesale, so a verdict from a DIFFERENT scrape cannot live in it; the field is
+   * attached by the loader, exactly as the corrections and removals overlays are applied there.
+   *
+   * `true` OR ABSENT, and never `false`. The endpoint answers `false` both for a page it files as
+   * classic and for a page nobody has classified, and the table is silent for a name it was never
+   * asked about — so the only thing worth carrying is the positive claim. A surface reads an absent
+   * field as "nothing to say", which is exactly what it is.
+   */
+  outOfEra?: boolean
 }
 
 /** The committed spells.json shape: metadata + the spell list. */
@@ -251,6 +410,15 @@ export interface SpellDbFile {
   scrapedAt: string
   count: number
   spells: SpellEntry[]
+  /**
+   * Scrape schema version — bumped when the scraper starts capturing a new per-spell field, so a
+   * consumer can tell an old committed file from a new one instead of guessing from absent keys.
+   * 3 = recast time (2026-08-22). 2 = the effect list + instrument flag (JOS-251). Absent means 1
+   * (pre-JOS-251).
+   */
+  schema?: number
+  /** How many spells carry a non-empty `effects` list — scrape health at a glance. */
+  withEffects?: number
 }
 
 // ----- Suggested-alerts wizard (Task #38) -----
@@ -265,12 +433,97 @@ export interface SpellDbFile {
 /** Which suggested-alert templates a spell supports (a template is offered only when its
  *  trigger can actually fire — gated by the DB fields the parser needs). */
 export interface SpellTemplateFlags {
-  /** Beneficial + has a wears-off message → "wears off you" (kind: buffWearOff). */
+  /** Beneficial-class + has a wears-off message → "wears off you" (buffExpired ∪ buffWearOff). */
   wearsOff: boolean
-  /** Beneficial → "fades on your pet/target" (kind: buffFade). */
+  /** Beneficial-class → "fades on your pet/target" (kind: buffFade). */
   fade: boolean
-  /** Detrimental + has a cast-on-other message → "lands on a target" (kind: buffApply). */
+  /**
+   * Beneficial-class + a cast-on-YOU message → "lands on you" (kind: buffApply, target 'self').
+   *
+   * THE HOLE IT FILLS (JOS-318). `lands` is DETRIMENTAL-only — it was written for a debuff landing
+   * on a mob and gates on the cast-on-OTHER sentence — so a beneficial spell had no landing chip at
+   * all, even though the parser emits a perfectly good `buffApply {target:'self'}` for it off the
+   * DB's `msgCastOnYou`. A druid who clicked everything the wizard offered for `Flowering Heal` got
+   * `fade` (which needs a wear-off line the spell does not print) and `landsOnOther` (which fires
+   * when it lands on somebody ELSE), and nothing at all for the case they were asking about: the
+   * heal landing on THEM. That is report 3JM1ZD, and it is the same shape as report
+   * 01KZZXVW888E09C088QBRD5HCD one spell along the same shaman ladder.
+   *
+   * The gate is the cast-on-you message and nothing else, because that message IS the parser's key:
+   * `SpellDb.castOnYou` is an exact-text map built from it, so a spell that has one can emit the
+   * event and a spell that does not never can. Placeholder stubs are already `undefined` by the time
+   * this is read (spellDb.ts `applyPlaceholderMessages`), so a `You .` cannot buy a chip.
+   */
+  landsOnYou: boolean
+  /**
+   * The wiki's effect list says the spell HEALS OVER TIME → "while it is healing" (kind: `heal`,
+   * pinned to the spell name).
+   *
+   * THE ONE LINE A HoT CANNOT FAIL TO PRINT (JOS-318). `<healer> healed <target> over time for N hit
+   * points by <Spell>.` names the spell verbatim and WITHOUT its rank, so this trigger is immune to
+   * both failure modes the two reports hit: a wiki row whose landing/wear-off sentences are missing
+   * or wrong (Slugs Healing states neither — its scrape says `You .`), and a spell that has been
+   * upgraded since the alert was written (the cast line says `Slugs Healing VII`, this line says
+   * `Slugs Healing`). Every other spell template rests on a sentence the wiki had to get right.
+   *
+   * Gated on the DERIVED effect class (`spellEffectClass.ts healOverTime`) plus a beneficial nature,
+   * not on `spellType`: the shaman ladder is typed `Heal Over Time` but `Tortoises Healing` and the
+   * whole druid seeded-heal family are typed plain `Beneficial`, and reading what the spell DOES
+   * finds all of them. Measured: of the 19 spells the owner's log prints a tick for, the roster
+   * reads 18 — the miss is not in spells.json at all.
+   */
+  healsOverTime: boolean
+  /**
+   * Detrimental-class + a cast-on-other message the parser can actually MATCH → "lands on a
+   * target" (kind: buffApply). The second half of that gate is not decoration: the message has
+   * to yield a `castOnOtherSuffix`, or no buffApply is ever emitted for the spell and the
+   * suggestion is dead on arrival (spellDb.ts `suggestionTemplates`).
+   */
   lands: boolean
+  /**
+   * Has a cast-on-other message whose SUBJECT can be turned into a named capture → "lands on
+   * someone, and say who" (a `raw` trigger with `(?<player>…)`, JOS-103).
+   *
+   * Deliberately NOT gated on beneficial/detrimental. It is the only template that covers a
+   * spell somebody else casts ON you or your group — Spirit of the Puma is the reported case —
+   * and "who did this land on" is a question worth asking of a buff and a debuff alike.
+   */
+  landsOnOther: boolean
+  /**
+   * A CROWD-CONTROL spell the parser's `ccSpell` roster claims → "the hold broke" (kind: `cc`
+   * with `refresh:true`, pinned to this spell's name).
+   *
+   * THE HOLE IT FILLS (JOS-161). `wearsOff` is beneficial-only and rests on the derived
+   * `buffExpired`, which the buffs module synthesizes ONLY from an authoritative wear-off
+   * message. A mez on a mob has neither: `Your <Song> spell has worn off of <mob>.` is claimed
+   * by `classifyWornOff` and becomes a `cc` refresh, and the silent hygiene cull that retires an
+   * unwitnessed hold emits nothing on purpose. So a bard who reached for "alert me when this
+   * expires" found no template that could fire and no trigger they could hand-write that would —
+   * which is the report this ticket came from, and it was true of every mez and root in the game.
+   * The curated "Mez / root broke" GROUP already fires on this event; what did not exist was the
+   * per-spell version, and it is the per-spell version a user goes looking for by name.
+   *
+   * The roster is the gate for the usual reason: the flag is a CLAIM the alert can fire, and a
+   * spell `ccSpell` does not match parses to `buffFade` instead, where this trigger never sees it.
+   */
+  breaks: boolean
+  /**
+   * A CHARM spell the parser's `charmSpell` roster claims → "the charm broke" (kind: `uncharm`,
+   * pinned to this spell's name).
+   *
+   * THE TWIN OF `breaks`, AND WHY IT IS A SEPARATE FLAG (JOS-200). The same sentence — `Your <X>
+   * spell has worn off of <mob>.` — becomes `uncharm` for a charm and `cc {refresh:true}` for a
+   * mez/root, so the two rosters answer to two different EVENTS and one template cannot author
+   * both triggers. Until now only the mez half had a per-spell offer: the curated "Charm break"
+   * GROUP fired for every charm at once, but a user who went looking for their charm BY NAME —
+   * which is what all three JOS-200 reporters did, and what a bard reaching for Solon's Bewitching
+   * Bravura does — found nothing. An enchanter searching "Allure" had the identical hole.
+   *
+   * Same gate argument as `breaks`: the flag is a CLAIM the alert can fire, and a spell
+   * `charmSpell` does not match parses to `cc` or `buffFade` instead, where this trigger never
+   * sees it.
+   */
+  charmBreaks: boolean
 }
 
 /** One catalog row: a spell the wizard can build alerts for. */
@@ -285,6 +538,29 @@ export interface SpellCatalogEntry {
   illusion: boolean
   /** Which one-click alert templates this spell supports. */
   templates: SpellTemplateFlags
+  /**
+   * The `raw` trigger pattern the `landsOnOther` template uses, with the subject as a named
+   * capture — e.g. `^\[[^\]]*\] (?<player>[A-Za-z' \`]{1,48}) growls with the spirit of the puma\.`
+   * Present exactly when `templates.landsOnOther` is true.
+   *
+   * AUTHORED IN MAIN, not in the renderer, and that is deliberate. The anchor and the name
+   * character class are the two things that keep this pattern unreachable through a chat line
+   * (shared/alertCaptures.ts `subjectCapturePattern`), so the pattern is derived ONCE, beside the
+   * DB it is derived from, and travels to the wizard as a finished string. A renderer that
+   * rebuilt it from a message would be a second implementation of a security property.
+   */
+  castOnOtherCapture?: string
+  /**
+   * The DB's stated duration in ms, or absent when the wiki states none / states "Instant".
+   *
+   * ONE READER TODAY, and it is a COOLDOWN rather than a display (JOS-318): the `healsOverTime`
+   * suggestion fires on a tick line that repeats every six seconds for the whole duration, so its
+   * def is authored with a cooldown of the spell's own duration and one cast makes one sound. The
+   * figure is the wiki's and is a FLOOR in this app (spellCorrectionsList.ts's WRONG NUMBER note),
+   * which is the right direction for a cooldown: it can let a re-cast through early, never swallow
+   * one late.
+   */
+  durationMs?: number
   /** How often the buffs model has observed this spell (land→fade sample count `n`); 0 = never. */
   usageCount: number
   /**

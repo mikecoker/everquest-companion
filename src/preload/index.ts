@@ -1,8 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import { windowsApi } from './windows'
+import { plannerApi } from './planner'
 import { rosterApi } from './roster'
 import { soundsBridge } from './sounds'
+// "What IS this" — the spell/item/mob lookups, split out at the 400-line ceiling (preload/knowledge.ts).
+import { knowledgeBridge } from './knowledge'
+// The log-stream pushes — line / character rebuild / quiet-switch offer (preload/logStream.ts).
+import { logStreamBridge } from './logStream'
 import type {
   AlertDef,
   AlertPrefs,
@@ -13,6 +18,7 @@ import type {
   FeedReport,
   ItemKnowledge,
   LogLine,
+  LogSwitchNudge,
   LootEvent,
   MobKnowledge,
   ModuleDelta,
@@ -31,6 +37,7 @@ import type {
   SpeechSayResult,
   SpeechVoice,
   SpellCatalog,
+  UpdateStatus,
   UserSound,
   UserSoundImportResult,
   UserSoundRemoveResult,
@@ -38,13 +45,8 @@ import type {
 } from '../shared/types'
 import type { CombatSnapshot, FightSearchResult, SnapshotOpts } from '../shared/combat'
 import type { ClassAbbr, ComboDelta, ComboSnap } from '../shared/classCombo'
-// "What's new at this level" (docs/plans/levelup-whats-new.md) — the unlock dataset rides the
-// spell-catalog channel with a flag; see the handler in src/main/ipc/knowledge.ts.
-import type { LevelUnlockData } from '../shared/levelUnlocks'
-// The exaltation planner's model (docs/plans/exaltation-planner.md §3.1) — one definition for
-// main (which builds the donor rows), this bridge, and the renderer that edits the plans.
-import type { ExaltPlan, PlannerDonor, PlannerItemHit } from '../shared/planner/types'
-import type { PlannerInventory } from '../shared/planner/inventorySlots'
+// The level-unlock and planner types moved with their methods: knowledge.ts (JOS-293) carries
+// the spell/item/mob/unlock lookups, planner.ts (JOS-285) the exaltation + gear reads.
 import type { CharacterSheet } from '../shared/characterSheet'
 // The `/outputfile` registry's one IPC shape (JOS-44) — command, why-clause, and the dump's own
 // mtime, per kind. Every surface fed by an export command reads this and nothing else.
@@ -57,7 +59,6 @@ import type {
   MapSearchOpts,
   ZoneShort
 } from '../shared/maps'
-import type { UpdateStatus } from '../shared/types'
 // Presence-driven prefs live beside their normalizers, not in shared/types.ts — see the note at
 // the bottom of that file.
 import type { CursorRingPrefs, OverlayAutoHidePrefs } from '../shared/presencePrefs'
@@ -65,8 +66,18 @@ import type { ShareApplyResult, SharePreview } from '../shared/profiles'
 import type {
   FeedbackDraft,
   FeedbackEnv,
+  // The DUMP preview shape (JOS-296) is taken from the shared contract rather than re-declared
+  // here, unlike its slice sibling below. The slice's preload shape genuinely differs from the
+  // shared one (main adds `windowMinutes`, the window it actually used); the dump's does not, and
+  // a second hand-written copy of an identical shape is a shape that will eventually disagree
+  // with itself.
+  FeedbackInventoryPreview,
+  /** The achievements dump's preview (JOS-441), taken from the contract for the same reason. */
+  FeedbackAchievementsPreview,
   LogSliceMeta,
-  SubmitErrorCode
+  FeedbackContext,
+  SubmitErrorCode,
+  SubmitResult as SharedSubmitResult
 } from '../shared/feedback'
 // Usage analytics (docs/plans/usage-analytics.md). The event union is a SHARED contract — the
 // renderer builds values of it, main re-validates them at the handler, and wave A2's Lambda
@@ -84,6 +95,15 @@ import { perfBridge } from './perf'
 // The two graphics-compatibility switches (JOS-40), spread in below for the same file-size
 // reason as perfBridge. Shapes live beside their normalizer in shared/graphicsPrefs.ts.
 import { graphicsBridge } from './graphics'
+// The buff externals allowlist (JOS-140), spread in below for the same file-size reason. Shape
+// and normalizer live together in shared/buffTrust.ts.
+import { buffTrustBridge } from './buffTrust'
+import { respawnBridge } from './respawn'
+// The main window's text size (JOS-123), split out for the same file-mass reason. Its shapes are
+// a single number; the ladder and the normalizer live in shared/uiScale.ts.
+import { uiScaleBridge } from './uiScale'
+// …and the overlay-snapping preference (./overlaySnap.ts), likewise (JOS-217).
+import { overlaySnapBridge } from './overlaySnap'
 // The dev-only restart button's one method (JOS-61), split out for the same file-mass reason.
 import { devBridge } from './dev'
 // What's new (JOS-73): the one store key behind the release-notes panel and its teaser strip.
@@ -120,17 +140,14 @@ export interface ShareSaveResult {
 // `ShareSaveResult` above: main's `src/main/feedback/index.ts` names the same shapes on its own
 // side of the boundary, and neither tsconfig lets the renderer import that file.
 
-/** Reply of feedback:context — everything the dialog needs to render its header + gate Send. */
-export interface FeedbackContext {
-  env: FeedbackEnv
-  /** false when this build has no `FEEDBACK_API_URL` compiled in (every build before wave F2).
-   *  The dialog SAYS so rather than letting Send fail — see docs/plans/feedback-triage.md §6.2. */
-  endpointConfigured: boolean
-  /** Reports waiting in the offline queue. */
-  queued: number
-  /** Is there a character log to slice at all? */
-  logAvailable: boolean
-}
+/** Reply of feedback:context — TAKEN FROM THE SHARED CONTRACT, not re-declared.
+ *
+ *  The rule this file states for `FeedbackInventoryPreview` above, applied where it had been
+ *  ignored: main's `feedbackContext()` returns exactly this shape and the shared definition is
+ *  the one both sides already read, so a hand-written third copy here was a shape that would
+ *  eventually disagree with itself — and JOS-441 adding two fields to it was the third time all
+ *  three copies had to be edited in step. */
+export type { FeedbackContext } from '../shared/feedback'
 
 /**
  * Reply of feedback:buildSlice — the metadata plus a CAPPED preview. The gz BYTES never cross
@@ -144,27 +161,29 @@ export type FeedbackSlicePreview = LogSliceMeta & {
   windowMinutes: number
 }
 
-/** Reply of feedback:submit. NEVER a rejection: a network failure resolves with `queued:true`. */
+/** Reply of feedback:submit. NEVER a rejection: a network failure resolves with `queued:true`.
+ *
+ *  THE SHARED RESULT PLUS THE TWO DIALOG HINTS, expressed as that rather than retyped: `field`
+ *  lets an `invalid_payload` focus the offending input and `retryAfterSec` lets a
+ *  `quota_exceeded` say when, and neither is on the wire. Every other field — including each new
+ *  attachment's `…Uploaded` — comes from the contract and cannot drift from it. */
 export type SubmitResult =
-  | { ok: true; reportId: string; logUploaded: boolean }
-  | {
-      ok: false
-      error: SubmitErrorCode
-      message: string
-      queued: boolean
-      /** Set for `invalid_payload` so the dialog can focus the offending input. */
-      field?: string
-      /** Set for `quota_exceeded` — seconds until the daily counter rolls over. */
-      retryAfterSec?: number
-    }
+  | Extract<SharedSubmitResult, { ok: true }>
+  | (Extract<SharedSubmitResult, { ok: false }> & { field?: string; retryAfterSec?: number })
 
 /** Args of feedback:submit's second parameter — re-validated at the handler. */
 export interface SubmitOpts {
   attachLog: boolean
   windowMinutes: number
+  /** Attach the current `/outputfile inventory` dump (JOS-296). Default ON for bug reports —
+   *  an owner ruling, and a VISIBLE checkbox: this is per-report consent, never a silent send. */
+  attachInventory: boolean
+  /** Attach the current `/outputfile achievements` dump (JOS-441). Same default, same visible
+   *  checkbox, same per-report consent — one box per file, never one box for "my exports". */
+  attachAchievements: boolean
 }
 
-export type { CharacterRef, EqConfig, EqConfigResult, LogLine, LootEvent, ProgressState }
+export type { CharacterRef, EqConfig, EqConfigResult, LogLine, LogSwitchNudge, LootEvent, ProgressState }
 export type { ModuleDelta, ModuleSnapshot }
 export type { AlertDef, AlertPrefs, SoundData, SoundPack, SpellCatalog, ItemKnowledge, MobKnowledge }
 export type { UserSound, UserSoundImportResult, UserSoundRemoveResult }
@@ -181,7 +200,14 @@ export type { PackInstallProgress, PackMutationResult, PackPreviewList, Registry
 export type { AppFocus, UpdateStatus }
 export type { CursorRingPrefs, OverlayAutoHidePrefs }
 export type { ShareApplyResult, SharePreview }
-export type { FeedbackDraft, FeedbackEnv, LogSliceMeta, SubmitErrorCode }
+export type {
+  FeedbackAchievementsPreview,
+  FeedbackDraft,
+  FeedbackEnv,
+  FeedbackInventoryPreview,
+  LogSliceMeta,
+  SubmitErrorCode
+}
 export type { TelemetryEvent, TelemetryPayloadView, TelemetryPrefs }
 export type { PerfHudPrefs, PerfSample, StartupProfile }
 // Dev-only triage (above): re-exported for the same reason every other payload shape is — a
@@ -245,6 +271,23 @@ export interface RendererErrorReport {
   message: string
   stack?: string
   source: string
+  /**
+   * The error's own NAME (`TypeError`, `RangeError`), when the thrown value had one (JOS-100).
+   *
+   * It used to be folded into `message` and lost, which cost the error REPORT its most useful
+   * grouping input — `errorFingerprint` is `hash(name + top frames)`, and every renderer error
+   * arriving as `Error` would have collapsed distinct bugs in one function into one issue.
+   */
+  name?: string
+  /**
+   * Which tab was open. Main cannot know this — it is the renderer's own state — and a
+   * main-process error therefore reports the last view a window mentioned, or `unknown`.
+   *
+   * IT IS UNTRUSTED, like every renderer-supplied string: `noteCurrentView` checks it against
+   * the closed view enum before storing it, because it is kept BETWEEN calls and an unchecked
+   * value would poison every later report, including main-process ones.
+   */
+  view?: string
 }
 
 const api = {
@@ -253,6 +296,13 @@ const api = {
   ...perfBridge,
   // …and the two graphics-compatibility switches (./graphics.ts), for the same reason.
   ...graphicsBridge,
+  // …and the buff externals allowlist (./buffTrust.ts), likewise.
+  ...buffTrustBridge,
+  ...respawnBridge,
+  // …and the main window's text size (./uiScale.ts), likewise.
+  ...uiScaleBridge,
+  // …and the overlay-snapping switch (./overlaySnap.ts), likewise.
+  ...overlaySnapBridge,
   // …and `restartApp` (./dev.ts), whose handler refuses in a packaged build.
   ...devBridge,
   // …and the two what's-new methods (./releaseNotes.ts), for the same file-size reason.
@@ -308,8 +358,20 @@ const api = {
    * and null means the command has never been run here.
    */
   outputsStatus: (): Promise<OutputFileStatus[]> => ipcRenderer.invoke(IPC.outputsStatus),
-  setQuestComplete: (questKey: string, complete: boolean): Promise<ProgressState> =>
-    ipcRenderer.invoke(IPC.setQuestComplete, questKey, complete),
+  /**
+   * State this quest's turn-ins: the epoch-ms instants it was handed in, ascending (JOS-131).
+   * An empty list means "never turned in" and clears a pre-JOS-131 completion too. Main
+   * sanitizes the list before it is persisted.
+   */
+  setQuestTurnIns: (questKey: string, instants: number[]): Promise<ProgressState> =>
+    ipcRenderer.invoke(IPC.setQuestTurnIns, questKey, instants),
+  /**
+   * State ONE item's held count by hand, or take the statement back with `count: null` (JOS-186).
+   * `key` is the normalized counting key; `name` is only ever a spelling. Main dates the statement
+   * and sanitizes it (shared/itemOverrides.ts owns both rules).
+   */
+  setItemOverride: (key: string, name: string, count: number | null): Promise<ProgressState> =>
+    ipcRenderer.invoke(IPC.setItemOverride, key, name, count),
   getCombatSnapshot: (opts: SnapshotOpts): Promise<CombatSnapshot> =>
     ipcRenderer.invoke(IPC.getCombatSnapshot, opts),
   /** Fuzzy-search the whole fight history + the live fight by name/zone (Task #61). An
@@ -336,17 +398,8 @@ const api = {
     ipcRenderer.invoke(IPC.setAlertPrefs, prefs),
   /** Sound packs, the openpeon registry and the user's own imports — preload/sounds.ts. */
   ...soundsBridge,
-  /** Suggested-alerts wizard (Task #38): the searchable spell catalog + live usage. */
-  getSpellCatalog: (): Promise<SpellCatalog> => ipcRenderer.invoke(IPC.spellsCatalog),
-  /**
-   * "What's new at this level" (docs/plans/levelup-whats-new.md): every (class, level) unlock the
-   * committed DBs state — spells from spells.json, skills/discs/innates from classes.json.
-   *
-   * The SAME channel as the catalog above, with a flag, because shared/ipc.ts belonged to a
-   * concurrent wave the day this landed. Two questions of one door, both about the spell DB; the
-   * flag is re-validated in main. A dedicated channel is the right shape and is three lines away.
-   */
-  getLevelUnlocks: (): Promise<LevelUnlockData> => ipcRenderer.invoke(IPC.spellsCatalog, { unlocks: true }),
+  /** "What IS this" — spell / item / mob lookups, and the spell catalog: preload/knowledge.ts. */
+  ...knowledgeBridge,
 
   // ---- voice alerts / TTS (docs/plans/voice-alerts.md §3) ----
   // The 'system' tier needs NOTHING here: Chromium's `speechSynthesis` is already in the
@@ -384,46 +437,26 @@ const api = {
   setVoicePrefs: (prefs: VoicePrefs): Promise<VoicePrefs> =>
     ipcRenderer.invoke(IPC.voicePrefsSet, prefs),
 
-  /** Item knowledge (Task #53): "what's this lore/quest item for" — local posky-first,
-   *  then a cached, politely-throttled wiki lookup. Never rejects (degrades to a
-   *  cached-negative/offline record that still carries local posky associations). */
-  lookupItem: (name: string): Promise<ItemKnowledge> => ipcRenderer.invoke(IPC.itemsLookup, name),
+  // ---- the planner's slice, in its own file (src/preload/planner.ts) ----
+  // The exaltation planner's four reads + one write and the Gear tab's two reads plus its own
+  // set read/write pair (JOS-286). Split out
+  // under the same rule roster.ts/windows.ts/perf.ts state: this file is AT the measured
+  // 400-code-line ceiling, and phase 4 (JOS-285) needed one more method than it had room for.
+  // (The item/mob lookups live in knowledge.ts beside the spell lookups — JOS-293's split.)
+  ...plannerApi,
 
-  /** Mob knowledge (Task #63): "what does this thing drop" — your own loot history + the local
-   *  quest catalog first, then a cached, politely-throttled wiki lookup. Never rejects. */
-  lookupMob: (name: string): Promise<MobKnowledge> => ipcRenderer.invoke(IPC.mobsLookup, name),
-
-  // ---- exaltation planner (docs/plans/exaltation-planner.md §4.1, §6) ----
-  /** Every effect the committed item corpus states, one row per (item, effect) — ~1.5k rows,
-   *  built lazily in main and memoized there. Fetch ONCE and cache: it is derived from bytes
-   *  compiled into the bundle, so it cannot change while the app runs. */
-  plannerDonors: (): Promise<PlannerDonor[]> => ipcRenderer.invoke(IPC.plannerDonors),
-  /** Substring search over item NAMES for the Board's host picker (prefix hits first, then the
-   *  shortest name; capped at 50). An empty query resolves to no hits. */
-  plannerSearchItems: (query: string): Promise<PlannerItemHit[]> =>
-    ipcRenderer.invoke(IPC.plannerSearchItems, query),
-  /** What the active character is WEARING, from their newest `/outputfile inventory` dump —
-   *  `null` when no dump exists. Re-ask on `onInventoryReload` and the tab fills itself the
-   *  moment the command is typed in game. */
-  plannerInventory: (): Promise<PlannerInventory | null> => ipcRenderer.invoke(IPC.plannerInventory),
   // ---- character sheet (JOS-45) ----
-  /** The armory grid + the gear sum for the active character, from their newest
-   *  `/outputfile inventory` dump; `null` when no dump exists.
+  /** The armory grid, the gear sum and the carry-all ledger for the active character, from their
+   *  newest `/outputfile inventory` dump; `null` when no dump exists.
    *
-   *  UNLIKE EVERY OTHER METHOD HERE, THIS ONE CAN REJECT — and that is the design. The handler
-   *  behind it is registered only when `UNRELEASED` (src/main/unreleased.ts) is true, so in a
-   *  packaged build there is nothing on the other side and the invoke fails with Electron's own
-   *  "No handler registered for 'character:sheet'". The bridge is a door; a shipped app has no
-   *  renderer code to open it (the surface is stripped) and no handler if something tried.
-   *  Same shape as the `triage*` methods above. */
+   *  IT USED TO BE THE ONE METHOD HERE THAT COULD REJECT, and JOS-327 ended that: the handler was
+   *  registered only when `UNRELEASED` (src/main/unreleased.ts) was true, so a packaged build had
+   *  nothing on the other side and the invoke failed with Electron's own "No handler registered
+   *  for 'character:sheet'". The owner released the tab; the handler is unconditional. The
+   *  renderer's read still tolerates a rejection (features/character/useCharacterSheet.ts) — a
+   *  transport that answers `null` for "no dump" has no business turning anything into a red box —
+   *  but nothing is expected to produce one now. */
   characterSheet: (): Promise<CharacterSheet | null> => ipcRenderer.invoke(IPC.characterSheet),
-
-  /** The active character's saved exaltation sets — `[]` when it has none. */
-  getExaltPlans: (): Promise<ExaltPlan[]> => ipcRenderer.invoke(IPC.plannerGetPlans),
-  /** Replace the whole set list for the active character. Main re-validates every field against
-   *  the closed slot/socket/class allowlists and silently drops what does not fit. */
-  setExaltPlans: (plans: ExaltPlan[]): Promise<void> =>
-    ipcRenderer.invoke(IPC.plannerSetPlans, plans),
 
   /** Report a renderer-detected event into the live event feed (Task #59) — today only quest
    *  completions, which only the renderer's posky/turn-in detector can see. Fire-and-forget;
@@ -506,16 +539,10 @@ const api = {
     ipcRenderer.on(IPC.onInventoryReload, listener)
     return () => ipcRenderer.removeListener(IPC.onInventoryReload, listener)
   },
-  onLine: (cb: (line: LogLine) => void): (() => void) => {
-    const listener = (_e: unknown, line: LogLine): void => cb(line)
-    ipcRenderer.on(IPC.onLine, listener)
-    return () => ipcRenderer.removeListener(IPC.onLine, listener)
-  },
-  onCharacter: (cb: (c: CharacterRef | null) => void): (() => void) => {
-    const listener = (_e: unknown, c: CharacterRef | null): void => cb(c)
-    ipcRenderer.on(IPC.onCharacter, listener)
-    return () => ipcRenderer.removeListener(IPC.onCharacter, listener)
-  },
+  // The three log-stream pushes — each parsed line, the character rebuild, and the quiet-switch
+  // offer (./logStream.ts). Spread rather than inlined for file size alone, exactly like the
+  // bridges above; on `window.eq` they are indistinguishable from the methods written out here.
+  ...logStreamBridge,
   onCombatActivity: (cb: () => void): (() => void) => {
     const listener = (): void => cb()
     ipcRenderer.on(IPC.onCombatActivity, listener)
@@ -530,6 +557,17 @@ const api = {
     const listener = (_e: unknown, focus: AppFocus): void => cb(focus)
     ipcRenderer.on(IPC.onFocusView, listener)
     return () => ipcRenderer.removeListener(IPC.onFocusView, listener)
+  },
+  /**
+   * The mouse's Back button was pressed in THIS window (JOS-201). No payload — the message is the
+   * press; what "back" means is the renderer's own question (src/renderer/src/appBack.tsx). Main
+   * only forwards a `browser-backward` app-command that arrived on the focused main window
+   * (src/main/appBack.ts), so nothing global and nothing from the game reaches here.
+   */
+  onAppBack: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IPC.onAppBack, listener)
+    return () => ipcRenderer.removeListener(IPC.onAppBack, listener)
   },
 
   // ---- auto-update (Task #27; reworked in Task #55) ----
@@ -573,6 +611,7 @@ const api = {
   setOverlayAutoHide: (patch: Partial<OverlayAutoHidePrefs>): Promise<OverlayAutoHidePrefs> =>
     ipcRenderer.invoke(IPC.overlayAutoHideSet, patch),
 
+
   // ---- clipboard ----
   /**
    * Put plain text on the OS clipboard; resolves to whether it was written.
@@ -602,6 +641,14 @@ const api = {
    *  that makes "you can see exactly what is sent" literally true, not a claim about a preview. */
   saveFeedbackSlice: (windowMinutes: number): Promise<ShareSaveResult> =>
     ipcRenderer.invoke(IPC.feedbackSaveSlice, windowMinutes),
+  /** Package the CURRENT `/outputfile inventory` dump and return its counts + a capped preview,
+   *  or the named reason there is none (JOS-296). NO ARGUMENT, on purpose: which file is read is
+   *  main's answer through the outputs registry, never a path the renderer supplies. */
+  buildFeedbackInventory: (): Promise<FeedbackInventoryPreview> =>
+    ipcRenderer.invoke(IPC.feedbackBuildInventory),
+  /** The same for the CURRENT `/outputfile achievements` dump (JOS-441), no argument either. */
+  buildFeedbackAchievements: (): Promise<FeedbackAchievementsPreview> =>
+    ipcRenderer.invoke(IPC.feedbackBuildAchievements),
   /** Submit. NEVER rejects: a network failure resolves `{ok:false, queued:true}` and the report
    *  is retried later; a 4xx resolves `{ok:false, queued:false}` and is not retried. */
   submitFeedback: (draft: FeedbackDraft, opts: SubmitOpts): Promise<SubmitResult> =>

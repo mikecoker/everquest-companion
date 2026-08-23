@@ -66,9 +66,17 @@ $outcome = 'error'
 $reportId = ''
 # The anonymous usage-analytics id the installed app minted for itself, echoed to the host.
 $analyticsId = ''
-# How long the second (plain) launch is left running. The flush cadence is 60 s, so this is two
-# ticks plus slack for a cold VM - the host still polls for five minutes on top.
-$telemetryDwellSec = 150
+# How long the second (plain) launch is left running, and it is the ONE number in this file that
+# is a function of the client's flush cadence - nothing leaves the machine except on a flush tick
+# (stopTelemetry writes sessionEnd to the ring, it does not POST), so a dwell shorter than one
+# tick makes this leg fail every single run.
+#
+# JOS-269 took the cadence 60 s -> 5 min. The old 150 s was two 60 s ticks plus slack; left alone
+# it would now catch ZERO ticks. This is ONE tick (300 s) plus 90 s of slack for a cold VM's
+# start-up and timer drift. Deliberately not two ticks: a second one would add ten minutes to
+# every release smoke to re-prove what the first already proved, and the host still polls on top
+# of this for the ingest + aggregate.
+$telemetryDwellSec = 390
 
 try {
   Log '=== everquest-companion post-release feedback smoke test (guest) ==='
@@ -236,7 +244,7 @@ try {
 
   Remove-Item Env:\EQ_SMOKE_FEEDBACK -ErrorAction SilentlyContinue
   $tele = Start-Process -FilePath $exe -PassThru
-  Log "telemetry: app relaunched (pid $($tele.Id)); leaving it up $telemetryDwellSec s for the 60 s flush"
+  Log "telemetry: app relaunched (pid $($tele.Id)); leaving it up $telemetryDwellSec s for the 5 min flush"
   Start-Sleep -Seconds $telemetryDwellSec
   $up = Get-Process -Id $tele.Id -ErrorAction SilentlyContinue
   if ($up) { Log 'PASS  telemetry-app-stayed-up' } else { Log 'FAIL  telemetry-app-stayed-up (it exited early)' }

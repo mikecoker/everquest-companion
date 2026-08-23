@@ -229,14 +229,17 @@ test('W36: the header, the list and the drill rows all light from the same ledge
   const zone = segment(eng, lastTs, 'zone')
   const s = procSummary(zone.procs)
 
-  // Hand-read: 23 poison Strike emotes + 27 cast-less Smiting Strike = 50 procs in the window.
+  // Hand-read: 23 poison Strike emotes + 27 cast-less Smiting Strike + 5 Finishing Blow = 55
+  // procs in the window. The five are JOS-437's: grepping W36 for `(Finishing Blow)` returns
+  // exactly those five of the player's own swings (W35's sixth is in the earlier zone session
+  // this replay primes with). They were happening here before and the panel did not count them.
   assert.equal(zone.procs.strikeCount, 23)
-  assert.equal(s.count, 50)
-  assert.match(s.header, /^50 procs · /)
+  assert.equal(s.count, 55)
+  assert.match(s.header, /^55 procs · /)
   assert.equal(hasProcActivity(zone.procs), true)
   // The list is ranked by count, and its counts add up to the header's number.
   const list = procListRows(zone.procs)
-  assert.equal(list.reduce((n, r) => n + r.count, 0), 50)
+  assert.equal(list.reduce((n, r) => n + r.count, 0), 55)
   for (let i = 1; i < list.length; i++) assert.ok(list[i - 1].count >= list[i].count, 'count desc')
 
   // THE DRILL. Three lanes carry damage — and THREE MORE carry only landing emotes (2026-08-04,
@@ -246,12 +249,17 @@ test('W36: the header, the list and the drill rows all light from the same ledge
   // the six now learns the lane's rate. The five weapon lanes and the one spell the player
   // actually CAST (Wrath — it has a cast line, so procDetect scores it no proc) stay
   // unannotated.
+  // The two lanes carrying `· proc` are the two the CAST-LESS detector judged (JOS-167 names
+  // the lane after its origin): Asp Venom Strike and Smiting Strike both arrive as
+  // `dtype: 'spell'` damage with no cast line. Blood Siphon Strike parses as a DoT (ineligible,
+  // see the w41 header) and the three damage-less Strikes have no damage row at all — they are
+  // grafted from the emote ledger — so none of the four is renamed.
   const rows = annotatedRows(zone)
   assert.deepEqual(sortedKeys(rows), [
-    'Asp Venom Strike',
+    'Asp Venom Strike · proc',
     'Befuddling Strike',
     'Blood Siphon Strike',
-    'Smiting Strike',
+    'Smiting Strike · proc',
     'Stunning Strike',
     'Weakening Strike'
   ])
@@ -311,14 +319,14 @@ test('W41: the venom row learns its rate; the slow lane has no row to learn one'
   // Asp Venom Strike deals damage (2 hits, 106) so the meter has a row for it, and the row now
   // carries the LANE's rate — the ambiguous `Asp Venom Strike / Cobra Venom Strike` lane, whose
   // count is exact and whose name is not.
-  const asp = procAnnotationFor(procTagIndex(zone.procs.procSkills), 'Asp Venom Strike')
+  const asp = procAnnotationFor(procTagIndex(zone.procs.procSkills), 'Asp Venom Strike · proc')
   assert.match(asp?.text ?? '', /^proc · /)
   assert.match(asp?.hint ?? '', /Asp Venom Strike \/ Cobra Venom Strike/)
   assert.deepEqual(sortedKeys(rows), [
-    'Asp Venom Strike',
+    'Asp Venom Strike · proc',
     'Befuddling Strike',
     'Blood Siphon Strike',
-    'Smiting Strike',
+    'Smiting Strike · proc',
     'Stunning Strike',
     'Weakening Strike'
   ])
@@ -356,7 +364,12 @@ test('W38: the merged Slay Undead row learns the slay lane rate; no poison anywh
   // the drill merges them into ONE row named after the lane. That merged row is what carries
   // the rate — the weapon rows underneath it are mostly ordinary swings and must not.
   const rows = annotatedRows(zone)
-  assert.deepEqual(sortedKeys(rows), ['Condemnation of Nife', 'Dismiss Undead', 'Slay Undead', 'Smiting Strike'])
+  assert.deepEqual(sortedKeys(rows), [
+    'Condemnation of Nife · proc',
+    'Dismiss Undead · proc',
+    'Slay Undead',
+    'Smiting Strike · proc'
+  ])
   assert.equal(rows.get('Melee'), undefined)
   assert.equal(rows.get('Backstab'), undefined)
 

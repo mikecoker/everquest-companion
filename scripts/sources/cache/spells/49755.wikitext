@@ -26,7 +26,7 @@
 
 | msg_cast_on_you = You have been charmed.
 | msg_cast_on_other = Someone  has been charmed.
-| msg_wears_off = You are no longer charmed.
+| msg_wears_off = Your beguile spell has worn off
 
 | where_to_obtain = 
 

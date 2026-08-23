@@ -6,9 +6,21 @@ import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { buildLevelUnlocks, isUnlocksRequest } from '../data/levelUnlocks'
 import { buildSpellCatalog } from '../data/spellDb'
+import { buildSpellDetail } from '../data/spellDetail'
 import { lookupItem } from '../itemLookup'
 import { lookupMob } from '../mobLookup'
 import { registry, spellDb } from '../pipeline'
+// THE CLIENT'S SPELL TABLE, READ AT THE HANDLER (JOS-396). `spellTableNow()` is the already-resolved
+// table or null — never a promise, so nothing here waits on a 38 MB parse. Reading it HERE, on every
+// invoke, is what makes the fallback lazy: the table lands on a worker some seconds into a cold
+// launch, and the next read after it lands is the one that carries the figures.
+import { spellTableNow } from '../resist/spellTable'
+import type { AlertsSnap } from '../../shared/alertTypes'
+import {
+  OBSERVED_SPELL_RANKS_MODULE_ID,
+  observedRankRow,
+  type ObservedSpellRanksSnap
+} from '../../shared/spellRanks'
 import type { BuffsSnap } from '../../shared/types'
 
 export function registerKnowledgeIpc(): void {
@@ -27,7 +39,7 @@ export function registerKnowledgeIpc(): void {
   // trusted, like every other renderer-supplied argument at a handler. A bare invoke — the
   // wizard's — still gets the wizard's catalog, unchanged and no larger than it was.
   ipcMain.handle(IPC.spellsCatalog, (_e, req: unknown) => {
-    if (isUnlocksRequest(req)) return buildLevelUnlocks()
+    if (isUnlocksRequest(req)) return buildLevelUnlocks(spellTableNow())
     const usage = new Map<string, number>()
     const lastSeen = new Map<string, number>()
     const snap = registry.get('buffs')?.snapshot()?.state as BuffsSnap | undefined
@@ -37,6 +49,38 @@ export function registerKnowledgeIpc(): void {
         if (stat.lastSeenMs != null) lastSeen.set(key, stat.lastSeenMs)
       }
     return buildSpellCatalog(spellDb, usage, lastSeen)
+  })
+
+  // ---- ONE spell, in full (JOS-293: the rich spell card) ----
+  // The deep read behind the hover card: every field the committed DB states for this name, the
+  // effect classes derived from its effect list, and the ranks of its line that a source names.
+  //
+  // THE RANKS COME FROM THE ALERTS MODULE, and that is the whole reason this handler is not a pure
+  // function of the DB. `AlertsSnap.spellLastCast` is the only rank-PRESERVING record in the app
+  // (the buffs model's keys are rank-folded), and the DB holds a single row for ~1,800 of its
+  // ~1,900 lines - so without it the card could never name the rank a spell replaces. Read
+  // exactly the way the catalog reads the buffs snapshot above: off the registry, never mutated,
+  // and an absent module simply means no observed ranks.
+  //
+  // The argument is a renderer string, so it is VALIDATED rather than trusted: anything that is
+  // not a string is answered with the same not-found record an unknown spell gets.
+  // AND THE MOTE RANK COMES FROM THE OBSERVED-RANK MODULE (JOS-447), read off the registry the same
+  // way. It is a SECOND rank source beside `spellLastCast` on purpose and they answer different
+  // questions: the alerts map names the rank display strings a lineage can list, while JOS-446's
+  // fold answers "the highest rank this character holds" over merges as well as casts - which is
+  // the number the `yours: VIII` pill already states, and therefore the number the at-rank figures
+  // beside it have to be read at, or the card would contradict itself.
+  ipcMain.handle(IPC.spellsDetail, (_e, name: unknown) => {
+    const snap = registry.get('alerts')?.snapshot()?.state as AlertsSnap | undefined
+    const observed = Object.keys(snap?.spellLastCast ?? {})
+    const wanted = typeof name === 'string' ? name : ''
+    const rankSnap = registry.get(OBSERVED_SPELL_RANKS_MODULE_ID)?.snapshot()?.state as
+      | ObservedSpellRanksSnap
+      | undefined
+    return buildSpellDetail(spellDb, wanted, observed, {
+      client: spellTableNow(),
+      rank: observedRankRow(rankSnap, wanted)?.rank
+    })
   })
 
   // ---- item knowledge ("what's this lore/quest item for", Task #53) ----

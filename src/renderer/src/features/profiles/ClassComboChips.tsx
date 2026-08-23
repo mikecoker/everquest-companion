@@ -15,14 +15,21 @@
 
 import type { JSX } from 'react'
 import { Chip, Stack } from '@mui/material'
-import { intervalConfidence, type ComboInterval, type ComboSlot } from '@shared/classCombo'
+import {
+  intervalConfidence,
+  type ComboInterval,
+  type ComboProvenance,
+  type ComboSlot
+} from '@shared/classCombo'
+import { loadoutUncertain } from '@shared/comboIndex'
 import {
   confidenceText,
   intervalProvenance,
   overruledText,
   provenanceLabel,
   slotKind,
-  slotLabel
+  slotLabel,
+  uncertainText
 } from './ClassComboLabels'
 import { Tooltip } from '../../lib/Tooltip'
 
@@ -31,9 +38,9 @@ const CHIP_SX = { height: 20 } as const
 /** Tooltip for one slot, stated as a fact about what the log did or did not name. */
 function slotTitle(slot: ComboSlot): string {
   const kind = slotKind(slot)
-  if (kind === 'resolved') return `${slot.candidates[0]} — ${provenanceLabel(slot.provenance)}.`
+  if (kind === 'resolved') return `${slot.candidates[0]} - ${provenanceLabel(slot.provenance)}.`
   if (kind === 'unknown') return 'Nothing in this range named a class for this slot.'
-  return `One of ${slot.candidates.join(', ')} — the log never named which.`
+  return `One of ${slot.candidates.join(', ')} - the log never named which.`
 }
 
 /** One slot. Colour carries the kind; the label carries the content. */
@@ -67,19 +74,28 @@ export function SlotChips({ slots }: { slots: readonly ComboSlot[] }): JSX.Eleme
   )
 }
 
-/** `inferred` / `stated by /who` / `you set this` — the state, never the process. */
+/**
+ * `inferred` / `stated by /who` / `you set this` — the state, never the process.
+ *
+ * THE INFERRED CASE NAMES THE WAY OUT (JOS-192, trigger report 01KZP6SDZJK6BPEWA4Z0MF5ANG). A
+ * loadout swap prints nothing, so an inferred trio can be a loadout the player has already left,
+ * and the whole of that report was that the surface showing it offered nothing to do about it.
+ * The two moves are one clause on the chip that already exists — no surface grows by a pixel for
+ * it (the Leveling tab's own layout budget at the app's minimum width is exactly zero: a single
+ * caption line there drew the timeslice control under a panel, and tests/e2e/leveling.e2e.mts
+ * says so) and every surface drawing a current loadout gets it at once.
+ */
+const PROVENANCE_TITLE: Record<ComboProvenance, string> = {
+  inferred:
+    'Read from the classes that show up in the log. Not the ones you are playing? A /who on yourself restates them, or correct the range on the Profile tab.',
+  who: 'Your own /who row named this loadout outright.',
+  user: 'You set this range yourself.'
+}
+
 export function ProvenanceChip({ interval }: { interval: ComboInterval }): JSX.Element {
   const p = intervalProvenance(interval)
   return (
-    <Tooltip
-      title={
-        p === 'inferred'
-          ? 'Read from the classes that show up in the log.'
-          : p === 'who'
-            ? 'Your own /who row named this loadout outright.'
-            : 'You set this range yourself.'
-      }
-    >
+    <Tooltip title={PROVENANCE_TITLE[p]}>
       <Chip
         size="small"
         variant="outlined"
@@ -110,6 +126,25 @@ export function LockedChip(): JSX.Element {
   return (
     <Tooltip title="You set this range.">
       <Chip size="small" variant="outlined" color="info" label="locked" sx={CHIP_SX} />
+    </Tooltip>
+  )
+}
+
+/**
+ * Shown only where the confidence gate is holding the row (JOS-239, `loadoutUncertain`).
+ *
+ * The roster refuses to name a loadout for these spans at all — a kill card is a claim about one
+ * moment and there is no honest trio to put over it. The history list is a different question ("what
+ * do we believe about each stretch, and where do I go to fix it"), so here the classes stay on
+ * screen beside the Edit button and the chip says not to trust them. Same gate, two truthful
+ * renderings of it.
+ */
+export function UncertainChip({ interval }: { interval: ComboInterval }): JSX.Element | null {
+  const text = uncertainText(interval)
+  if (!text || !loadoutUncertain(interval)) return null
+  return (
+    <Tooltip title={text}>
+      <Chip size="small" variant="outlined" color="warning" label="mixed loadouts" sx={CHIP_SX} />
     </Tooltip>
   )
 }

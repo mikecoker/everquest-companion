@@ -29,6 +29,14 @@
       "image": "https://wiki.project1999.com/images/Npc_master_yael.png"
     },
     {
+      "name": "Phinigel Autropos",
+      "category": "Open World",
+      "match": [
+        "Phinigel Autropos"
+      ],
+      "zone": "Kedge Keep"
+    },
+    {
       "name": "Cazic Thule",
       "category": "Plane of Fear",
       "match": [

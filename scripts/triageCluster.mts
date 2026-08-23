@@ -42,6 +42,12 @@ export interface TriageReport {
   spamScore: number
   receivedAt: number
   hasLog: boolean
+  /** Did the report DECLARE an inventory export (JOS-296)? The digest and `list` mark it, for
+   *  the same reason they mark the log: it says whether this report can be ANSWERED. */
+  hasInventory: boolean
+  /** Did the report DECLARE an achievements export (JOS-441)? On the ticket that built it, this
+   *  is THE column that says whether a class-unlock report can be answered at all. */
+  hasAchievements: boolean
   /** Text of a LOCALLY downloaded slice, when the caller has one. Never rendered. */
   logText?: string
 }
@@ -57,6 +63,11 @@ export interface Cluster {
   /** Every member on one appVersion (and more than one member) ⇒ read as a regression. */
   regression: boolean
   withLogs: number
+  /** How many members attached an inventory export (JOS-296) — beside `withLogs`, because
+   *  "can this cluster be answered" is now two numbers, not one. */
+  withInventory: number
+  /** …and how many attached an achievements export (JOS-441). Three numbers now. */
+  withAchievements: number
   label: string
 }
 
@@ -193,6 +204,8 @@ function summarize(members: TriageReport[], kind: Cluster['kind'], signature?: s
     versions,
     regression: members.length > 1 && versions.length === 1,
     withLogs: members.filter((m) => m.hasLog).length,
+    withInventory: members.filter((m) => m.hasInventory).length,
+    withAchievements: members.filter((m) => m.hasAchievements).length,
     label: label(named),
   }
 }
@@ -274,7 +287,13 @@ function isoDay(ms: number): string {
 export function digestLine(r: TriageReport): string {
   const text = r.description.replace(/\s+/g, ' ').trim()
   const head = `${r.reportId.slice(-6)} ${r.appVersion} ${r.platform} · `
-  const tail = `${r.hasLog ? ' · log ✔' : ''}${r.spamScore >= 40 ? ` · spam ${r.spamScore}` : ''}`
+  // `inv ✔` rides beside `log ✔` and in the same shape (JOS-296): present only when there is
+  // one, so a scan down the digest reads "which of these can I actually answer".
+  const tail =
+    (r.hasLog ? ' · log ✔' : '') +
+    (r.hasInventory ? ' · inv ✔' : '') +
+    (r.hasAchievements ? ' · ach ✔' : '') +
+    (r.spamScore >= 40 ? ` · spam ${r.spamScore}` : '')
   const room = Math.max(20, DIGEST_LINE_MAX - head.length - tail.length - 2)
   const body = text.length > room ? `${text.slice(0, room - 1)}…` : text
   return `${head}"${body}"${tail}`
@@ -309,7 +328,11 @@ function clusterBlock(c: Cluster, index: number): string[] {
       : `   Versions: ${c.versions.join(', ')}`,
   )
   const sig = c.signature ? ` · signature \`${c.signature}\`` : ''
-  lines.push(`   Logs: ${c.withLogs}/${c.reportIds.length} attached${sig}`)
+  lines.push(
+    `   Logs: ${c.withLogs}/${c.reportIds.length} attached · ` +
+      `Inventory: ${c.withInventory}/${c.reportIds.length} · ` +
+      `Achievements: ${c.withAchievements}/${c.reportIds.length}${sig}`,
+  )
   return lines
 }
 

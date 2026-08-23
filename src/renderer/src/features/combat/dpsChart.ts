@@ -33,6 +33,7 @@
 // width on a scrolling 2:00 window); the gain is that no vertex claims a time it does not stand for.
 
 import type { TimelineMarker, TimelineView } from '@shared/combat'
+import type { ChartLineKey } from './combatPrefs'
 import type { DpsSeries } from './dashboardData'
 
 export const CHART_W = 720
@@ -48,9 +49,11 @@ export const LIVE_WINDOW_MS = 120_000
 /** Everything the SVG needs, in chart coordinates. */
 export interface DpsChart {
   /** The OUTGOING curve — you + your pets + your group. The headline line, and the one the
-   *  hover dot follows. */
-  outLine: string
-  outArea: string
+   *  hover dot follows. `null` when the legend has it hidden (JOS-264), which is the same shape
+   *  the other three lines already used for "this fight had none" — so every line the SVG draws
+   *  is asked the same question, and there is no second way to be absent. */
+  outLine: string | null
+  outArea: string | null
   petLine: string | null
   /** Your group's own contribution under the outgoing line, drawn only when there is one
    *  (docs/plans/group-model.md) — the same treatment the pet line gets. */
@@ -65,8 +68,12 @@ export interface DpsChart {
   bucketMs: number
   /** the visible window is following `now` rather than showing the whole fight. */
   scrolling: boolean
-  /** peak outgoing rate WITHIN the visible window (what the header quotes). */
+  /** peak outgoing rate WITHIN the visible window (what the header quotes). It describes the
+   *  OUTGOING series whether or not that line is drawn, so the card stops quoting it when the
+   *  legend hides the line it is the peak of. */
   peakVis: number
+  /** the Y scale, taken from the DRAWN lines only (JOS-264) — hiding the headline curve zooms
+   *  what is left, which is most of the point of hiding it. */
   yMax: number
   /** first series bucket drawn (>0 only while a live window scrolls) and how many vertices the
    *  polylines carry — the drawn line's index domain, so a hover can find the curve at a cursor
@@ -107,9 +114,21 @@ export function bucketCenterMs(chart: DpsChart, i: number): number {
  * `t1` runs up to one bucket ahead of the fight's real duration — that is the honest statement of
  * "this sample is in progress", and it is stable, which the wall-clock right edge it replaced was
  * not (it re-scaled every marker on every snapshot; see the header).
+ *
+ * `hidden` is the legend's hidden set (JOS-264). It changes exactly two things — which line
+ * strings come back and what the Y scale is measured over — and NOTHING about the time base: the
+ * axis, the markers and the hover all keep the same X they had, so hiding a line moves no tick
+ * and re-times no tooltip. Marker kinds appear in the same set but are filtered where they are
+ * drawn, because their legend entries are built from the markers themselves and hiding one must
+ * not delete the way back.
  */
-export function buildDpsChart(series: DpsSeries | null, live: boolean): DpsChart | null {
+export function buildDpsChart(
+  series: DpsSeries | null,
+  live: boolean,
+  hidden: readonly ChartLineKey[] = []
+): DpsChart | null {
   if (!series?.hasAny) return null
+  const hides = (k: ChartLineKey): boolean => hidden.includes(k)
   const { n, bucketMs } = series
   const scrolling = live && n * bucketMs > LIVE_WINDOW_MS
   const i0 = scrolling ? Math.max(0, n - Math.ceil(LIVE_WINDOW_MS / bucketMs)) : 0
@@ -124,22 +143,41 @@ export function buildDpsChart(series: DpsSeries | null, live: boolean): DpsChart
   if (single) idx.push(i0)
   let yMax = 1
   let peakVis = 0
+  // A hidden line contributes 0 to the scale and nothing else changes: the PEAK is the outgoing
+  // series' own fact, measured whether or not it is drawn (the card decides whether to quote it),
+  // while the SCALE is the drawn lines'. With the headline curve hidden, a group line at a tenth
+  // of it must fill the plot rather than hug the floor — and the y-max readout in the corner is
+  // right there saying what the new ceiling is. Pet and group are components of `out`, so with
+  // everything visible this is the same number it always was.
+  const scaled = (k: ChartLineKey, v: number): number => (hides(k) ? 0 : v)
   for (const i of idx) {
     const out = outAt(series, i)
     peakVis = Math.max(peakVis, out)
-    yMax = Math.max(yMax, out, series.inc[i])
+    yMax = Math.max(
+      yMax,
+      scaled('out', out),
+      scaled('pet', series.pet[i]),
+      scaled('group', series.group[i]),
+      scaled('inc', series.inc[i])
+    )
   }
   const x = (k: number): number => (single ? PAD_X + k * INNER_W : xInSpan(t0, t1, (i0 + k + 0.5) * bucketMs))
   const y = (v: number): number => yAt(yMax, v)
   const pts = (pick: (i: number) => number): string =>
     idx.map((i, k) => `${x(k).toFixed(1)},${y(pick(i)).toFixed(1)}`).join(' ')
-  const outLine = pts((i) => outAt(series, i))
+  /** One line's points, or null — because the fight never had it, or because it is hidden. */
+  const line = (k: ChartLineKey, has: boolean, pick: (i: number) => number): string | null =>
+    has && !hides(k) ? pts(pick) : null
+  const outLine = line('out', true, (i) => outAt(series, i))
   return {
     outLine,
-    outArea: `${x(0).toFixed(1)},${CHART_H - PAD_B} ${outLine} ${x(idx.length - 1).toFixed(1)},${CHART_H - PAD_B}`,
-    petLine: series.hasPet ? pts((i) => series.pet[i]) : null,
-    groupLine: series.hasGroup ? pts((i) => series.group[i]) : null,
-    incLine: series.hasInc ? pts((i) => series.inc[i]) : null,
+    outArea:
+      outLine === null
+        ? null
+        : `${x(0).toFixed(1)},${CHART_H - PAD_B} ${outLine} ${x(idx.length - 1).toFixed(1)},${CHART_H - PAD_B}`,
+    petLine: line('pet', series.hasPet, (i) => series.pet[i]),
+    groupLine: line('group', series.hasGroup, (i) => series.group[i]),
+    incLine: line('inc', series.hasInc, (i) => series.inc[i]),
     t0,
     t1,
     bucketMs,
@@ -236,4 +274,26 @@ export interface PlacedMarker {
 export function placeMarkers(tl: TimelineView | null, chart: DpsChart | null): PlacedMarker[] {
   if (!tl || !chart) return []
   return tl.markers.filter((m) => m.t >= chart.t0 && m.t <= chart.t1).map((m) => ({ m, x: xAtT(chart, m.t) }))
+}
+
+/**
+ * The ticks actually DRAWN, once the legend's hidden kinds are taken out (JOS-264).
+ *
+ * A SECOND list rather than a narrower `placeMarkers`: the legend lists one entry per marker kind
+ * the fight HAS, and building it from the filtered set would delete the entry that switches the
+ * kind back on — hidden would mean gone, which is the one thing this feature must not mean. So
+ * the placed set feeds the legend, this one feeds the ticks AND the hover, and the two can never
+ * disagree about which ticks a cursor may find because they read the same function.
+ */
+export function drawnMarkers(
+  markers: readonly PlacedMarker[],
+  hidden: readonly ChartLineKey[]
+): readonly PlacedMarker[] {
+  return hidden.length === 0 ? markers : markers.filter(({ m }) => !hidden.includes(m.kind))
+}
+
+/** True when the plot has at least one line left on it. All four hidden is a legal state the card
+ *  answers with an empty note (and its legend, which is the way back). */
+export function hasDrawnLine(chart: DpsChart): boolean {
+  return chart.outLine !== null || chart.petLine !== null || chart.groupLine !== null || chart.incLine !== null
 }

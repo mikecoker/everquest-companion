@@ -6,11 +6,12 @@
 // tests/combatRingTruncation.test.mts).
 
 import { sourceViews } from './sourceViews'
+import { buildDefenseView } from './defenseViews'
 import { takenAnnotations } from './roundViews'
 import { sumHeal } from './aggregate'
 import { buildHealingView } from './healing'
 import { buildProcsView, effectLandings } from './procViews'
-import { zoneActiveSec, zoneDurationSec } from './lifecycle'
+import { zoneActiveSec, zoneDurationSec, zoneSessionWord } from './lifecycle'
 import { ACTIVE_MS, TIMELINE_BUDGET, encounterName, type Encounter, type TimelineRaw } from './encounter'
 import { CATEGORY_ORDER } from '../../shared/combat'
 import type { Agg } from './aggregate'
@@ -52,7 +53,7 @@ export function buildSelected(st: EngineState, id: string, now: number): Segment
   if (id === 'zone') {
     const zDur = zoneDurationSec(st)
     return buildView({
-      id: 'zone', kind: 'zone', name: `${st.zone ?? 'Session'} — overall`, zone: st.zone,
+      id: 'zone', kind: 'zone', name: `${st.zone ?? 'Session'} - overall`, zone: st.zone,
       agg: st.zoneAgg, durationSec: zDur, activeSec: Math.min(zDur, zoneActiveSec(st)), active: false,
       st, startTs: st.zoneStartTs, endTs: st.zoneLastTs
     })
@@ -63,7 +64,8 @@ export function buildSelected(st: EngineState, id: string, now: number): Segment
     const zDur = Math.max(1, zs.finalizedMs / 1000)
     const zActive = Math.min(zDur, zs.activeMs / 1000)
     return buildView({
-      id: zs.id, kind: 'zone', name: `${zs.zone} — overall`, zone: zs.zone,
+      // `overall` or `session`, decided by what CLOSED the stay (JOS-322 — lifecycle.zoneSessionWord).
+      id: zs.id, kind: 'zone', name: `${zs.zone} - ${zoneSessionWord(zs.closedBy)}`, zone: zs.zone,
       agg: zs.agg, durationSec: zDur, activeSec: zActive, active: false,
       st, startTs: zs.startTs, endTs: zs.lastTs
     })
@@ -90,7 +92,8 @@ function buildView(spec: ViewSpec): SegmentView {
   // RIPOSTE/RAMPAGE TAKEN (attack-round stats): booked on the MOB that swung the annotated
   // counter, read here from the other end and grafted onto your row. It can only be resolved
   // where both maps are in scope, which is exactly here.
-  const entities = sourceViews(agg.out, durationSec, effectLandings(agg), takenAnnotations(agg.inc))
+  const taken = takenAnnotations(agg.inc)
+  const entities = sourceViews(agg.out, durationSec, effectLandings(agg), taken)
   const incoming = sourceViews(agg.inc, durationSec)
   const outTotal = entities.reduce((s, e) => s + e.total, 0)
   const inTotal = incoming.reduce((s, e) => s + e.total, 0)
@@ -112,6 +115,10 @@ function buildView(spec: ViewSpec): SegmentView {
     inTotal,
     inDps: inTotal / durationSec,
     incoming,
+    // YOUR DEFENCE (JOS-354) — the incoming rows read from the other end, plus your own
+    // `(Riposte)` counter-swings. Built from the SAME frozen aggregate as the bars above it, so a
+    // finalized zone session (which keeps no event ring at all) reports it exactly.
+    defense: buildDefenseView(agg.inc, agg.out.get('you'), taken.riposte),
     enemyHealTotal: sumHeal(agg.enemyHeal),
     incomingHealTotal: incomingHealers.reduce((s, h) => s + h.total, 0),
     incomingHealers,
