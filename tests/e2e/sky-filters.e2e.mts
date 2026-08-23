@@ -74,8 +74,7 @@ import {
   failures,
   reportRun,
   settle,
-  settleGone,
-  settleStable
+  settleGone, settleStable
 } from './appHarness.mjs'
 import { mainWindow, makeUserData, removeUserData } from './appWindow.mjs'
 import { launchOnFixture, stageFixture } from './logFixture.mjs'
