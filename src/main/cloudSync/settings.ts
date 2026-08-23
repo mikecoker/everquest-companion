@@ -2,7 +2,7 @@ import { safeStorage } from 'electron'
 import type { CloudSyncStatus } from '../../shared/cloudSyncPrefs'
 import { IPC } from '../../shared/ipc'
 import { E2E } from '../e2e'
-import { getStoredCloudSyncPrefs, setStoredCloudSyncPrefs } from '../store'
+import { getStoredCloudSyncPrefs, setStoredCloudSyncPrefs } from '../storeCloudSync'
 import { sendToMain } from '../windows'
 import type { CloudSyncSecretCodec } from './secretStorage'
 import {

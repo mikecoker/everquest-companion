@@ -42,11 +42,6 @@ import { applyTimerOverlayKnobs } from '../shared/buffTimers'
 import { normalizeXpRows } from '../shared/xpOverlay'
 import { isSliceId } from '../shared/timeslice'
 import type { ComboCorrection } from '../shared/classCombo'
-import { normalizeStoredCloudSyncPrefs, type StoredCloudSyncPrefs } from './cloudSync/settingsControl'
-// The exaltation planner's sets. The validator is main-side and pure; it runs on the way OUT as
-// well as in (see the accessors below), so a hand-edited store cannot poison the renderer.
-import { sanitizeExaltPlans } from './planner/validate'
-import type { ExaltPlan } from '../shared/planner/types'
 import {
   ALERT_SOUND_MIGRATION_VERSION,
   DEFAULT_ALERT_PACK_ID,
@@ -956,13 +951,4 @@ export function setLastSeenNotesVersion(version: string | null): string | null {
   if (version !== null && /^\d+\.\d+\.\d+$/.test(version)) store.set('lastSeenNotesVersion', version)
   else store.delete('lastSeenNotesVersion')
   return getLastSeenNotesVersion()
-}
-
-/** Main-only cloud settings. Missing/malformed values always collapse to disabled. */
-export function getStoredCloudSyncPrefs(): StoredCloudSyncPrefs {
-  return normalizeStoredCloudSyncPrefs(store.get('cloudSync'))
-}
-
-export function setStoredCloudSyncPrefs(prefs: StoredCloudSyncPrefs): void {
-  store.set('cloudSync', prefs)
 }
